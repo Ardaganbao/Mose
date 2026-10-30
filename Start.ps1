@@ -32,6 +32,10 @@ param(
     [Parameter()]
     [switch]$Gui,
 
+    # Enter or change the client of this computer (servers and credentials) after updating.
+    [Parameter()]
+    [switch]$Configure,
+
     # Set internally when the script restarts after all updates were downloaded.
     [Parameter(DontShow)]
     [switch]$UpdatesApplied,
@@ -213,8 +217,9 @@ else {
         Write-Host ""
     }
     Write-Host "Welcome to MOSE (version $versionLabel), $env:USERNAME!" -ForegroundColor Cyan
-    Write-Host "This keeps the MOSE report scripts up to date from GitHub and runs the reports turned on for this computer."
+    Write-Host "This keeps the MOSE report scripts up to date from GitHub and runs the report of the client configured on this computer."
     Write-Host ""
+    Write-Host "  .\Start.ps1 -Configure   Enter or change the client, its servers and credentials" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -235,9 +240,9 @@ else {
 $ApiBase = "https://api.github.com/repos/$Owner/$Repository"
 $Headers = @{ "User-Agent" = "PowerShell-Updater" }
 
-# The repository is private, so requests need a GitHub token with read access to it:
-# GITHUB_TOKEN, or the one saved by the one-liner or -SaveToken (kept out of the repository, see .gitignore).
-# A first run without one asks for it, since nothing can be downloaded without it.
+# A private repository needs a GitHub token with read access to it: GITHUB_TOKEN, or the one
+# saved by the one-liner, -GitHubToken or -SaveToken (kept out of the repository, see .gitignore).
+# A public one needs none, so a first run only asks for it when GitHub refuses the files without it.
 $TokenPath = Join-Path $PSScriptRoot "github-token.xml"
 if ($GitHubToken) {
     ConvertTo-SecureString -String $GitHubToken -AsPlainText -Force |
@@ -247,8 +252,13 @@ if ($GitHubToken) {
     [void]$PSBoundParameters.Remove("GitHubToken")
 }
 elseif (-not $SaveToken -and $FirstRun -and -not $env:GITHUB_TOKEN -and -not (Test-Path $TokenPath)) {
-    Write-Host "No GitHub token is saved in this folder yet. It needs read access to $Owner/$Repository (see README.md)." -ForegroundColor Yellow
-    $SaveToken = $true
+    try {
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$Owner/$Repository/$Branch/updater.config.json" -Method Head -UseBasicParsing -Headers $Headers | Out-Null
+    }
+    catch {
+        Write-Host "GitHub doesn't give the files without a token, so $Owner/$Repository is private. The token needs read access to it (see README.md)." -ForegroundColor Yellow
+        $SaveToken = $true
+    }
 }
 if ($SaveToken) {
     Read-Host -Prompt "GitHub token with read access to $Owner/$Repository" -AsSecureString |
@@ -407,32 +417,32 @@ if ($UpdateOnly) {
     return
 }
 
+if ($Configure) {
+    & (Join-Path $PSScriptRoot "Configure.ps1")
+    return
+}
+
 if ($Gui) {
     & (Join-Path $PSScriptRoot "Manager.ps1")
     return
 }
 
-# 3. Run every script in the config that is turned on; Manager.ps1 turns them on and off.
-#    Each computer reports on its own client, so a script stays off until it is turned on there.
+# 3. Run every script in the config unless it was turned off on this computer in Manager.ps1.
 Write-Host "Running scripts..." -ForegroundColor DarkGray
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
     throw "Required file not found: '$ConfigPath'. Run .\Start.ps1 again to download it."
 }
 $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
 $statePath = Join-Path $PSScriptRoot "scripts.local.json"
-$turnedOn = @()
+$turnedOff = @()
 if (Test-Path $statePath) {
-    $turnedOn = @((Get-Content -Path $statePath -Raw | ConvertFrom-Json).PSObject.Properties |
-        Where-Object { $_.Value } |
+    $turnedOff = @((Get-Content -Path $statePath -Raw | ConvertFrom-Json).PSObject.Properties |
+        Where-Object { -not $_.Value } |
         ForEach-Object { $_.Name })
 }
 
-if ($turnedOn.Count -eq 0) {
-    Write-Host "No report is turned on for this computer yet. Run .\Start.ps1 -Gui to choose one." -ForegroundColor Yellow
-}
-
 foreach ($name in $config.Scripts) {
-    if ($turnedOn -notcontains $name) {
+    if ($turnedOff -contains $name) {
         Write-Host "Skipped (turned off): $name"
         continue
     }

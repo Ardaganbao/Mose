@@ -17,14 +17,14 @@ $script:Log = ""
 $script:Shown = ""
 $script:Loading = $false
 
-# Each computer reports on its own client, so a script stays off until it is checked there.
-function Get-TurnedOnScripts {
+# A script runs unless it was unchecked on this computer.
+function Get-TurnedOffScripts {
     if (-not (Test-Path $StatePath)) {
         return @()
     }
 
     return @((Get-Content -Path $StatePath -Raw | ConvertFrom-Json).PSObject.Properties |
-        Where-Object { $_.Value } |
+        Where-Object { -not $_.Value } |
         ForEach-Object { $_.Name })
 }
 
@@ -39,7 +39,7 @@ function Save-ScriptState {
 
 function Import-ScriptList {
     $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
-    $turnedOn = Get-TurnedOnScripts
+    $turnedOff = Get-TurnedOffScripts
 
     $script:Loading = $true
     $list.Items.Clear()
@@ -48,7 +48,7 @@ function Import-ScriptList {
         $item = New-Object System.Windows.Forms.ListViewItem($name)
         $item.SubItems.Add("") | Out-Null
         $item.SubItems.Add("") | Out-Null
-        $item.Checked = $turnedOn -contains $name
+        $item.Checked = $turnedOff -notcontains $name
         $list.Items.Add($item) | Out-Null
     }
 
@@ -239,6 +239,11 @@ Add-Button "Run selected" {
 
 Add-Button "Run all turned on" {
     @($list.CheckedItems) | ForEach-Object { Start-ScriptItem $_ }
+}
+
+# Opens in its own window, like the reports, to ask for the servers and credentials.
+Add-Button "Configure client" {
+    Add-Job -Label "Configure client" -Path (Join-Path $PSScriptRoot "Configure.ps1")
 }
 
 Add-Button "Check for updates" {
