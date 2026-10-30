@@ -634,6 +634,10 @@ function Invoke-MetallicApi {
         elseif ($_.Exception.StatusCode) {
             $statusCode = [int]$_.Exception.StatusCode
         }
+        # An on-premises token can't be renewed here: it has to be replaced.
+        if ($statusCode -eq 401 -and $script:CommvaultMode -eq 'OnPrem') {
+            throw "Commvault refused the access token in secret '$($script:SecretObject.Name)' (401 Unauthorized) at $($requestParameters.Uri). If it expired or was revoked, create a new access token in Command Center, then run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again with the new token."
+        }
         if ($statusCode -ne 401 -or $script:CommvaultMode -ne 'Cloud') {
             throw
         }

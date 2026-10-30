@@ -11,6 +11,8 @@ param(
 # runs every module on its servers and writes <Client>_Report_<yyyy-MM-dd>.md.
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 hides progress bars to download faster; the modules show theirs.
+$ProgressPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'helper.ps1')
 
 Open-MoseVault
@@ -120,6 +122,7 @@ try {
 
     $report = New-Object System.Collections.Generic.List[string]
     $report.Add("# $($config.Client) report $(Get-Date -Format 'yyyy-MM-dd')")
+    $securityProtocol = [Net.ServicePointManager]::SecurityProtocol
 
     foreach ($module in $MoseModules.Keys) {
         foreach ($target in @($config.Targets | Where-Object { $_.Module -eq $module })) {
@@ -143,6 +146,10 @@ try {
             catch {
                 $report.Add("Collection failed: $($_.Exception.Message)")
                 Write-Warning "$title collection failed: $($_.Exception.Message)"
+            }
+            finally {
+                # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
+                [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
             }
         }
     }
