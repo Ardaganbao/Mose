@@ -20,6 +20,10 @@ param(
     [Parameter()]
     [switch]$SaveToken,
 
+    # Save this GitHub token for later runs instead of asking for it (e.g. when installing many computers).
+    [Parameter()]
+    [string]$GitHubToken,
+
     # Only update the files; don't run any script.
     [Parameter()]
     [switch]$UpdateOnly,
@@ -77,6 +81,11 @@ $versionLabel = "unknown"
 if ($InstalledCommit) {
     $versionLabel = $InstalledCommit.Substring(0, 7)
 }
+
+# A folder without the config has never been installed (e.g. Start.ps1 copied there by hand),
+# so everything is downloaded first, even with -SkipUpdate.
+$ConfigPath = Join-Path $PSScriptRoot "updater.config.json"
+$FirstRun = -not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)
 
 # onIT logo as pixels: T = teal, W = white, N = navy, . = background.
 # Each console line shows two pixel rows using half-block characters.
@@ -211,7 +220,10 @@ else {
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SaveToken   Replace the saved GitHub token" -ForegroundColor DarkGray
     Write-Host ""
-    if ($SkipUpdate) {
+    if ($FirstRun) {
+        Write-Host "First run in this folder: downloading every script from GitHub..." -ForegroundColor DarkGray
+    }
+    elseif ($SkipUpdate) {
         Write-Host "Update check skipped." -ForegroundColor DarkGray
     }
     else {
@@ -225,7 +237,19 @@ $Headers = @{ "User-Agent" = "PowerShell-Updater" }
 
 # The repository is private, so requests need a GitHub token with read access to it:
 # GITHUB_TOKEN, or the one saved by the one-liner or -SaveToken (kept out of the repository, see .gitignore).
+# A first run without one asks for it, since nothing can be downloaded without it.
 $TokenPath = Join-Path $PSScriptRoot "github-token.xml"
+if ($GitHubToken) {
+    ConvertTo-SecureString -String $GitHubToken -AsPlainText -Force |
+        Export-Clixml -Path $TokenPath
+    Write-Host "Saved the GitHub token to $TokenPath" -ForegroundColor Green
+    # Not passed again when the script restarts after updating itself.
+    [void]$PSBoundParameters.Remove("GitHubToken")
+}
+elseif (-not $SaveToken -and $FirstRun -and -not $env:GITHUB_TOKEN -and -not (Test-Path $TokenPath)) {
+    Write-Host "No GitHub token is saved in this folder yet. It needs read access to $Owner/$Repository (see README.md)." -ForegroundColor Yellow
+    $SaveToken = $true
+}
 if ($SaveToken) {
     Read-Host -Prompt "GitHub token with read access to $Owner/$Repository" -AsSecureString |
         Export-Clixml -Path $TokenPath
@@ -310,7 +334,7 @@ function Update-RepoFile {
     }
 }
 
-if (-not $SkipUpdate -and -not $UpdatesApplied) {
+if (-not $UpdatesApplied -and ($FirstRun -or -not $SkipUpdate)) {
     $restart = $false
 
     try {
@@ -333,9 +357,10 @@ if (-not $SkipUpdate -and -not $UpdatesApplied) {
         }
 
         # 1. Download every update first: this script, the config, then every file it lists.
-        $restart = -not $SelfUpdated -and (Update-RepoFile -Name (Split-Path -Leaf $PSCommandPath))
+        #    Named as in the repository, whose paths are case-sensitive (the file may be saved as start.ps1).
+        $restart = -not $SelfUpdated -and (Update-RepoFile -Name "Start.ps1")
         $configChanged = Update-RepoFile -Name "updater.config.json"
-        $config = Get-Content -Path (Join-Path $PSScriptRoot "updater.config.json") -Raw | ConvertFrom-Json
+        $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
         $changed = @($config.Files | Where-Object { Update-RepoFile -Name $_ })
 
         if (-not $restart -and -not $configChanged -and $changed.Count -eq 0) {
@@ -359,6 +384,10 @@ if (-not $SkipUpdate -and -not $UpdatesApplied) {
         Write-Host ""
     }
     catch {
+        # Without the config there is no local version to fall back on.
+        if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+            throw "Could not download the scripts from GitHub: $($_.Exception.Message) Check the GitHub token (replace it with: .\Start.ps1 -SaveToken), then run Start.ps1 again."
+        }
         Write-Warning "Update check failed, running the local version: $($_.Exception.Message)"
         if (-not $token) {
             Write-Warning "No GitHub token is saved on this computer. Save one with: .\Start.ps1 -SaveToken"
@@ -386,7 +415,10 @@ if ($Gui) {
 # 3. Run every script in the config that is turned on; Manager.ps1 turns them on and off.
 #    Each computer reports on its own client, so a script stays off until it is turned on there.
 Write-Host "Running scripts..." -ForegroundColor DarkGray
-$config = Get-Content -Path (Join-Path $PSScriptRoot "updater.config.json") -Raw | ConvertFrom-Json
+if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+    throw "Required file not found: '$ConfigPath'. Run .\Start.ps1 again to download it."
+}
+$config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
 $statePath = Join-Path $PSScriptRoot "scripts.local.json"
 $turnedOn = @()
 if (Test-Path $statePath) {
