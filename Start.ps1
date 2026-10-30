@@ -128,7 +128,10 @@ $LogoPixels = @(
 # Brand colours as "R;G;B" for 24-bit console colour codes.
 $LogoColors = @{ T = "108;192;194"; W = "255;255;255"; N = "26;43;73" }
 
-# Plain-text logo for consoles without 24-bit colour (e.g. PowerShell ISE).
+# The nearest of the 16 console colours, for consoles without 24-bit colour (e.g. PowerShell ISE).
+$LogoConsoleColors = @{ T = "DarkCyan"; W = "White"; N = "DarkBlue" }
+
+# Plain-text logo for output written to a file or a pipe.
 $AsciiLogo = @(
     '    __________________________________________ ',
     '   /                         _____________    \',
@@ -141,11 +144,14 @@ $AsciiLogo = @(
 )
 
 function Write-Logo {
-    $supportsColor = -not [Console]::IsOutputRedirected -and
-        $Host.UI.PSObject.Properties["SupportsVirtualTerminal"] -and $Host.UI.SupportsVirtualTerminal
+    $console = -not [Console]::IsOutputRedirected
 
-    if ($supportsColor) {
+    if ($console -and $Host.UI.PSObject.Properties["SupportsVirtualTerminal"] -and $Host.UI.SupportsVirtualTerminal) {
         Write-PixelLogo
+    }
+    elseif ($console -or $Host.Name -eq "Windows PowerShell ISE Host") {
+        # PowerShell ISE has no console, so it looks redirected.
+        Write-PixelLogo -ConsoleColors
     }
     else {
         Write-AsciiLogo
@@ -153,37 +159,71 @@ function Write-Logo {
 }
 
 function Write-PixelLogo {
+    param([switch]$ConsoleColors)
+
     # Characters are built at run time so this file stays plain ASCII for Windows PowerShell 5.1.
     $esc = [char]27
-    $upperHalf = [char]0x2580
-    $lowerHalf = [char]0x2584
+    $upperHalf = [string][char]0x2580
+    $lowerHalf = [string][char]0x2584
 
     for ($y = 0; $y -lt $LogoPixels.Count; $y += 2) {
         $top = $LogoPixels[$y]
         $bottom = $LogoPixels[$y + 1]
-        $line = New-Object System.Text.StringBuilder
-        [void]$line.Append("  ")
 
+        # Characters next to each other with the same colours are written together;
+        # no colour leaves the console's own background.
+        $segments = New-Object System.Collections.ArrayList
         for ($x = 0; $x -lt $top.Length; $x++) {
             $upper = [string]$top[$x]
             $lower = [string]$bottom[$x]
 
             if ($upper -eq "." -and $lower -eq ".") {
-                [void]$line.Append("$esc[0m ")
+                $char = " "; $foreground = $null; $background = $null
             }
             elseif ($lower -eq ".") {
-                [void]$line.Append("$esc[0;38;2;$($LogoColors[$upper])m$upperHalf")
+                $char = $upperHalf; $foreground = $upper; $background = $null
             }
             elseif ($upper -eq ".") {
-                [void]$line.Append("$esc[0;38;2;$($LogoColors[$lower])m$lowerHalf")
+                $char = $lowerHalf; $foreground = $lower; $background = $null
             }
             else {
-                [void]$line.Append("$esc[38;2;$($LogoColors[$upper]);48;2;$($LogoColors[$lower])m$upperHalf")
+                $char = $upperHalf; $foreground = $upper; $background = $lower
+            }
+
+            $last = $null
+            if ($segments.Count -gt 0) {
+                $last = $segments[$segments.Count - 1]
+            }
+            if ($last -and $last.Foreground -eq $foreground -and $last.Background -eq $background) {
+                $last.Text += $char
+            }
+            else {
+                [void]$segments.Add(@{ Text = $char; Foreground = $foreground; Background = $background })
             }
         }
 
-        [void]$line.Append("$esc[0m")
-        Write-Host $line.ToString()
+        if ($ConsoleColors) {
+            Write-Host "  " -NoNewline
+            foreach ($segment in $segments) {
+                $colors = @{}
+                if ($segment.Foreground) { $colors["ForegroundColor"] = $LogoConsoleColors[$segment.Foreground] }
+                if ($segment.Background) { $colors["BackgroundColor"] = $LogoConsoleColors[$segment.Background] }
+                Write-Host $segment.Text -NoNewline @colors
+            }
+            Write-Host ""
+        }
+        else {
+            $line = New-Object System.Text.StringBuilder
+            [void]$line.Append("  ")
+            foreach ($segment in $segments) {
+                $code = "0"
+                if ($segment.Foreground) { $code += ";38;2;$($LogoColors[$segment.Foreground])" }
+                if ($segment.Background) { $code += ";48;2;$($LogoColors[$segment.Background])" }
+                [void]$line.Append("$esc[$($code)m$($segment.Text)")
+            }
+            [void]$line.Append("$esc[0m")
+            Write-Host $line.ToString()
+        }
     }
 }
 
