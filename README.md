@@ -51,6 +51,16 @@ This:
 
 In the Script Manager, **check the report for this client** (for example `mose_EURID.ps1`). Leave the others unchecked.
 
+You can also copy `Start.ps1` alone into any folder (for example `C:\script`) and run it. The first run there asks for the GitHub token, then downloads every file, even with `-SkipUpdate`. If GitHub refuses (wrong or expired token), it stops and says why.
+
+To give the token without being asked (for example when installing many computers), pass it once. It is saved encrypted to `github-token.xml`, like the prompted one:
+
+```powershell
+.\Start.ps1 -GitHubToken <token> -Gui
+```
+
+Never write the token into `Start.ps1` itself: anyone who opens the file could read every client's report scripts, and the next update replaces the file anyway.
+
 To install to another folder, add `-InstallPath`:
 
 ```powershell
@@ -71,7 +81,7 @@ cd $HOME\Mose
 - The report asks for the SecretStore vault password, then for any credential or API token not yet in the vault (first run only).
 - From the Script Manager, each report opens in its own window to ask for these. Its output also appears at the bottom of the Script Manager.
 - The report is saved next to the scripts as `<Client>_Report_<yyyy-MM-dd>.md` and opened in Notepad.
-- If GitHub can't be reached, the local scripts run and a warning is shown.
+- If GitHub can't be reached, the local scripts run and a warning is shown. On the first run in a folder there are no local scripts yet, so it stops instead.
 
 ## Replace an expired GitHub token
 
