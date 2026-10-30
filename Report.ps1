@@ -23,6 +23,8 @@ if (-not $config) {
         throw "No client configuration was saved, so there is nothing to report. Run .\Start.ps1 -Configure."
     }
 }
+# Also lists the modules of a configuration saved before Start.ps1 downloaded only those.
+Save-MoseModuleList -Targets @($config.Targets)
 
 function Get-TargetCredential {
     param(
@@ -42,9 +44,12 @@ function Invoke-Target {
         [object]$Target
     )
 
+    # The module scripts were written without strict mode, which Start.ps1 turns on for the scripts it runs.
+    Set-StrictMode -Off
+
     $scriptPath = Join-Path $PSScriptRoot $MoseModules[$Target.Module].Script
     if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
-        throw "Module script was not found: $scriptPath"
+        throw "Module script was not found: $scriptPath. Run .\Start.ps1 -UpdateOnly to download it."
     }
 
     switch ($Target.Module) {

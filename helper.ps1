@@ -136,6 +136,33 @@ function Save-MoseConfig {
 
     $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets) } | ConvertTo-Json -Depth 5
     Set-Secret -Vault $MoseVaultName -Name $MoseConfigSecretName -Secret $json
+    Save-MoseModuleList -Targets $Targets
+}
+
+# Start.ps1 only downloads and updates the module scripts listed here, those of the client
+# configured on this computer. File names only, no client data (kept out of the repository, see .gitignore).
+$MoseModuleListPath = Join-Path $PSScriptRoot 'modules.local.json'
+
+function Save-MoseModuleList {
+    param(
+        [object[]]$Targets = @()
+    )
+
+    $previous = @()
+    if (Test-Path -LiteralPath $MoseModuleListPath) {
+        # Inner parentheses: Windows PowerShell returns a JSON array as one object.
+        $previous = @((Get-Content -LiteralPath $MoseModuleListPath -Raw | ConvertFrom-Json))
+    }
+    $scripts = @($Targets | Where-Object { $MoseModules.Contains($_.Module) } |
+        ForEach-Object { $MoseModules[$_.Module].Script } | Sort-Object -Unique)
+    ConvertTo-Json -InputObject $scripts | Set-Content -LiteralPath $MoseModuleListPath -Encoding utf8
+
+    # A module added since the last update is downloaded (or brought up to date) right away.
+    $added = @($scripts | Where-Object { $previous -notcontains $_ })
+    if ($added.Count -gt 0) {
+        Write-Host "Downloading the modules: $($added -join ', ')" -ForegroundColor DarkGray
+        & (Join-Path $PSScriptRoot 'Start.ps1') -UpdateOnly -Quiet | Out-Null
+    }
 }
 
 # Commvault keeps its tokens in the secret itself, so a target is named after that secret.

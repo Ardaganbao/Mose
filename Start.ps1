@@ -42,7 +42,11 @@ param(
 
     # Set by older versions, which restart before downloading the other files.
     [Parameter(DontShow)]
-    [switch]$SelfUpdated
+    [switch]$SelfUpdated,
+
+    # Set by Configure.ps1 to download the modules just added, without the welcome text.
+    [Parameter(DontShow)]
+    [switch]$Quiet
 )
 
 # GitHub requires TLS 1.2; Windows PowerShell 5.1 may not enable it by default.
@@ -90,6 +94,7 @@ if ($InstalledCommit) {
 # so everything is downloaded first, even with -SkipUpdate.
 $ConfigPath = Join-Path $PSScriptRoot "updater.config.json"
 $FirstRun = -not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)
+$ModuleListPath = Join-Path $PSScriptRoot "modules.local.json"
 
 # onIT logo as pixels: T = teal, W = white, N = navy, . = background.
 # Each console line shows two pixel rows using half-block characters.
@@ -209,7 +214,7 @@ if ($UpdatesApplied -or $SelfUpdated) {
     Write-Host "Restarted with the new Start.ps1." -ForegroundColor Green
     Write-Host ""
 }
-else {
+elseif (-not $Quiet) {
     Write-Host ""
     # Skipped for -UpdateOnly, whose output the Script Manager shows as plain text.
     if (-not $UpdateOnly) {
@@ -371,7 +376,16 @@ if (-not $UpdatesApplied -and ($FirstRun -or -not $SkipUpdate)) {
         $restart = -not $SelfUpdated -and (Update-RepoFile -Name "Start.ps1")
         $configChanged = Update-RepoFile -Name "updater.config.json"
         $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
-        $changed = @($config.Files | Where-Object { Update-RepoFile -Name $_ })
+
+        # Module scripts only for the client configured on this computer (listed by Configure.ps1
+        # and Report.ps1), so a computer only has the modules it uses.
+        $usedModules = @()
+        if (Test-Path $ModuleListPath) {
+            # Inner parentheses: Windows PowerShell returns a JSON array as one object.
+            $usedModules = @((Get-Content -Path $ModuleListPath -Raw | ConvertFrom-Json))
+        }
+        $files = @($config.Files) + @($config.Modules | Where-Object { $usedModules -contains $_ })
+        $changed = @($files | Where-Object { Update-RepoFile -Name $_ })
 
         if (-not $restart -and -not $configChanged -and $changed.Count -eq 0) {
             Write-Host "Everything is up to date."
