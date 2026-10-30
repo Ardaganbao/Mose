@@ -627,13 +627,7 @@ function Invoke-MetallicApi {
         return Invoke-RestMethod @requestParameters
     }
     catch {
-        $statusCode = $null
-        if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-        }
-        elseif ($_.Exception.StatusCode) {
-            $statusCode = [int]$_.Exception.StatusCode
-        }
+        $statusCode = Get-HttpStatusCode -Exception $_.Exception
         # An on-premises token can't be renewed here: it has to be replaced.
         if ($statusCode -eq 401 -and $script:CommvaultMode -eq 'OnPrem') {
             throw "Commvault refused the access token in secret '$($script:SecretObject.Name)' (401 Unauthorized) at $($requestParameters.Uri). If it expired or was revoked, create a new access token in Command Center, then run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again with the new token."
@@ -646,6 +640,101 @@ function Invoke-MetallicApi {
         $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body
         return Invoke-RestMethod @requestParameters
     }
+}
+
+# The HTTP status code of a failed Invoke-RestMethod call, or $null when there was no answer.
+function Get-HttpStatusCode {
+    param($Exception)
+
+    if ($Exception.Response -and $Exception.Response.StatusCode) {
+        return [int]$Exception.Response.StatusCode
+    }
+    if ($Exception.StatusCode) {
+        return [int]$Exception.StatusCode
+    }
+    return $null
+}
+
+# Sends several Commvault API calls at once, for calls that spend most of their time waiting on
+# the Commvault side. $Requests are Invoke-MetallicApi parameters (Method, Path, Query...). Returns,
+# in the same order, the Response of each call or the exception (Error) it failed with. A rejected Cloud token
+# is renewed once and the calls it rejected are sent again. $OnProgress gets the number of
+# answered calls and the time spent.
+function Invoke-MetallicApiParallel {
+    param(
+        [Parameter(Mandatory = $true)][hashtable[]]$Requests,
+        [ValidateRange(1, 16)][int]$ThrottleLimit = 6,
+        [scriptblock]$OnProgress
+    )
+
+    $results = @(foreach ($request in $Requests) { [PSCustomObject]@{ Response = $null; Error = $null } })
+    $toSend = @(0..($Requests.Count - 1))
+    $renewed = $false
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    # .NET allows only 2 connections per host by default.
+    $servicePoint = [System.Net.ServicePointManager]::FindServicePoint([uri]$script:BaseUri)
+    $servicePoint.ConnectionLimit = [math]::Max($servicePoint.ConnectionLimit, $ThrottleLimit)
+    $pool = [runspacefactory]::CreateRunspacePool(1, [math]::Min($ThrottleLimit, $Requests.Count))
+    $pool.Open()
+    try {
+        while ($toSend.Count -gt 0) {
+            $calls = @(foreach ($index in $toSend) {
+                $parameters = $Requests[$index]
+                $request = New-MetallicApiRequest @parameters
+                $worker = [powershell]::Create().AddScript({
+                        param($Request)
+                        $ProgressPreference = 'SilentlyContinue'
+                        try {
+                            [PSCustomObject]@{ Response = Invoke-RestMethod @Request; Error = $null }
+                        }
+                        catch {
+                            [PSCustomObject]@{ Response = $null; Error = $_.Exception }
+                        }
+                    }).AddArgument($request)
+                $worker.RunspacePool = $pool
+                [PSCustomObject]@{ Index = $index; Worker = $worker; Handle = $worker.BeginInvoke() }
+            })
+            Write-Progress -Activity "Invoke-MetallicApi: $($calls.Count) calls at once, e.g. $($request.Method) : $($request.Uri)" -Id 2
+
+            $answeredBefore = $Requests.Count - $calls.Count
+            do {
+                $answered = @($calls | Where-Object { $_.Handle.IsCompleted }).Count
+                if ($OnProgress) {
+                    & $OnProgress ($answeredBefore + $answered) $timer.Elapsed
+                }
+                if ($answered -lt $calls.Count) {
+                    Start-Sleep -Milliseconds 250
+                }
+            } while ($answered -lt $calls.Count)
+
+            $rejected = @()
+            foreach ($call in $calls) {
+                $output = @($call.Worker.EndInvoke($call.Handle))
+                $call.Worker.Dispose()
+                if ($output.Count -eq 0) {
+                    $results[$call.Index].Error = [System.Exception]::new("No answer from $($Requests[$call.Index].Path)")
+                    continue
+                }
+                $results[$call.Index] = $output[-1]
+                if ($output[-1].Error -and (Get-HttpStatusCode -Exception $output[-1].Error) -eq 401) {
+                    $rejected += $call.Index
+                }
+            }
+
+            # Every call gets the same 401 when the token expired: renew it once, then send them again.
+            $toSend = @()
+            if ($rejected.Count -gt 0 -and $script:CommvaultMode -eq 'Cloud' -and -not $renewed) {
+                Update-MetallicAccessToken
+                $renewed = $true
+                $toSend = $rejected
+            }
+        }
+    }
+    finally {
+        $pool.Close()
+        $pool.Dispose()
+    }
+    return $results
 }
 
 #--------------------------------------------------------
@@ -734,13 +823,23 @@ $licenseDatasets = [ordered]@{
 }
 $licenseSections = @()
 $licenseNotes = @()
-$licenseIndex = 0
-foreach ($licenseName in $licenseDatasets.Keys) {
-    $licenseIndex++
-    Write-CommvaultReportProgress -Status "License usage: $licenseIndex of $($licenseDatasets.Count) - $licenseName" -PercentComplete (5 + 10 * $licenseIndex / $licenseDatasets.Count)
+# Commvault runs each dataset's query when it is asked for, so they are all asked for at once.
+$licenseNames = @($licenseDatasets.Keys)
+$licenseRequests = @(foreach ($licenseName in $licenseNames) {
+    @{ Method = 'GET'; Path = "/cr/reportsplusengine/datasets/$($licenseDatasets[$licenseName])/data" }
+})
+$licenseResults = @(Invoke-MetallicApiParallel -Requests $licenseRequests -ThrottleLimit $licenseRequests.Count -OnProgress {
+    param($Answered, $Elapsed)
+    Write-CommvaultReportProgress -Status "License usage: $Answered of $($licenseNames.Count) datasets received ($($Elapsed.ToString('m\:ss')))" -PercentComplete (5 + 10 * $Answered / $licenseNames.Count)
+})
+for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) {
+    $licenseName = $licenseNames[$licenseIndex]
+    $licenseResult = $licenseResults[$licenseIndex]
     try {
-        $licenseResponse = Invoke-MetallicApi -Method GET -Path "/cr/reportsplusengine/datasets/$($licenseDatasets[$licenseName])/data"
-        $licenseRows = @(ConvertFrom-CommvaultDataset -Response $licenseResponse)
+        if ($licenseResult.Error) {
+            throw $licenseResult.Error
+        }
+        $licenseRows = @(ConvertFrom-CommvaultDataset -Response $licenseResult.Response)
         if ($licenseRows.Count -gt 0) {
             $licenseSections += "### $licenseName licenses`r`n`r`n$(ConvertTo-MarkdownTable -Rows $licenseRows)"
         }
