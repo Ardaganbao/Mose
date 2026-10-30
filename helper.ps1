@@ -90,3 +90,77 @@ function Get-AppCredential {
     }
     return [pscredential]::new($UserName, $secure)
 }
+
+# Everything about the client stays in this vault, never in the scripts: the client name and
+# servers (secret MOSE:Config, as JSON) and one credential or token secret per server.
+$MoseVaultName = 'SecretStore1'
+$MoseConfigSecretName = 'MOSE:Config'
+
+# Modules a client configuration can use, in report order.
+$MoseModules = [ordered]@{
+    iLO             = @{ Label = 'HPE iLO'; Script = 'iloreport.ps1' }
+    iDRAC           = @{ Label = 'Dell iDRAC'; Script = 'IDRAC.ps1' }
+    BMC             = @{ Label = 'Lenovo BMC'; Script = 'BMCreport.ps1' }
+    NAS             = @{ Label = 'Synology NAS'; Script = 'nas2.ps1' }
+    StorMagic       = @{ Label = 'StorMagic SvSAN'; Script = 'stormagicHealth.ps1' }
+    VMware          = @{ Label = 'VMware vCenter'; Script = 'vmwarereport.ps1' }
+    Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1' }
+    CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1' }
+    CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1' }
+}
+
+function Open-MoseVault {
+    Ensure-Module -Name 'Microsoft.PowerShell.SecretManagement' -MinimumVersion '1.1.0'
+    Ensure-Module -Name 'Microsoft.PowerShell.SecretStore' -MinimumVersion '1.0.6'
+    Ensure-SecretVault -VaultName $MoseVaultName
+    Unlock-SecretVaultIfNeeded -VaultName $MoseVaultName
+}
+
+# Returns $null when this computer has no client configuration yet.
+function Get-MoseConfig {
+    param(
+        [string]$Vault = $MoseVaultName
+    )
+
+    if (-not (Get-SecretInfo -Vault $Vault -Name $MoseConfigSecretName -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+    return Get-Secret -Vault $Vault -Name $MoseConfigSecretName -AsPlainText | ConvertFrom-Json
+}
+
+function Save-MoseConfig {
+    param(
+        [Parameter(Mandatory)] [string]$Client,
+        [object[]]$Targets = @()
+    )
+
+    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets) } | ConvertTo-Json -Depth 5
+    Set-Secret -Vault $MoseVaultName -Name $MoseConfigSecretName -Secret $json
+}
+
+# Commvault keeps its tokens in the secret itself, so a target is named after that secret.
+function Get-MoseTargetName {
+    param(
+        [Parameter(Mandatory)] [object]$Target
+    )
+
+    if ($Target.Server) {
+        return $Target.Server
+    }
+    return $Target.Secret
+}
+
+# Vault secrets holding Commvault tokens in the format 'CommvaultCloud report.ps1' reads.
+function Get-CommvaultSecretNames {
+    param(
+        [Parameter(Mandatory)] [ValidateSet('Cloud', 'OnPrem')] [string]$Mode,
+        [string]$Vault = $MoseVaultName
+    )
+
+    foreach ($info in @(Get-SecretInfo -Vault $Vault | Where-Object { "$($_.Type)" -eq 'Hashtable' })) {
+        $secret = Get-Secret -Vault $Vault -Name $info.Name -AsPlainText
+        if ($secret -is [System.Collections.IDictionary] -and $secret['Type'] -eq $Mode) {
+            $info.Name
+        }
+    }
+}

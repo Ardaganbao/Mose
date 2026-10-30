@@ -8,6 +8,8 @@
         "Manager.ps1",
         "Update-FromGitHub.ps1",
         "helper.ps1",
+        "Configure.ps1",
+        "Report.ps1",
         "IDRAC.ps1",
         "iloreport.ps1",
         "BMCreport.ps1",
@@ -16,14 +18,9 @@
         "vmwarereport.ps1",
         "VeeamReport.ps1",
         "CommvaultCloud report.ps1",
-        "Renew-CommvaultToken.ps1",
-        "mose_EURID.ps1",
-        "mose_clait.ps1",
-        "mose_VBB.ps1"
+        "Renew-CommvaultToken.ps1"
     ],
     "Scripts": [
-        "mose_EURID.ps1",
-        "mose_clait.ps1",
-        "mose_VBB.ps1"
+        "Report.ps1"
     ]
 }
