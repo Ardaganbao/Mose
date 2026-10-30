@@ -21,7 +21,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `Report.ps1` | Runs every configured module and writes `<Client>_Report_<yyyy-MM-dd>.md`. Starts `Configure.ps1` when nothing is configured yet. |
 | `Manager.ps1` | Script Manager window: configure the client, turn reports on/off and run them. |
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
-| `updater.config.json` | Repository, files to update (`Files`) and reports shown in the Script Manager (`Scripts`). |
+| `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`) and reports shown in the Script Manager (`Scripts`). |
 | `helper.ps1` | SecretStore helpers, the client configuration and the list of modules. |
 | `iloreport.ps1`, `IDRAC.ps1`, `BMCreport.ps1` | Modules: HPE iLO, Dell iDRAC, Lenovo BMC. |
 | `nas2.ps1` | Module: Synology NAS. |
@@ -68,6 +68,8 @@ The first report on a computer asks for the client. To change it later, run `.\S
 
 The vault password is asked first. Logins are saved as `MOSE:<module>:<server>` and the configuration as `MOSE:Config`, in the vault `SecretStore1`.
 
+A computer only downloads the module scripts its client uses. Saving downloads the modules just added, and every run of `Start.ps1` checks them for updates. They are listed in `modules.local.json` (file names only), so `Start.ps1` knows them without opening the vault.
+
 Commvault tokens already in the vault (for example saved by an older report script) are offered for reuse, so a Commvault Cloud token chain keeps going.
 
 ## Run the report
@@ -99,7 +101,7 @@ It renews every Commvault Cloud token saved in the vault.
 
 ## Add a module
 
-1. Add the script to `Files` in `updater.config.json`.
+1. Add the script to `Modules` in `updater.config.json`.
 2. Add it to `$MoseModules` in `helper.ps1`.
 3. In `Configure.ps1` (`Read-Target`), ask for anything it needs besides the server and login.
 4. In `Report.ps1` (`Invoke-Target`), call it with those values.

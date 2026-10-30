@@ -122,7 +122,7 @@ function New-IdracSessionV2 {
     try {
         # Try Redfish v1 endpoint
         $baseUri = "https://$server/redfish/v1"
-        Invoke-WebRequest -Uri "$baseUri" -Method Get -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri "$baseUri" -Method Get -Headers $AuthHeaders -UseBasicParsing -ErrorAction Stop | Out-Null
         $version = 9
         $baseUri = "/redfish/v1"
     }
