@@ -1,0 +1,21 @@
+#!/bin/sh
+# Blocks commits that add passwords, tokens or private keys.
+# Enable once per clone with: git config core.hooksPath .githooks
+
+pattern='(password|passwd|pwd|secret|api[_-]?key|token)[[:space:]]*[:=][[:space:]]*["'\''][^"'\''$]{4,}["'\'']|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ConvertTo-SecureString[[:space:]]+(-String[[:space:]]+)?["'\''][^"'\''$]{4,}["'\''].*-AsPlainText'
+
+# Placeholders used in documentation are allowed, e.g. "<access-token>".
+placeholder='\.\.\.|PASTE_HERE|your-|<[A-Za-z-]+>'
+
+# The hook's own pattern list would match itself, so .githooks is skipped.
+matches=$(git diff --cached -U0 --no-color -- . ':(exclude).githooks' |
+    grep '^+' | grep -v '^+++' |
+    grep -iE "$pattern" | grep -vE "$placeholder")
+
+if [ -n "$matches" ]; then
+    echo "Commit blocked: possible password or secret in staged changes:"
+    echo "$matches"
+    echo ""
+    echo "Remove it and read it from the vault instead, e.g. Get-Secret -Name MyPassword"
+    exit 1
+fi
