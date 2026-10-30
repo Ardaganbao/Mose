@@ -657,17 +657,20 @@ function Get-HttpStatusCode {
 
 # Sends several Commvault API calls at once, for calls that spend most of their time waiting on
 # the Commvault side. $Requests are Invoke-MetallicApi parameters (Method, Path, Query...). Returns,
-# in the same order, the Response of each call or the exception (Error) it failed with. A rejected Cloud token
-# is renewed once and the calls it rejected are sent again. $OnProgress gets the number of
-# answered calls and the time spent.
+# in the same order, the Response of each call or the exception (Error) it failed with, and the
+# Seconds it took. A rejected Cloud token is renewed once and the calls it rejected are sent again.
+# $OnProgress gets the number of answered calls and the time spent.
 function Invoke-MetallicApiParallel {
     param(
-        [Parameter(Mandatory = $true)][hashtable[]]$Requests,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable[]]$Requests,
         [ValidateRange(1, 16)][int]$ThrottleLimit = 6,
         [scriptblock]$OnProgress
     )
 
-    $results = @(foreach ($request in $Requests) { [PSCustomObject]@{ Response = $null; Error = $null } })
+    if ($Requests.Count -eq 0) {
+        return @()
+    }
+    $results = @(foreach ($request in $Requests) { [PSCustomObject]@{ Response = $null; Error = $null; Seconds = $null } })
     $toSend = @(0..($Requests.Count - 1))
     $renewed = $false
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -684,11 +687,13 @@ function Invoke-MetallicApiParallel {
                 $worker = [powershell]::Create().AddScript({
                         param($Request)
                         $ProgressPreference = 'SilentlyContinue'
+                        $watch = [System.Diagnostics.Stopwatch]::StartNew()
                         try {
-                            [PSCustomObject]@{ Response = Invoke-RestMethod @Request; Error = $null }
+                            $response = Invoke-RestMethod @Request
+                            [PSCustomObject]@{ Response = $response; Error = $null; Seconds = $watch.Elapsed.TotalSeconds }
                         }
                         catch {
-                            [PSCustomObject]@{ Response = $null; Error = $_.Exception }
+                            [PSCustomObject]@{ Response = $null; Error = $_.Exception; Seconds = $watch.Elapsed.TotalSeconds }
                         }
                     }).AddArgument($request)
                 $worker.RunspacePool = $pool
@@ -821,6 +826,10 @@ $licenseDatasets = [ordered]@{
     'Operating instances'        = 'd7faef75-cf66-40a2-98ce-a2d0cc2a144b:cd38c52a-e099-4252-d36f-3e2c54540f6f'
     'Other'                      = 'd7faef75-cf66-40a2-98ce-a2d0cc2a144b:2654b01f-9bb0-481e-b273-4b4fddc585b1'
 }
+# The time of each part of the report, shown at the end to see where the time goes.
+$apiTimes = [ordered]@{}
+$apiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
 $licenseSections = @()
 $licenseNotes = @()
 # Commvault runs each dataset's query when it is asked for, so they are all asked for at once.
@@ -857,6 +866,10 @@ else {
 if ($licenseNotes.Count -gt 0) {
     $licenseText += "`r`n`r`nLicense datasets that could not be read:`r`n`r`n" + ($licenseNotes -join "`r`n")
 }
+# Sent together, so answers at regular steps (10, 20, 30 s...) mean Commvault runs them one at a time.
+$licenseSeconds = @($licenseResults | Where-Object { $null -ne $_.Seconds } | ForEach-Object { [math]::Round($_.Seconds) } | Sort-Object)
+$apiTimes['licenses'] = "$($apiTimer.Elapsed.ToString('m\:ss')) (answers after $($licenseSeconds -join ', ') s)"
+$apiTimer.Restart()
 
 #--------------------------------------------------------
 # 2) BACKUP AND RESTORE JOB HISTORY (paged, rolling period)
@@ -967,6 +980,8 @@ elseif ($null -eq $totalRecords) {
     }
 }
 
+$apiTimes['jobs'] = "$($apiTimer.Elapsed.ToString('m\:ss')) ($($allJobRecords.Count) jobs)"
+
 Write-CommvaultReportProgress -Status "Summarizing $($allJobRecords.Count) jobs" -PercentComplete 55
 $seenJobIds = [System.Collections.Generic.HashSet[string]]::new()
 $commcellId = $null
@@ -1064,7 +1079,8 @@ $inventoryClientIds = @{}
 $clientOffset = 0
 $clientPageSize = 100
 $clientTotalRecords = $null
-$clientIndex = 0
+$inventoryClients = @()
+$apiTimer.Restart()
 Write-CommvaultReportProgress -Status 'Collecting protected-item inventory (clients and subclients)' -PercentComplete 60
 try {
     do {
@@ -1092,14 +1108,38 @@ try {
                 continue
             }
             $inventoryClientIds[[string]$inventoryClientName] = $clientId
-            $clientIndex++
-            $clientCount = if ($clientTotalRecords -gt 0) { $clientTotalRecords } else { $clientOffset + $clientPage.Count }
-            Write-CommvaultReportProgress -Status "Inventory: client $clientIndex of $clientCount - $inventoryClientName" -PercentComplete (60 + 25 * $clientIndex / $clientCount)
+            $inventoryClients += [PSCustomObject]@{ Id = $clientId; Name = $inventoryClientName }
+        }
 
-            $subclientOffset = 0
-            $subclientPageSize = 100
-            $subclientTotalRecords = $null
-            do {
+        $clientOffset += $clientPage.Count
+    } while ($clientPage.Count -eq $clientPageSize -and
+        ($null -eq $clientTotalRecords -or $clientOffset -lt $clientTotalRecords))
+
+    # One call per client, each waiting on Commvault: the first subclient page of every client is asked for at once.
+    $subclientPageSize = 100
+    $subclientRequests = @(foreach ($inventoryClient in $inventoryClients) {
+        @{
+            Method            = 'GET'
+            Path              = '/Subclient'
+            Query             = @{ clientId = [string]$inventoryClient.Id }
+            AdditionalHeaders = @{ limit = [string]$subclientPageSize; offset = '0' }
+        }
+    })
+    $subclientResults = @(Invoke-MetallicApiParallel -Requests $subclientRequests -OnProgress {
+        param($Answered, $Elapsed)
+        Write-CommvaultReportProgress -Status "Inventory: subclients of $Answered of $($inventoryClients.Count) clients received ($($Elapsed.ToString('m\:ss')))" -PercentComplete (60 + 25 * $Answered / $inventoryClients.Count)
+    })
+
+    for ($clientIndex = 0; $clientIndex -lt $inventoryClients.Count; $clientIndex++) {
+        $clientId = $inventoryClients[$clientIndex].Id
+        $inventoryClientName = $inventoryClients[$clientIndex].Name
+        $subclientResponse = $subclientResults[$clientIndex].Response
+        $subclientError = $subclientResults[$clientIndex].Error
+        $subclientOffset = 0
+        $subclientTotalRecords = $null
+        do {
+            # A client with more subclients than one page: the next pages one at a time.
+            if ($subclientOffset -gt 0) {
                 try {
                     $subclientResponse = Invoke-MetallicApi -Method GET -Path "/Subclient" -Query @{
                         clientId = [string]$clientId
@@ -1109,63 +1149,65 @@ try {
                     }
                 }
                 catch {
-                    $inventoryCollectionNotes += "Protected-item inventory failed for '$inventoryClientName': $($_.Exception.Message)"
-                    break
+                    $subclientError = $_.Exception
                 }
+            }
+            if ($subclientError) {
+                $inventoryCollectionNotes += "Protected-item inventory failed for '$inventoryClientName': $($subclientError.Message)"
+                break
+            }
 
-                $subclientPage = @(Get-CommvaultApiEntities -Response $subclientResponse `
-                        -CollectionNames @('subClientProperties', 'subclientProperties', 'subclients', 'subClientList') `
-                        -WrapperNames @('subClientEntity', 'subclientEntity', 'subclient', 'subClient'))
-                if ($null -eq $subclientTotalRecords -and $null -ne $subclientResponse.totalRecordsWithoutPaging) {
-                    $subclientTotalRecords = [int]$subclientResponse.totalRecordsWithoutPaging
+            $subclientPage = @(Get-CommvaultApiEntities -Response $subclientResponse `
+                    -CollectionNames @('subClientProperties', 'subclientProperties', 'subclients', 'subClientList') `
+                    -WrapperNames @('subClientEntity', 'subclientEntity', 'subclient', 'subClient'))
+            if ($null -eq $subclientTotalRecords -and $null -ne $subclientResponse.totalRecordsWithoutPaging) {
+                $subclientTotalRecords = [int]$subclientResponse.totalRecordsWithoutPaging
+            }
+
+            foreach ($subclientEntity in $subclientPage) {
+                $subclientName = Get-FirstObjectValue -InputObject $subclientEntity -Names @('subclientName', 'name')
+                if (-not $subclientName) { continue }
+                $inventoryClient = Get-FirstObjectValue -InputObject $subclientEntity -Names @('clientName')
+                if (-not $inventoryClient) { $inventoryClient = $inventoryClientName }
+                $application = Get-FirstObjectValue -InputObject $subclientEntity -Names @('appName', 'applicationName', 'appTypeName')
+                if (-not $application) { $application = 'Unknown' }
+                $backupSetName = Get-FirstObjectValue -InputObject $subclientEntity -Names @('backupsetName')
+                $protectedName = if ($backupSetName -and $subclientName -ne 'default') { "$backupSetName / $subclientName" } else { $subclientName }
+                $inventoryPlan = Get-FirstObjectValue -InputObject $subclientEntity -Names @('planName', 'slaName')
+                if (-not $inventoryPlan -and $subclientEntity.plan) {
+                    $inventoryPlan = Get-FirstObjectValue -InputObject $subclientEntity.plan -Names @('planName', 'name')
                 }
+                $itemKey = '{0}|{1}|{2}' -f $inventoryClient, $application, $protectedName
 
-                foreach ($subclientEntity in $subclientPage) {
-                    $subclientName = Get-FirstObjectValue -InputObject $subclientEntity -Names @('subclientName', 'name')
-                    if (-not $subclientName) { continue }
-                    $inventoryClient = Get-FirstObjectValue -InputObject $subclientEntity -Names @('clientName')
-                    if (-not $inventoryClient) { $inventoryClient = $inventoryClientName }
-                    $application = Get-FirstObjectValue -InputObject $subclientEntity -Names @('appName', 'applicationName', 'appTypeName')
-                    if (-not $application) { $application = 'Unknown' }
-                    $backupSetName = Get-FirstObjectValue -InputObject $subclientEntity -Names @('backupsetName')
-                    $protectedName = if ($backupSetName -and $subclientName -ne 'default') { "$backupSetName / $subclientName" } else { $subclientName }
-                    $inventoryPlan = Get-FirstObjectValue -InputObject $subclientEntity -Names @('planName', 'slaName')
-                    if (-not $inventoryPlan -and $subclientEntity.plan) {
-                        $inventoryPlan = Get-FirstObjectValue -InputObject $subclientEntity.plan -Names @('planName', 'name')
-                    }
-                    $itemKey = '{0}|{1}|{2}' -f $inventoryClient, $application, $protectedName
-
-                    if (-not $protectedItemsByKey.ContainsKey($itemKey)) {
-                        $protectedItemsByKey[$itemKey] = [PSCustomObject]@{
-                            Client            = [string]$inventoryClient
-                            Application       = [string]$application
-                            Item              = [string]$protectedName
-                            Plan              = if ($inventoryPlan) { [string]$inventoryPlan } else { 'Not returned by API' }
-                            LatestStatus      = 'No job in lookback'
-                            LatestRun         = $null
-                            LastSuccessfulRun = $null
-                            SlaTarget         = $null
-                            SlaStatus         = $null
-                        }
-                    }
-                    elseif ($inventoryPlan -and $protectedItemsByKey[$itemKey].Plan -eq 'Not returned by API') {
-                        $protectedItemsByKey[$itemKey].Plan = [string]$inventoryPlan
+                if (-not $protectedItemsByKey.ContainsKey($itemKey)) {
+                    $protectedItemsByKey[$itemKey] = [PSCustomObject]@{
+                        Client            = [string]$inventoryClient
+                        Application       = [string]$application
+                        Item              = [string]$protectedName
+                        Plan              = if ($inventoryPlan) { [string]$inventoryPlan } else { 'Not returned by API' }
+                        LatestStatus      = 'No job in lookback'
+                        LatestRun         = $null
+                        LastSuccessfulRun = $null
+                        SlaTarget         = $null
+                        SlaStatus         = $null
                     }
                 }
+                elseif ($inventoryPlan -and $protectedItemsByKey[$itemKey].Plan -eq 'Not returned by API') {
+                    $protectedItemsByKey[$itemKey].Plan = [string]$inventoryPlan
+                }
+            }
 
-                $subclientOffset += $subclientPage.Count
-            } while ($subclientPage.Count -eq $subclientPageSize -and
-                ($null -eq $subclientTotalRecords -or $subclientOffset -lt $subclientTotalRecords))
-        }
-
-        $clientOffset += $clientPage.Count
-    } while ($clientPage.Count -eq $clientPageSize -and
-        ($null -eq $clientTotalRecords -or $clientOffset -lt $clientTotalRecords))
+            $subclientOffset += $subclientPage.Count
+        } while ($subclientPage.Count -eq $subclientPageSize -and
+            ($null -eq $subclientTotalRecords -or $subclientOffset -lt $subclientTotalRecords))
+    }
 }
 catch {
     $inventoryCollectionNotes += "Protected-item inventory collection failed: $($_.Exception.Message)"
     Write-Warning $inventoryCollectionNotes[-1]
 }
+$apiTimes['inventory'] = "$($apiTimer.Elapsed.ToString('m\:ss')) ($($inventoryClients.Count) clients)"
+$apiTimer.Restart()
 
 #--------------------------------------------------------
 # SLA: configured period from Commvault, compliance from the last completed backup
@@ -1203,6 +1245,7 @@ foreach ($slaAttempt in $slaAttempts) {
         $slaNote = "The SLA configuration could not be read: $($_.Exception.Message)"
     }
 }
+$apiTimes['SLA'] = $apiTimer.Elapsed.ToString('m\:ss')
 
 # Last backup per protected item over the whole fetched period; completed with errors still protected data.
 $lastBackupByKey = @{}
@@ -1267,12 +1310,28 @@ if ($slaNote) { $slaSummary += " $slaNote" }
 $maxAttentionJobs = 25
 $attentionJobs = @($jobRows | Where-Object { $_.Outcome -ne 'Completed' })
 $eventJobs = @($attentionJobs | Select-Object -First $maxAttentionJobs | Where-Object { -not $_.Reason -and $_.JobId })
-$eventIndex = 0
-foreach ($eventJob in $eventJobs) {
-    $eventIndex++
-    Write-CommvaultReportProgress -Status "Job events: $eventIndex of $($eventJobs.Count) - job $($eventJob.JobId)" -PercentComplete (88 + 6 * $eventIndex / $eventJobs.Count)
+$apiTimer.Restart()
+# One call per job: they are all asked for at once.
+$eventRequests = @(foreach ($eventJob in $eventJobs) {
+    @{ Method = 'GET'; Path = '/Events'; Query = @{ jobId = [string]$eventJob.JobId } }
+})
+try {
+    $eventResults = @(Invoke-MetallicApiParallel -Requests $eventRequests -OnProgress {
+        param($Answered, $Elapsed)
+        Write-CommvaultReportProgress -Status "Job events: $Answered of $($eventJobs.Count) jobs received ($($Elapsed.ToString('m\:ss')))" -PercentComplete (88 + 6 * $Answered / $eventJobs.Count)
+    })
+}
+catch {
+    Write-Warning "Job events could not be read: $($_.Exception.Message)"
+    $eventResults = @()
+}
+for ($eventIndex = 0; $eventIndex -lt $eventResults.Count; $eventIndex++) {
+    $eventJob = $eventJobs[$eventIndex]
     try {
-        $eventResponse = Invoke-MetallicApi -Method GET -Path '/Events' -Query @{ jobId = [string]$eventJob.JobId }
+        if ($eventResults[$eventIndex].Error) {
+            throw $eventResults[$eventIndex].Error
+        }
+        $eventResponse = $eventResults[$eventIndex].Response
         # Keep only the most severe events, so informational ones such as "Job started" are left out.
         $jobEvents = @(@($eventResponse.commservEvents) | Where-Object { $_.description } | ForEach-Object {
                 $severity = 0
@@ -1292,6 +1351,7 @@ foreach ($eventJob in $eventJobs) {
         Write-Warning "Events for job $($eventJob.JobId) could not be read: $($_.Exception.Message)"
     }
 }
+$apiTimes['job events'] = "$($apiTimer.Elapsed.ToString('m\:ss')) ($($eventJobs.Count) jobs)"
 
 #--------------------------------------------------------
 # 3) MARKDOWN OUTPUT
@@ -1469,4 +1529,5 @@ Report generated: $(Get-Date)
 $md | Set-Content -LiteralPath $mdPath -Encoding UTF8 -ErrorAction Stop
 
 Complete-CommvaultReportProgress
+Write-Host "Commvault API time: $(@($apiTimes.Keys | ForEach-Object { "$_ $($apiTimes[$_])" }) -join ', ')" -ForegroundColor DarkGray
 Write-Host "Report created at: $mdPath" -ForegroundColor Yellow
