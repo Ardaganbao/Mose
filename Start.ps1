@@ -49,8 +49,12 @@ param(
     [switch]$Quiet
 )
 
-# GitHub requires TLS 1.2; Windows PowerShell 5.1 may not enable it by default.
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+# GitHub requires TLS 1.2; Windows PowerShell 5.1 may not enable it by default. SystemDefault (0, the
+# versions Windows allows, TLS 1.3 included) is kept: adding TLS 1.2 to it would turn the others off,
+# also for the reports run in this process.
+if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
 
 # Started from the one-liner (irm ... | iex): there is no file yet, so save Start.ps1
 # into $InstallPath and run it from there in a new process, which keeps this session

@@ -303,13 +303,26 @@ foreach ($fan in  $fans) {
 }
 if ($fansstatus -eq "") { $fansstatus = "All fans OK  :white_check_mark:" }
 
+# The redundancy set is listed in each power supply and on the Power resource itself; one of them
+# may be a bare link, or have no health at all when no redundancy policy is set.
 $PowerStatusHealth = "N/A"
-if ( $null -ne $PowerMetrics.PowerSupplies[0]) {
-    if ($PowerMetrics.PowerSupplies[0].Redundancy.Status.Health -eq "OK") {
-        $PowerStatusHealth = "$($PowerMetrics.PowerSupplies[0].Redundancy.Status.Health) :white_check_mark:"
+$redundancySets = @(@($PowerMetrics.PowerSupplies | ForEach-Object { $_.Redundancy }) + @($PowerMetrics.Redundancy) |
+    Where-Object { $null -ne $_ -and $null -ne $_.Status })
+# The first one that reports a health, else the first one.
+$redundancy = @($redundancySets | Where-Object { $_.Status.Health }) + $redundancySets | Select-Object -First 1
+if ($null -ne $redundancy) {
+    if ($redundancy.Status.Health -eq "OK") {
+        $PowerStatusHealth = "OK :white_check_mark:"
+    }
+    elseif ($redundancy.Status.Health) {
+        $PowerStatusHealth = "$($redundancy.Status.Health) :x:"
     }
     else {
-        $PowerStatusHealth = "$($PowerMetrics.PowerSupplies[0].Redundancy.Status.Health) :x:"
+        $PowerStatusHealth = "No health reported (state: $($redundancy.Status.State)) :warning:"
+    }
+
+    if ($redundancy.Mode) {
+        $PowerStatusHealth += " - mode $($redundancy.Mode)"
     }
 }
  
