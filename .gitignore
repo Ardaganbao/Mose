@@ -1,0 +1,16 @@
+# Per-computer on/off settings written by Manager.ps1.
+scripts.local.json
+
+# Git commit this folder was last updated to, written by Start.ps1.
+installed-version.txt
+
+# GitHub token saved by Start.ps1, encrypted for one Windows user on one computer.
+github-token.xml
+
+# Vault password and log written by Renew-CommvaultToken.ps1.
+*.password.xml
+Renew-CommvaultToken.log
+
+# Reports contain client data and stay on the computer that made them.
+*_Report_*.md
+CommvaultReport_*.md

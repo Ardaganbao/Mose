@@ -1,0 +1,2 @@
+# Keep files byte-identical to GitHub so the updater's hash check matches.
+* -text
