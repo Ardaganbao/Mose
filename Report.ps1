@@ -8,7 +8,8 @@ param(
 )
 
 # Builds the report of the client configured on this computer (see Configure.ps1):
-# runs every module on its servers and writes <Client>_Report_<yyyy-MM-dd>.md.
+# runs every module on its servers and writes <Client>_Report_<yyyy-MM-dd>.md,
+# with the section order, titles and groups of the client's report layout.
 
 $ErrorActionPreference = 'Stop'
 # Start.ps1 hides progress bars to download faster; the modules show theirs.
@@ -74,10 +75,7 @@ function Invoke-Target {
         }
         'VMware' {
             $credential = Get-TargetCredential $Target
-            # The section title already names vCenter, so its own heading is dropped.
-            $section = @(& $scriptPath -server $Target.Server -user $credential.UserName -pass $credential.Password -Client $config.Client -Site $Target.Site |
-                Where-Object { $_ -is [string] })
-            ($section -join [Environment]::NewLine).Trim() -replace '^### VMware\s*', ''
+            & $scriptPath -server $Target.Server -user $credential.UserName -pass $credential.Password -Client $config.Client -Site $Target.Site
         }
         'Veeam' {
             $veeamParameters = @{ Server = $Target.Server; OutputPath = [System.IO.Path]::GetTempFileName(); NoOpen = $true }
@@ -115,43 +113,121 @@ function Invoke-Target {
     }
 }
 
+# Moves the headings of a module under its section: the heading levels the module uses, in order,
+# become $TopLevel, $TopLevel + 1... whatever level each module starts at. With -DropTitle, a first
+# line that is a heading only repeats the section title and is removed.
+function Set-MarkdownHeadingLevel {
+    param(
+        [string]$Markdown,
+        [int]$TopLevel,
+        [switch]$DropTitle
+    )
+
+    $lines = [System.Collections.Generic.List[string]]($Markdown.Trim() -split '\r?\n')
+    if ($DropTitle -and $lines[0] -match '^#{1,6}\s') {
+        $lines.RemoveAt(0)
+    }
+
+    $headings = @()
+    $fence = $null
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        # A # line inside a code block is not a heading.
+        if ($lines[$i] -match '^\s{0,3}(`{3,}|~{3,})') {
+            if (-not $fence) {
+                $fence = $matches[1][0]
+            }
+            elseif ($matches[1][0] -eq $fence) {
+                $fence = $null
+            }
+            continue
+        }
+        if (-not $fence -and $lines[$i] -match '^(#{1,6})\s+(.*?)\s*$') {
+            $headings += [pscustomobject]@{ Index = $i; Level = $matches[1].Length; Text = $matches[2] }
+        }
+    }
+
+    $levels = @($headings | ForEach-Object Level | Sort-Object -Unique)
+    foreach ($heading in $headings) {
+        $level = [Math]::Min(6, $TopLevel + [array]::IndexOf($levels, $heading.Level))
+        $lines[$heading.Index] = "$('#' * $level) $($heading.Text)"
+    }
+    return ($lines -join [Environment]::NewLine).Trim()
+}
+
+# A group is shown when one of its sections is.
+function Test-ReportSectionShown {
+    param(
+        [object]$Section
+    )
+
+    if ($Section.Hide) {
+        return $false
+    }
+    if ($Section.Target) {
+        return $true
+    }
+    return @($Section.Children | Where-Object { Test-ReportSectionShown $_ }).Count -gt 0
+}
+
+function Add-ReportSection {
+    param(
+        [object]$Section,
+        [int]$Level
+    )
+
+    if (-not (Test-ReportSectionShown $Section)) {
+        return
+    }
+    $title = Get-MoseSectionTitle -Section $Section -Client $config.Client -Date $reportDate
+    $report.Add("$('#' * [Math]::Min(6, $Level)) $title")
+    foreach ($child in $Section.Children) {
+        Add-ReportSection -Section $child -Level ($Level + 1)
+    }
+    if (-not $Section.Target) {
+        return
+    }
+
+    Write-Host "Collecting $title..." -ForegroundColor DarkGray
+    try {
+        $output = @(Invoke-Target $Section.Target | Where-Object { $_ -is [string] })
+        $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
+            -DropTitle:([bool]$MoseModules[$Section.Target.Module]['DropTitle'])
+        if ($content) {
+            $report.Add($content)
+        }
+        else {
+            $report.Add('_No report data was returned._')
+        }
+    }
+    catch {
+        $report.Add("Collection failed: $($_.Exception.Message)")
+        Write-Warning "$title collection failed: $($_.Exception.Message)"
+    }
+    finally {
+        # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
+        [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
+    }
+}
+
 $originalLocation = Get-Location
 try {
     # The module scripts expect to run from their own folder.
     Set-Location -LiteralPath $PSScriptRoot
 
+    $reportDate = Get-Date -Format 'yyyy-MM-dd'
+    $layout = Get-MoseProperty $config 'Layout'
+    $sections = Get-MoseReportSections -Layout $layout -Targets @($config.Targets)
+
+    $title = Get-MoseProperty $layout 'Title'
+    if (-not $title) {
+        $title = $MoseDefaultReportTitle
+    }
     $report = New-Object System.Collections.Generic.List[string]
-    $report.Add("# $($config.Client) report $(Get-Date -Format 'yyyy-MM-dd')")
+    $report.Add("# $(Format-MoseTitle $title @{ Client = $config.Client; Date = $reportDate })")
     $securityProtocol = [Net.ServicePointManager]::SecurityProtocol
 
-    foreach ($module in $MoseModules.Keys) {
-        foreach ($target in @($config.Targets | Where-Object { $_.Module -eq $module })) {
-            $title = "$($MoseModules[$module].Label) $(Get-MoseTargetName $target)"
-            if ($module -eq 'VMware') {
-                $title += " ($($target.Site))"
-            }
-
-            Write-Host "Collecting $title..." -ForegroundColor DarkGray
-            $report.Add("## $title")
-            try {
-                $section = @(Invoke-Target $target | Where-Object { $_ -is [string] })
-                $content = ($section -join [Environment]::NewLine).Trim()
-                if ($content) {
-                    $report.Add($content)
-                }
-                else {
-                    $report.Add('_No report data was returned._')
-                }
-            }
-            catch {
-                $report.Add("Collection failed: $($_.Exception.Message)")
-                Write-Warning "$title collection failed: $($_.Exception.Message)"
-            }
-            finally {
-                # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
-                [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
-            }
-        }
+    foreach ($section in $sections) {
+        Add-ReportSection -Section $section -Level 2
     }
 
     $fileName = "$($config.Client -replace '[\\/:*?"<>|\s]', '_')_Report_$(Get-Date -Format 'yyyy-MM-dd').md"

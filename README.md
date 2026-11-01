@@ -17,8 +17,8 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | File | What it does |
 |---|---|
 | `Start.ps1` | Entry point. Updates every file from GitHub, then runs `Report.ps1`. |
-| `Configure.ps1` | Asks for the client: its name, the servers of each module and their credentials. Saves everything in the vault. |
-| `Report.ps1` | Runs every configured module and writes `<Client>_Report_<yyyy-MM-dd>.md`. Starts `Configure.ps1` when nothing is configured yet. |
+| `Configure.ps1` | Asks for the client: its name, the servers of each module, their credentials and the report layout. Saves everything in the vault. |
+| `Report.ps1` | Runs every configured module and writes `<Client>_Report_<yyyy-MM-dd>.md`, with the client's report layout. Starts `Configure.ps1` when nothing is configured yet. |
 | `Manager.ps1` | Script Manager window: configure the client, turn reports on/off and run them. |
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
 | `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`) and reports shown in the Script Manager (`Scripts`). |
@@ -64,7 +64,7 @@ The first report on a computer asks for the client. To change it later, run `.\S
 1. Enter the client name. It is the report title and file name.
 2. Pick a module by its number (iLO, iDRAC, NAS, vCenter, Veeam, Commvault...), then how many servers to add.
 3. For each server, enter its IP address or host name and its login. Servers of the same module can share one login.
-4. Repeat for every module, `R` to remove a server, then `S` to save.
+4. Repeat for every module, `R` to remove a server, `L` for the [report layout](#report-layout), then `S` to save.
 
 The vault password is asked first. Logins are saved as `MOSE:<module>:<server>` and the configuration as `MOSE:Config`, in the vault `SecretStore1`.
 
@@ -89,6 +89,51 @@ cd $HOME\Mose
 - The report is saved next to the scripts as `<Client>_Report_<yyyy-MM-dd>.md` and opened in Notepad.
 - If GitHub can't be reached, the local scripts run and a warning is shown. On the first run in a folder there are no local scripts yet, so it stops instead.
 
+## Report layout
+
+By default the report has one `##` section per server, in module order (iLO, iDRAC, BMC, NAS, StorMagic, vCenter, Veeam, Commvault), titled `<Module> <server>`. To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`):
+
+| Key | What it does |
+|---|---|
+| `M` | Move a section before another one, or to the end of a group or of the report. |
+| `T` | Rename a section (`-` for the default title). |
+| `H` | Hide or show a server. A group whose servers are all hidden is left out. |
+| `G` | New group: a heading with the sections you pick one level below. |
+| `X` | Remove a group, keeping its sections. |
+| `R` | Report title. |
+| `J` | Edit the layout as JSON in Notepad, for wildcards or groups inside groups. |
+| `D` | Back to the default layout. |
+
+The layout is saved with the client configuration in the vault (`S`), since titles can name servers. A server added later goes at the end of the report.
+
+The JSON (`J`) looks like this:
+
+```json
+{
+    "Title": "{Client} monthly report {Date}",
+    "Sections": [
+        { "Title": "Backup", "Sections": [
+            { "Module": "Veeam" },
+            { "Module": "Commvault*", "Title": "{Label}" }
+        ] },
+        { "Module": "VMware", "Title": "vCenter {Site}" },
+        { "Title": "Hardware", "Sections": [
+            { "Module": "iLO", "Server": "192.0.2.10", "Hide": true },
+            { "Module": ["iLO", "iDRAC", "BMC"], "Title": "Server {Server}" }
+        ] }
+    ],
+    "Unlisted": "End"
+}
+```
+
+- `Sections` lists the report sections in order. An entry with `Module` adds one section per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
+- A server goes under the first entry that matches it. `"Hide": true` leaves the servers it matches out of the report.
+- An entry with `Title` and `Sections` is a group: a heading with its sections one level below. Groups can be nested.
+- `Title` placeholders: `{Client}` and `{Date}` everywhere, and for a server `{Label}` (module name), `{Module}`, `{Server}` and `{Site}`.
+- `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up.
+
+Each module's own headings are moved one level below its section, whatever level the module uses, and the heading that only repeated the section title is removed (`DropTitle` in `$MoseModules`).
+
 ## Commvault Cloud token renewal
 
 Commvault Cloud deletes a token chain that is not renewed for 14 days. On a computer with a Commvault Cloud, register the weekly renewal once, from the install folder:
@@ -102,7 +147,7 @@ It renews every Commvault Cloud token saved in the vault.
 ## Add a module
 
 1. Add the script to `Modules` in `updater.config.json`.
-2. Add it to `$MoseModules` in `helper.ps1`.
+2. Add it to `$MoseModules` in `helper.ps1`, with `DropTitle = $true` if its Markdown starts with a heading that only names the module or server.
 3. In `Configure.ps1` (`Read-Target`), ask for anything it needs besides the server and login.
 4. In `Report.ps1` (`Invoke-Target`), call it with those values.
 

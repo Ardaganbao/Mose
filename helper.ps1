@@ -97,16 +97,17 @@ $MoseVaultName = 'SecretStore1'
 $MoseConfigSecretName = 'MOSE:Config'
 
 # Modules a client configuration can use, in report order.
+# DropTitle: the module starts its Markdown with a heading that only repeats the report section title.
 $MoseModules = [ordered]@{
     iLO             = @{ Label = 'HPE iLO'; Script = 'iloreport.ps1' }
-    iDRAC           = @{ Label = 'Dell iDRAC'; Script = 'IDRAC.ps1' }
-    BMC             = @{ Label = 'Lenovo BMC'; Script = 'BMCreport.ps1' }
+    iDRAC           = @{ Label = 'Dell iDRAC'; Script = 'IDRAC.ps1'; DropTitle = $true }
+    BMC             = @{ Label = 'Lenovo BMC'; Script = 'BMCreport.ps1'; DropTitle = $true }
     NAS             = @{ Label = 'Synology NAS'; Script = 'nas2.ps1' }
-    StorMagic       = @{ Label = 'StorMagic SvSAN'; Script = 'stormagicHealth.ps1' }
-    VMware          = @{ Label = 'VMware vCenter'; Script = 'vmwarereport.ps1' }
+    StorMagic       = @{ Label = 'StorMagic SvSAN'; Script = 'stormagicHealth.ps1'; DropTitle = $true }
+    VMware          = @{ Label = 'VMware vCenter'; Script = 'vmwarereport.ps1'; DropTitle = $true }
     Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1' }
-    CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1' }
-    CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1' }
+    CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
+    CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
 }
 
 function Open-MoseVault {
@@ -128,15 +129,156 @@ function Get-MoseConfig {
     return Get-Secret -Vault $Vault -Name $MoseConfigSecretName -AsPlainText | ConvertFrom-Json
 }
 
+# $Layout: order, titles and groups of the report sections, $null for the default (see README, "Report layout").
 function Save-MoseConfig {
     param(
         [Parameter(Mandatory)] [string]$Client,
+        [object[]]$Targets = @(),
+        [object]$Layout
+    )
+
+    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets); Layout = $Layout } | ConvertTo-Json -Depth 20
+    Set-Secret -Vault $MoseVaultName -Name $MoseConfigSecretName -Secret $json
+    Save-MoseModuleList -Targets $Targets
+}
+
+# The scripts run in strict mode from Start.ps1, where reading a missing JSON property is an error.
+function Get-MoseProperty {
+    param(
+        [object]$InputObject,
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($property) {
+        return $property.Value
+    }
+}
+
+# Replaces the {Name} placeholders found in $Values; unknown ones are left as typed.
+function Format-MoseTitle {
+    param(
+        [string]$Template,
+        [hashtable]$Values = @{}
+    )
+
+    $evaluator = {
+        param($match)
+        if ($Values.ContainsKey($match.Groups[1].Value)) { "$($Values[$match.Groups[1].Value])" } else { $match.Value }
+    }.GetNewClosure()
+    return [regex]::Replace($Template, '\{(\w+)\}', $evaluator)
+}
+
+$MoseDefaultReportTitle = '{Client} report {Date}'
+
+# Title of a report section: its layout title, or by default the module and server.
+function Get-MoseSectionTitle {
+    param(
+        [Parameter(Mandatory)] [object]$Section,
+        [string]$Client,
+        [string]$Date
+    )
+
+    $values = @{ Client = $Client; Date = $Date }
+    $template = $Section.Title
+    if ($Section.Target) {
+        $site = Get-MoseProperty $Section.Target 'Site'
+        $values += @{
+            Module = $Section.Target.Module
+            Label  = $MoseModules[$Section.Target.Module].Label
+            Server = Get-MoseTargetName $Section.Target
+            Site   = $site
+        }
+        if (-not $template) {
+            $template = if ($site) { '{Label} {Server} ({Site})' } else { '{Label} {Server}' }
+        }
+    }
+    return Format-MoseTitle $template $values
+}
+
+# Turns layout entries into report sections: a group (Title, Children) or one server (Target),
+# with its layout Title ('' for the default) and Hide. An entry takes the servers it matches
+# from $Remaining, so a server appears once, under the first entry that matches it.
+function New-MoseReportSections {
+    param(
+        [object[]]$Entries,
+        [System.Collections.Generic.List[object]]$Remaining
+    )
+
+    foreach ($entry in $Entries) {
+        $title = "$(Get-MoseProperty $entry 'Title')"
+        if ($entry.PSObject.Properties['Sections']) {
+            $children = New-Object System.Collections.Generic.List[object]
+            foreach ($child in @(New-MoseReportSections -Entries @(Get-MoseProperty $entry 'Sections' | Where-Object { $_ }) -Remaining $Remaining)) {
+                $children.Add($child)
+            }
+            if ($title) {
+                [pscustomobject]@{ Title = $title; Target = $null; Children = $children; Hide = $false }
+            }
+            else {
+                Write-Warning "Report layout: a group of sections has no Title, so its sections are listed without one."
+                $children
+            }
+            continue
+        }
+
+        $patterns = @(Get-MoseProperty $entry 'Module' | Where-Object { $_ })
+        if ($patterns.Count -eq 0) {
+            Write-Warning "Report layout: an entry has neither Module nor Sections and is ignored."
+            continue
+        }
+        $serverPattern = Get-MoseProperty $entry 'Server'
+        foreach ($pattern in $patterns) {
+            $modules = @($MoseModules.Keys | Where-Object { $_ -like $pattern })
+            if ($modules.Count -eq 0) {
+                Write-Warning "Report layout: no module matches '$pattern'. Modules: $($MoseModules.Keys -join ', ')."
+            }
+            foreach ($module in $modules) {
+                $targets = @($Remaining | Where-Object {
+                        $_.Module -eq $module -and (-not $serverPattern -or (Get-MoseTargetName $_) -like $serverPattern)
+                    })
+                foreach ($target in $targets) {
+                    [void]$Remaining.Remove($target)
+                    [pscustomobject]@{
+                        Title    = $title
+                        Target   = $target
+                        Children = New-Object System.Collections.Generic.List[object]
+                        Hide     = [bool](Get-MoseProperty $entry 'Hide')
+                    }
+                }
+            }
+        }
+    }
+}
+
+# Every configured server laid out by $Layout. The servers it does not place go at the end,
+# in module order, shown unless the layout says Unlisted = Hide.
+function Get-MoseReportSections {
+    param(
+        [object]$Layout,
         [object[]]$Targets = @()
     )
 
-    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets) } | ConvertTo-Json -Depth 5
-    Set-Secret -Vault $MoseVaultName -Name $MoseConfigSecretName -Secret $json
-    Save-MoseModuleList -Targets $Targets
+    $remaining = New-Object System.Collections.Generic.List[object]
+    foreach ($target in @($Targets | Where-Object { $_ })) {
+        $remaining.Add($target)
+    }
+
+    $unlisted = Get-MoseProperty $Layout 'Unlisted'
+    if ($unlisted -and $unlisted -notin 'End', 'Hide') {
+        Write-Warning "Report layout: Unlisted is 'End' or 'Hide', not '$unlisted'. Using 'End'."
+    }
+    $entries = @(Get-MoseProperty $Layout 'Sections' | Where-Object { $_ }) +
+        @($MoseModules.Keys | ForEach-Object { [pscustomobject]@{ Module = $_; Hide = $unlisted -eq 'Hide' } })
+
+    $sections = New-Object System.Collections.Generic.List[object]
+    foreach ($section in @(New-MoseReportSections -Entries $entries -Remaining $remaining)) {
+        $sections.Add($section)
+    }
+    return , $sections
 }
 
 # Start.ps1 only downloads and updates the module scripts listed here, those of the client
