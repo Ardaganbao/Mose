@@ -36,6 +36,10 @@ param(
     [Parameter()]
     [switch]$Configure,
 
+    # Preview the report with sample data after updating: no server is contacted.
+    [Parameter()]
+    [switch]$DryRun,
+
     # Set internally when the script restarts after all updates were downloaded.
     [Parameter(DontShow)]
     [switch]$UpdatesApplied,
@@ -269,6 +273,7 @@ elseif (-not $Quiet) {
     Write-Host "This keeps the MOSE report scripts up to date from GitHub and runs the report of the client configured on this computer."
     Write-Host ""
     Write-Host "  .\Start.ps1 -Configure   Enter or change the client, its servers and credentials" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -DryRun      Preview the report with sample data, without contacting any server" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -477,6 +482,11 @@ if ($UpdateOnly) {
 
 if ($Configure) {
     & (Join-Path $PSScriptRoot "Configure.ps1")
+    return
+}
+
+if ($DryRun) {
+    & (Join-Path $PSScriptRoot "Report.ps1") -DryRun | Out-Null
     return
 }
 

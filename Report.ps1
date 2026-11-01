@@ -4,30 +4,72 @@ param(
     [ValidateRange(1, 365)]
     [int]$CommvaultJobLookbackDays = 30,
 
+    [Parameter(HelpMessage = 'Preview the report with sample data, without contacting any server.')]
+    [switch]$DryRun,
+
+    # Set by Configure.ps1 to preview a configuration it has not saved yet.
+    [Parameter(DontShow)]
+    [object]$Config,
+
     [switch]$NoOpen
 )
 
 # Builds the report of the client configured on this computer (see Configure.ps1):
 # runs every module on its servers and writes <Client>_Report_<yyyy-MM-dd>.md,
 # with the section order, titles and groups of the client's report layout.
+# -DryRun writes <Client>_Report_<yyyy-MM-dd>_sample.md with sample data instead, to see the
+# layout quickly: no server, API or saved login is used.
 
 $ErrorActionPreference = 'Stop'
 # Start.ps1 hides progress bars to download faster; the modules show theirs.
 $ProgressPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'helper.ps1')
 
-Open-MoseVault
-$config = Get-MoseConfig
-if (-not $config) {
-    Write-Host "This computer has no client configuration yet." -ForegroundColor Yellow
-    & (Join-Path $PSScriptRoot 'Configure.ps1') -VaultUnlocked
+# Servers of a dry run on a computer with no client yet: one per module, at documentation addresses.
+function Get-SampleConfig {
+    $number = 10
+    $sampleTargets = foreach ($module in $MoseModules.Keys) {
+        $number++
+        $target = [pscustomobject]@{ Module = $module; Server = "192.0.2.$number"; Secret = '' }
+        if ($module -like 'Commvault*') {
+            $target.Server = ''
+            $target.Secret = "MOSE:${module}:1"
+        }
+        if ($module -in 'VMware', 'HyperV') {
+            $target | Add-Member -NotePropertyName Site -NotePropertyValue 'main'
+        }
+        $target
+    }
+    return [pscustomobject]@{ Client = 'Sample client'; Targets = @($sampleTargets); Layout = $null }
+}
+
+if ($Config) {
+    $config = $Config
+}
+else {
+    Open-MoseVault
     $config = Get-MoseConfig
-    if (-not $config) {
-        throw "No client configuration was saved, so there is nothing to report. Run .\Start.ps1 -Configure."
+    if (-not $config -and $DryRun) {
+        Write-Host "This computer has no client configuration yet: the sample report uses one server per module." -ForegroundColor Yellow
+        $config = Get-SampleConfig
+    }
+    elseif (-not $config) {
+        Write-Host "This computer has no client configuration yet." -ForegroundColor Yellow
+        & (Join-Path $PSScriptRoot 'Configure.ps1') -VaultUnlocked
+        $config = Get-MoseConfig
+        if (-not $config) {
+            throw "No client configuration was saved, so there is nothing to report. Run .\Start.ps1 -Configure."
+        }
     }
 }
-# Also lists the modules of a configuration saved before Start.ps1 downloaded only those.
-Save-MoseModuleList -Targets @($config.Targets)
+if ($DryRun -and @($config.Targets | Where-Object { $_ }).Count -eq 0) {
+    Write-Host "No server is configured yet: the sample report uses one server per module." -ForegroundColor Yellow
+    $config = [pscustomobject]@{ Client = $config.Client; Targets = (Get-SampleConfig).Targets; Layout = Get-MoseProperty $config 'Layout' }
+}
+if (-not $DryRun) {
+    # Also lists the modules of a configuration saved before Start.ps1 downloaded only those.
+    Save-MoseModuleList -Targets @($config.Targets)
+}
 
 function Get-TargetCredential {
     param(
@@ -77,6 +119,13 @@ function Invoke-Target {
             $credential = Get-TargetCredential $Target
             & $scriptPath -server $Target.Server -user $credential.UserName -pass $credential.Password -Client $config.Client -Site $Target.Site
         }
+        'HyperV' {
+            $hyperVParameters = @{ Server = $Target.Server; Site = $Target.Site }
+            if ($Target.Secret) {
+                $hyperVParameters.Credential = Get-TargetCredential $Target
+            }
+            & $scriptPath @hyperVParameters
+        }
         'Veeam' {
             $veeamParameters = @{ Server = $Target.Server; OutputPath = [System.IO.Path]::GetTempFileName(); NoOpen = $true }
             if ($Target.Secret) {
@@ -113,9 +162,371 @@ function Invoke-Target {
     }
 }
 
-# Moves the headings of a module under its section: the heading levels the module uses, in order,
-# become $TopLevel, $TopLevel + 1... whatever level each module starts at. With -DropTitle, a first
-# line that is a heading only repeats the section title and is removed.
+# Sample Markdown of a module for -DryRun, with the headings and tables the module writes,
+# so the preview nests the same way as the real report.
+function Get-SampleMarkdown {
+    param(
+        [object]$Target
+    )
+
+    $server = Get-MoseTargetName $Target
+    switch ($Target.Module) {
+        'iLO' {
+            @"
+- General Health status : OK
+
+| Information               |                                          |
+|---------------------------|------------------------------------------|
+| Server Name               | SAMPLE-HOST-01                           |
+| Product Name              | ProLiant DL380 Gen10                     |
+| Server Serial Number      | CZ0000SAMPLE                             |
+| iLO Firmware Version      | 2.81 (Jan 01 2026)                       |
+| IPv4 Address              | $server                                  |
+
+| Subsystems and Devices    | Status |
+|---------------------------|--------|
+| Power Supplies            | OK     |
+| Fans                      | OK     |
+| Memory                    | OK     |
+
+#### Check Controlers Status
+| controler ID | PartNumber | Brand | Model | Health | FirmwareVersion |
+|-----------|-------|-------|---------------|--------|--------|
+| 0 | 000000-B21 | HPE | Smart Array P408i-a | OK | 3.00 |
+
+#### Check Disks  Status
+| Disk Slot | Brand| Model |SerialNumber | MediaType| Capacity (GB) | Health |
+|-----------|-------|-------|---------|------|------|--------|
+| 1I:1:1 | HPE | EG000600JWJNP | SAMPLE01 | HDD | 600 | OK |
+| 1I:1:2 | HPE | EG000600JWJNP | SAMPLE02 | HDD | 600 | OK |
+
+#### Check Volumes  Status
+| Name | Volume Raid type | Capacity (GB) | Health |
+|-----------|-------------|---------------|--------|
+| Logical Drive 1 | RAID1 | 558 | OK |
+"@
+        }
+        { $_ -in 'iDRAC', 'BMC' } {
+            @"
+### Hardware status ($server)
+- General Health status : OK
+
+| Information               |                                          |
+|---------------------------|------------------------------------------|
+| Server Name               | SAMPLE-HOST-02                           |
+| Product Name              | Sample server model                      |
+| Server Serial Number      | SAMPLE000                                |
+| IPv4 Address              | $server                                  |
+
+| Subsystems and Devices    | Status |
+|---------------------------|--------|
+| Power Supplies            | OK     |
+| Fans                      | OK     |
+| Storage Controllers       | OK     |
+"@
+        }
+        'NAS' {
+            @"
+#### Check NAS Synology DS920+ ( $server - SN: SAMPLE000) :
+| disk | status | model | size_total | SMART status |
+|------|--------|-------|------------|--------------|
+| Drive 1 | normal | ST4000VN006 | 4 TB | normal |
+| Drive 2 | normal | ST4000VN006 | 4 TB | normal |
+
+- :heavy_check_mark: All disk normal!
+- NAS version : DSM 7.2.2
+
+| volume | status | Available | Used |
+|--------|--------|-----------|------|
+| volume_1 | normal | 2.4 TB | 1.2 TB |
+
+``````NasVolume
+| Volume (in TB) | free | used |
+|----------------|------|------|
+| volume_1       | 2.4 | 1.2 |
+``````
+"@
+        }
+        'StorMagic' {
+            @"
+## Check Stormagic
+### System
+#### Licences Info
+- License Key: SAMPLE-0000
+- Status: Valid
+#### System Info
+- hostname: sample-vsa-01
+- version: 6.3
+#### Targets
+| Name | State | Size (Tb) | Sessions |
+|------|-------|-----------|----------|
+| sample-target-01 | Synchronized | 2 | 2 |
+"@
+        }
+        'VMware' {
+            @"
+### VMware
+
+### ESXi hosts
+
+#### esx-01.sample.local
+| Hardware            |                                 |
+|---------------------|---------------------------------|
+| Manufacturer        | Sample vendor                   |
+| Memory              | 256  GB                         |
+| Overall  Status     | green                           |
+
+| Configuration    |                                         |
+|------------------|-----------------------------------------|
+| ESX Version      | 8.0.3 - 24022510                        |
+| vMotion          | True                                    |
+### Check Host Esx
+| Host | CPU Model | Speed | # Cores | CPU usage % | # Memory GB | Memory usage % |
+|------|-----------|-------|---------|-------------|-------------|----------------|
+| esx-01.sample.local | Intel Xeon Gold 6230 | 2100 | 40 | 23 | 256 | 61 |
+### Datastore Capacity
+| Name | # VMs total | Capacity MiB | Provisioned GB | In Use MiB | Free MiB | Free % |
+|------|-------------|--------------|----------------|------------|----------|--------|
+| datastore1 | 12 | 3814400 | 2900 | 2500000 | 1314400 | 34 |
+| datastore2 | 5 | 1907200 | 1100 | 1430400 | 476800 | 25 |
+
+``````Volbarstacked
+| Disk % | datastore1 |
+|--------|------------|
+| Free   |  34        |
+``````
+
+``````Volbarstacked
+| Disk % | datastore2 |
+|--------|------------|
+| Free   |  25        |
+``````
+### Vm Info
+| Name | Power state | CPU | RAM GB | Provisioned RAM GB | Consumed RAM  MiB | Consumed RAM  % | OS |
+|------|-------------|-----|--------|--------------------|-------------------|-----------------|----|
+| SAMPLE-VM-01 | :green_circle: | 4 | 16384 | 16 | 9 | 56 | Microsoft Windows Server 2022 |
+| SAMPLE-VM-02 | :green_circle: | 2 | 8192 | 8 | 3 | 38 | Ubuntu Linux (64-bit) |
+
+- (1) guest Memory usage
+- (2) Esxi Memory usage
+### Vm Storage $(Get-Date -Format 'dd/MM/yyyy')
+| Disk | Capacity GB | Free GB | Free % |
+|------|-------------|---------|--------|
+| SAMPLE-VM-01 C:\ | 100 | 38 | 38 |
+| SAMPLE-VM-02 / | 50 | 31 | 62 |
+
+``````Volbarstacked
+|Disk (%) | SAMPLE-VM-01 C:\  |SAMPLE-VM-02 /  |
+|--------|--------|--------|
+| $(Get-Date -Format 'dd/MM/yyyy')  |  38       |  62       |
+``````
+### Snapshot
+| VM | Name | Created | Size GB |
+|----|------|---------|---------|
+| SAMPLE-VM-01 | before-update | 2026-01-01 | 4 |
+"@
+        }
+        'HyperV' {
+            $date = Get-Date -Format 'dd/MM/yyyy'
+            @"
+### Hyper-V
+- Failover cluster: sample-cluster, 2 node(s)
+
+### Hyper-V hosts
+
+#### HV-NODE-01
+| Hardware            |                                  |
+|---------------------|----------------------------------|
+| Manufacturer        | Sample vendor |
+| Model               | Sample server model |
+| CPU                 | 32 cores ( 2 x Intel Xeon Gold 6338 ), 64 logical CPUs |
+| Memory              | 512 GB |
+
+| Configuration    |                                         |
+|------------------|-----------------------------------------|
+| OS               | Microsoft Windows Server 2022 Datacenter (20348) |
+| Live migration   | True |
+| Virtual machines | 2 |
+
+#### HV-NODE-02
+| Hardware            |                                  |
+|---------------------|----------------------------------|
+| Manufacturer        | Sample vendor |
+| Model               | Sample server model |
+| CPU                 | 32 cores ( 2 x Intel Xeon Gold 6338 ), 64 logical CPUs |
+| Memory              | 512 GB |
+
+### Check Host Hyper-V
+| Host | CPU Model | Speed | # Cores | CPU usage % | # Memory GB | Memory usage % |
+|------|-----------|-------|---------|-------------|-------------|----------------|
+| HV-NODE-01 | Intel Xeon Gold 6338 | 2000 | 32 | 18 | 301 | 59 |
+| HV-NODE-02 | Intel Xeon Gold 6338 | 2000 | 32 | 12 | 188 | 37 |
+
+### Cluster Shared Volumes
+| Name | # VMs total | Capacity GB | Provisioned GB | In Use GB | Free GB | Free % |
+|------|-------------|-------------|----------------|-----------|---------|--------|
+| Cluster Disk 1 | 2 | 4096 | 1100 | 2700 | 1396 | 34 |
+
+``````Volbarstacked
+| Disk % | Cluster Disk 1 |
+|--------|------------|
+| Free   |  34        |
+``````
+
+### Vm Info
+| Name | Host | State | CPU | RAM GB | Dynamic memory | Memory demand GB | Memory demand % | Generation | OS |
+|------|------|-------|-----|--------|----------------|------------------|-----------------|------------|----|
+| SAMPLE-VM-01 | HV-NODE-01 | ON | 4 | 16 | False | 9.2 | 58 | 2 | Windows Server 2022 Standard |
+| SAMPLE-VM-02 | HV-NODE-02 | ON | 2 | 6.1 | True | 5.4 | 89 | 2 | Ubuntu 22.04 LTS |
+
+- Memory demand: memory the guest asks for, against the RAM assigned to it
+- OS: reported by the integration services, empty when they do not run
+
+### Vm Disks $date
+| Disk | Type | Size GB | File GB | Free % |
+|------|------|---------|---------|--------|
+| SAMPLE-VM-01 SAMPLE-VM-01.vhdx | Dynamic | 127 | 61.4 | 52 |
+| SAMPLE-VM-02 SAMPLE-VM-02.vhdx | Dynamic | 64 | 22.8 | 64 |
+
+- Free %: room left before a dynamic disk reaches its size; a fixed disk always uses its full size
+
+``````Volbarstacked
+|Disk (%) | SAMPLE-VM-01 SAMPLE-VM-01.vhdx  |SAMPLE-VM-02 SAMPLE-VM-02.vhdx  |
+|--------|--------|--------|
+| $date  |  52       |  64       |
+``````
+
+### Checkpoint $date
+| VM | Name | Type | Created | Age (days) |
+|----|------|------|---------|------------|
+| SAMPLE-VM-01 | Before update | Production | $((Get-Date).AddDays(-12)) | 12 :warning: |
+
+### Replica
+| VM | Mode | State | Health | Replica server | Last replication |
+|----|------|-------|--------|----------------|------------------|
+| SAMPLE-VM-01 | Primary | Replicating | :heavy_check_mark: Normal | hv-dr-01.sample.local | $((Get-Date).AddMinutes(-5)) |
+"@
+        }
+        'Veeam' {
+            @"
+## Check Backup Veeam VM's:
+- Veeam version: 12.3
+- :heavy_check_mark: Veeam license expires in 200 days (2027-05-20)
+
+### Backup jobs
+
+#### Daily backup (sample)
+|$(Get-Date -Format 'dd/MM/yyyy') 22:00:10||||||Success|2 of 2 VMs processed |
+|---|---|---|-----|---|----|----|----|
+|Success|2| Start time |22:00:10| Total   size |1,2 TB |Backup size |420 GB|
+|Warning|0| End time   |22:41:03| Data   read  |700 GB |Dedupe      |1,8x|
+|Error|0| Duration     |00:40:53| Transferred  |362 GB |Compression |1,9x|
+
+##### Details
+| Name | Status | Start time | End time | Size | Read | Transferred | Duration |
+|------|--------|------------|----------|------|------|-------------|----------|
+| SAMPLE-VM-01 | Success | 22:00:10 | 22:41:03 | 600 GB | 349,8 GB | 181 GB | 00:40:53 |
+| SAMPLE-VM-02 | Success | 22:00:12 | 22:35:40 | 600 GB | 350,2 GB | 181 GB | 00:35:28 |
+
+### Check Backup Copy
+
+#### Offsite copy (sample)
+| Result |  |
+|----|----|
+| Status |  Success :heavy_check_mark: |
+| Start | $(Get-Date -Format 'dd/MM/yyyy') 23:00:00 |
+| Duration |  00:12:30 |
+
+##### Details
+| Name | Last Copy   | copy health | Number of RP |
+|------|-------------|-------------|--------------|
+| SAMPLE-VM-01 | $(Get-Date -Format 'dd/MM/yyyy') 23:12:30 | :heavy_check_mark: Ok | 7 |
+
+### SureBackup verification
+
+#### Weekly verification (sample)
+
+| Last run | Result | State | Duration |
+|---|---|---|---|
+| $(Get-Date -Format 'dd/MM/yyyy') 06:00:00 | Success | Stopped | 00:25:00 |
+
+##### VM verification details
+| VM | Status |
+|---|---|
+| SAMPLE-VM-01 | Success |
+"@
+        }
+        { $_ -in 'CommvaultCloud', 'CommvaultOnPrem' } {
+            # Same job status table as New-JobStatusTable, over the last 7 days.
+            $english = [cultureinfo]::GetCultureInfo('en-US')
+            $days = @(6..0 | ForEach-Object { (Get-Date).Date.AddDays(-$_).ToString('ddd MMM d', $english) })
+            $sampleJobTable = @(
+                "| Job Status | $($days -join ' | ') |"
+                "|---|$((@($days | ForEach-Object { '---:' })) -join '|')|"
+                '| Completed | 5 | 5 | 5 | 5 | 5 | 4 | 2 |'
+                '| Completed with Errors or Warnings | 0 | 0 | 0 | 0 | 0 | 0 | 0 |'
+                '| Failed | 0 | 0 | 1 | 0 | 0 | 0 | 0 |'
+                '| Killed | 0 | 0 | 0 | 0 | 0 | 0 | 0 |'
+                '| Committed | 0 | 0 | 0 | 0 | 0 | 0 | 0 |'
+            ) -join "`r`n"
+            @"
+# Commvault Health Report - $server - sample
+
+## License and Subscription Usage
+
+### Microsoft 365 licenses
+
+| License | Used | Purchased |
+|---|---:|---:|
+| Users | 42 | 50 |
+
+## Protected Item Health and SLA
+
+| Client | Workload | Protected item | SLA status | Last completed backup |
+|---|---|---|---|---|
+| sample-client | File System | default | Met | 2026-01-01 22:00 |
+
+## Job History
+
+### Last 7 Days Summary
+
+Jobs are counted on the day they started; today is partial.
+
+``````CommVaultJob
+$sampleJobTable
+``````
+
+$sampleJobTable
+| Total | 5 | 5 | 6 | 5 | 5 | 4 | 2 |
+| Success Rate (%) | 100 | 100 | 83.3 | 100 | 100 | 100 | 100 |
+
+### Last 30 days Overview
+
+- Data protected: 1.2 TB
+
+#### Summary per Protected Item
+
+| Client | Protected item | Jobs | Successful | Failed | Success rate |
+|---|---|---:|---:|---:|---:|
+| sample-client | default | 30 | 30 | 0 | 100% |
+
+#### Jobs Not Completed Successfully
+
+| Job ID | Client | Status | Reason |
+|---:|---|---|---|
+| All jobs in this period completed successfully. | | | |
+"@
+        }
+        default {
+            "_No sample data for module '$($Target.Module)'._"
+        }
+    }
+}
+
+# Moves the headings of a module under its server heading, however deep the server is in the
+# sections: the heading levels the module uses, in order, become $TopLevel, $TopLevel + 1...
+# whatever level each module starts at. With -DropTitle, a first line that is a heading only
+# repeats the server title and is removed.
 function Set-MarkdownHeadingLevel {
     param(
         [string]$Markdown,
@@ -147,11 +558,96 @@ function Set-MarkdownHeadingLevel {
     }
 
     $levels = @($headings | ForEach-Object Level | Sort-Object -Unique)
+    $headingIndexes = @{}
+    # A heading goes at most one level below the one before it: Markdown has no gaps (### then #####).
+    $previousLevel = $TopLevel - 1
     foreach ($heading in $headings) {
-        $level = [Math]::Min(6, $TopLevel + [array]::IndexOf($levels, $heading.Level))
-        $lines[$heading.Index] = "$('#' * $level) $($heading.Text)"
+        $level = [Math]::Min($TopLevel + [array]::IndexOf($levels, $heading.Level), $previousLevel + 1)
+        $lines[$heading.Index] = Format-MoseHeading -Level $level -Text $heading.Text
+        $headingIndexes[$heading.Index] = $true
+        $previousLevel = $level
     }
-    return ($lines -join [Environment]::NewLine).Trim()
+    return Add-MarkdownSpacing -Lines $lines -HeadingIndexes $headingIndexes
+}
+
+# Number of cells in a Markdown table row.
+function Get-MarkdownCellCount {
+    param(
+        [string]$Row
+    )
+
+    $cells = $Row.Trim() -replace '^\|', '' -replace '\|$', ''
+    return @($cells -split '\|').Count
+}
+
+# Markdown needs a blank line around a heading, a table, a --- rule and a ``` block, or it shows
+# them as plain text (and turns text followed by --- into a heading); the modules often leave none.
+# Adds them, keeps one blank line where there were several, gives a table's |---| row as many
+# columns as its header (a table is not shown otherwise), and leaves the inside of ``` blocks
+# (the graphs) as written.
+function Add-MarkdownSpacing {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [hashtable]$HeadingIndexes
+    )
+
+    $result = New-Object System.Collections.Generic.List[string]
+    $previous = 'blank'
+    $fence = $null
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if ($fence) {
+            $result.Add($line)
+            if ($line -match '^\s{0,3}(`{3,}|~{3,})\s*$' -and $matches[1][0] -eq $fence) {
+                $fence = $null
+                $previous = 'fence'
+            }
+            continue
+        }
+
+        if ($line -match '^\s{0,3}(`{3,}|~{3,})') {
+            $kind = 'fence'
+            $fence = $matches[1][0]
+        }
+        elseif (-not $line.Trim()) {
+            $kind = 'blank'
+        }
+        elseif ($HeadingIndexes.ContainsKey($i)) {
+            $kind = 'heading'
+        }
+        elseif ($line -match '^\s*\|') {
+            $kind = 'table'
+            $next = $i + 1
+            if ($previous -ne 'table' -and $next -lt $Lines.Count -and $Lines[$next] -match '^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$') {
+                $columns = Get-MarkdownCellCount $line
+                if ((Get-MarkdownCellCount $Lines[$next]) -ne $columns) {
+                    $Lines[$next] = '|' + ((@(1..$columns | ForEach-Object { '---' })) -join '|') + '|'
+                }
+            }
+        }
+        elseif ($line -match '^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$') {
+            $kind = 'rule'
+        }
+        else {
+            $kind = 'text'
+        }
+
+        if ($kind -eq 'blank') {
+            if ($previous -ne 'blank') {
+                $result.Add('')
+                $previous = 'blank'
+            }
+            continue
+        }
+        $separate = $kind -in 'heading', 'fence', 'rule' -or $previous -in 'heading', 'fence', 'rule' -or
+            (($kind -eq 'table') -ne ($previous -eq 'table'))
+        if ($previous -ne 'blank' -and $separate) {
+            $result.Add('')
+        }
+        $result.Add($line)
+        $previous = $kind
+    }
+    return ($result -join [Environment]::NewLine).Trim()
 }
 
 # A group is shown when one of its sections is.
@@ -179,7 +675,7 @@ function Add-ReportSection {
         return
     }
     $title = Get-MoseSectionTitle -Section $Section -Client $config.Client -Date $reportDate
-    $report.Add("$('#' * [Math]::Min(6, $Level)) $title")
+    $report.Add((Format-MoseHeading -Level $Level -Text $title))
     foreach ($child in $Section.Children) {
         Add-ReportSection -Section $child -Level ($Level + 1)
     }
@@ -187,9 +683,11 @@ function Add-ReportSection {
         return
     }
 
-    Write-Host "Collecting $title..." -ForegroundColor DarkGray
+    if (-not $DryRun) {
+        Write-Host "Collecting $title..." -ForegroundColor DarkGray
+    }
     try {
-        $output = @(Invoke-Target $Section.Target | Where-Object { $_ -is [string] })
+        $output = if ($DryRun) { @(Get-SampleMarkdown $Section.Target) } else { @(Invoke-Target $Section.Target | Where-Object { $_ -is [string] }) }
         $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
             -DropTitle:([bool]$MoseModules[$Section.Target.Module]['DropTitle'])
         if ($content) {
@@ -224,17 +722,22 @@ try {
     }
     $report = New-Object System.Collections.Generic.List[string]
     $report.Add("# $(Format-MoseTitle $title @{ Client = $config.Client; Date = $reportDate })")
+    if ($DryRun) {
+        $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
+    }
     $securityProtocol = [Net.ServicePointManager]::SecurityProtocol
 
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2
     }
 
-    $fileName = "$($config.Client -replace '[\\/:*?"<>|\s]', '_')_Report_$(Get-Date -Format 'yyyy-MM-dd').md"
+    $suffix = if ($DryRun) { '_sample' } else { '' }
+    $fileName = "$($config.Client -replace '[\\/:*?"<>|\s]', '_')_Report_$(Get-Date -Format 'yyyy-MM-dd')$suffix.md"
     $outputPath = Join-Path $PSScriptRoot $fileName
     $reportText = $report -join ([Environment]::NewLine + [Environment]::NewLine)
     Set-Content -LiteralPath $outputPath -Value $reportText -Encoding UTF8
-    Write-Host "$($config.Client) report written to $outputPath" -ForegroundColor Green
+    $kind = if ($DryRun) { 'sample report (dry run)' } else { 'report' }
+    Write-Host "$($config.Client) $kind written to $outputPath" -ForegroundColor Green
 
     if (-not $NoOpen) {
         Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$outputPath`""

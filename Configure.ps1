@@ -145,9 +145,9 @@ function Read-Target {
 
     $target = [pscustomobject]@{ Module = $Module; Server = $server; Secret = '' }
 
-    # Veeam runs as the current Windows user unless it is reached over PowerShell remoting.
-    if ($Module -ne 'Veeam' -or
-        ($server -notin @('localhost', '.') -and (Read-YesNo "Use another Windows account for PowerShell remoting to $server?" $false))) {
+    # Veeam and Hyper-V run as the current Windows user unless another account is given for PowerShell remoting.
+    if ($Module -notin 'Veeam', 'HyperV' -or
+        ($server -notin @('localhost', '.') -and (Read-YesNo "Use another Windows account for PowerShell remoting to ${server}?" $false))) {
         $target.Secret = Read-TargetCredential -Module $Module -Server $server
         if (-not $target.Secret) {
             Write-Host "Skipped: no credential was entered for $label $server." -ForegroundColor Yellow
@@ -159,7 +159,7 @@ function Read-Target {
         $target | Add-Member -NotePropertyName CertificateThumbprint -NotePropertyValue (Read-Answer 'Trusted certificate SHA-1 thumbprint (Enter for the normal certificate check)')
         $target | Add-Member -NotePropertyName AcceptAnyCertificate -NotePropertyValue (Read-YesNo 'Accept any certificate? Insecure, only on a trusted network' $false)
     }
-    elseif ($Module -eq 'VMware') {
+    elseif ($Module -in 'VMware', 'HyperV') {
         $target | Add-Member -NotePropertyName Site -NotePropertyValue (Read-Answer 'Site name shown in the report' 'main')
     }
 
@@ -235,7 +235,7 @@ function Read-LayoutRow {
         return $null
     }
     if (-not [int]::TryParse($answer, [ref]$number) -or $number -lt 1 -or $number -gt $Rows.Count) {
-        Write-Host "There is no section $answer." -ForegroundColor Yellow
+        Write-Host "There is no number $answer." -ForegroundColor Yellow
         return $null
     }
     return $Rows[$number - 1]
@@ -285,8 +285,51 @@ function Edit-LayoutJson {
     }
 }
 
-# Menu to reorder, rename, group and hide the report sections. Changes $layout,
-# saved with the rest of the configuration.
+# Asks for several numbers at once, e.g. "2,3,4" or "2-4"; returns their rows.
+function Read-LayoutRowList {
+    param(
+        [object[]]$Rows,
+        [string]$Prompt
+    )
+
+    $answer = Read-Answer $Prompt
+    foreach ($part in @($answer -split '[,; ]+' | Where-Object { $_ })) {
+        $first = 0
+        $last = 0
+        if ($part -match '^(\d+)-(\d+)$') {
+            $first = [int]$matches[1]
+            $last = [int]$matches[2]
+        }
+        elseif ([int]::TryParse($part, [ref]$first)) {
+            $last = $first
+        }
+        if ($first -lt 1 -or $last -gt $Rows.Count -or $first -gt $last) {
+            Write-Host "There is no number $part." -ForegroundColor Yellow
+            continue
+        }
+        $Rows[($first - 1)..($last - 1)]
+    }
+}
+
+# Moves the rows to the end of $Section, skipping a section that would go inside itself.
+function Add-ToLayoutSection {
+    param(
+        [object[]]$Members,
+        [object]$Section
+    )
+
+    foreach ($member in $Members) {
+        if (Test-InGroup -Section $Section -Group $member.Section) {
+            Write-Host "A section cannot go inside itself." -ForegroundColor Yellow
+            continue
+        }
+        [void]$member.Parent.Remove($member.Section)
+        $Section.Children.Add($member.Section)
+    }
+}
+
+# Menu to build the report sections (## headings) and attach the servers (###) to them.
+# Changes $layout, saved with the rest of the configuration.
 function Edit-ReportLayout {
     $date = Get-Date -Format 'yyyy-MM-dd'
     $sections = Get-MoseReportSections -Layout $script:layout -Targets $targets.ToArray()
@@ -298,14 +341,16 @@ function Edit-ReportLayout {
         $reportTitle = if ($title) { $title } else { $MoseDefaultReportTitle }
         Write-Host ""
         Write-Host "Report layout for $client" -ForegroundColor Cyan
-        Write-Host "  # $(Format-MoseTitle $reportTitle @{ Client = $client; Date = $date })"
+        Write-Host "      # $(Format-MoseTitle $reportTitle @{ Client = $client; Date = $date })"
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $section = $rows[$i].Section
             $text = Get-MoseSectionTitle -Section $section -Client $client -Date $date
             $color = 'Gray'
             if (-not $section.Target) {
-                $text = "[$text]"
                 $color = 'Cyan'
+                if ($section.Children.Count -eq 0) {
+                    $text += '  (empty, left out of the report)'
+                }
             }
             elseif ($section.Hide) {
                 $text += '  (hidden)'
@@ -315,47 +360,77 @@ function Edit-ReportLayout {
                 # A renamed server is also named as configured, to recognise it.
                 $text += "  ($($MoseModules[$section.Target.Module].Label) $(Get-MoseTargetName $section.Target))"
             }
-            Write-Host ("  {0,2}. {1}{2}" -f ($i + 1), ('    ' * $rows[$i].Depth), $text) -ForegroundColor $color
+            # The Markdown heading level each line gets in the report.
+            $level = $rows[$i].Depth + 2
+            $heading = if ($level -le 6) { '#' * $level } else { '**' }
+            Write-Host ("  {0,2}. {1}{2,-4}{3}" -f ($i + 1), ('  ' * $rows[$i].Depth), $heading, $text) -ForegroundColor $color
         }
         Write-Host ""
-        Write-Host "  M move   T rename   H hide/show   G new group   X remove a group   R report title"
-        Write-Host "  J edit as JSON   D default layout   B back"
+        Write-Host "  N new section or subsection   A attach servers to a section   M move   T rename   H hide/show a server"
+        Write-Host "  X remove a section (its servers stay)   R report title   J edit as JSON   D default layout"
+        Write-Host "  P preview the report with sample data   B back"
         $choice = Read-Answer 'Choice'
 
-        if ($choice -match '^[Mm]$') {
-            $row = Read-LayoutRow $rows 'Number of the section to move'
+        if ($choice -match '^[Nn]$') {
+            $sectionTitle = Read-Answer 'Section title (Enter to cancel). Placeholders: {Client} {Date}'
+            if (-not $sectionTitle) {
+                continue
+            }
+            $parent = Read-LayoutRow $rows 'Number of the section it goes in, as a subsection (Enter: a main ## section)'
+            if ($parent -and $parent.Section.Target) {
+                Write-Host "Number $($rows.IndexOf($parent) + 1) is a server, not a section." -ForegroundColor Yellow
+                continue
+            }
+            $newSection = [pscustomobject]@{ Title = $sectionTitle; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false }
+            if ($parent) {
+                $parent.Section.Children.Add($newSection)
+            }
+            else {
+                $sections.Add($newSection)
+            }
+            Add-ToLayoutSection -Section $newSection `
+                -Members @(Read-LayoutRowList $rows 'Numbers of the servers or sections to put in it, e.g. 2,3,4 or 2-4 (Enter for none)')
+        }
+        elseif ($choice -match '^[Aa]$') {
+            $members = @(Read-LayoutRowList $rows 'Numbers of the servers or sections to attach, e.g. 2,3,4 or 2-4')
+            if ($members.Count -eq 0) {
+                continue
+            }
+            $row = Read-LayoutRow $rows 'Number of the section to attach them to (Enter: the end of the report, as main sections or servers)'
+            if ($row -and $row.Section.Target) {
+                Write-Host "Number $($rows.IndexOf($row) + 1) is a server, not a section." -ForegroundColor Yellow
+                continue
+            }
+            if ($row) {
+                Add-ToLayoutSection -Members $members -Section $row.Section
+            }
+            else {
+                foreach ($member in $members) {
+                    [void]$member.Parent.Remove($member.Section)
+                    $sections.Add($member.Section)
+                }
+            }
+        }
+        elseif ($choice -match '^[Mm]$') {
+            $row = Read-LayoutRow $rows 'Number of the section or server to move'
             if (-not $row) {
                 continue
             }
-            $before = Read-LayoutRow $rows 'Move it before which number (Enter: to the end of a group or of the report)'
+            $before = Read-LayoutRow $rows 'Move it before which number (Enter: to the end of the report)'
+            if ($before -and (Test-InGroup -Section $before.Section -Group $row.Section)) {
+                Write-Host "A section cannot go inside itself." -ForegroundColor Yellow
+                continue
+            }
+            [void]$row.Parent.Remove($row.Section)
             if ($before) {
-                if (Test-InGroup -Section $before.Section -Group $row.Section) {
-                    Write-Host "A group cannot go inside itself." -ForegroundColor Yellow
-                    continue
-                }
-                [void]$row.Parent.Remove($row.Section)
                 $before.Parent.Insert($before.Parent.IndexOf($before.Section), $row.Section)
             }
             else {
-                $group = Read-LayoutRow $rows 'To the end of which group number (Enter: the end of the report)'
-                $destination = $sections
-                if ($group) {
-                    if ($group.Section.Target) {
-                        Write-Host "Section $($rows.IndexOf($group) + 1) is a server, not a group." -ForegroundColor Yellow
-                        continue
-                    }
-                    if (Test-InGroup -Section $group.Section -Group $row.Section) {
-                        Write-Host "A group cannot go inside itself." -ForegroundColor Yellow
-                        continue
-                    }
-                    $destination = $group.Section.Children
-                }
-                [void]$row.Parent.Remove($row.Section)
-                $destination.Add($row.Section)
+                $sections.Add($row.Section)
             }
         }
         elseif ($choice -match '^[Tt]$') {
-            $row = Read-LayoutRow $rows 'Number of the section to rename'
+            $row = Read-LayoutRow $rows 'Number of the section or server to rename'
             if (-not $row) {
                 continue
             }
@@ -364,7 +439,7 @@ function Edit-ReportLayout {
                 $row.Section.Title = if ($answer -eq '-') { '' } else { $answer }
             }
             else {
-                $row.Section.Title = Read-Answer 'New group title. Placeholders: {Client} {Date}' $row.Section.Title
+                $row.Section.Title = Read-Answer 'New section title. Placeholders: {Client} {Date}' $row.Section.Title
             }
         }
         elseif ($choice -match '^[Hh]$') {
@@ -373,44 +448,18 @@ function Edit-ReportLayout {
                 continue
             }
             if (-not $row.Section.Target) {
-                Write-Host "Only a server can be hidden. A group is left out when all its servers are." -ForegroundColor Yellow
+                Write-Host "Only a server can be hidden. A section is left out when all its servers are." -ForegroundColor Yellow
                 continue
             }
             $row.Section.Hide = -not $row.Section.Hide
         }
-        elseif ($choice -match '^[Gg]$') {
-            $groupTitle = Read-Answer 'Group title (Enter to cancel). Placeholders: {Client} {Date}'
-            if (-not $groupTitle) {
-                continue
-            }
-            $group = [pscustomobject]@{ Title = $groupTitle; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false }
-            $numbers = @((Read-Answer 'Numbers of the sections to put in it, separated by commas (Enter for none)') -split '[,; ]+' | Where-Object { $_ })
-            $members = @($numbers | ForEach-Object {
-                    $number = 0
-                    if ([int]::TryParse($_, [ref]$number) -and $number -ge 1 -and $number -le $rows.Count) { $rows[$number - 1] }
-                    else { Write-Host "There is no section $_." -ForegroundColor Yellow }
-                })
-            # The group takes the place of its first section.
-            if ($members.Count -gt 0) {
-                $members[0].Parent.Insert($members[0].Parent.IndexOf($members[0].Section), $group)
-            }
-            else {
-                $sections.Add($group)
-            }
-            foreach ($member in $members) {
-                if (-not (Test-InGroup -Section $group -Group $member.Section)) {
-                    [void]$member.Parent.Remove($member.Section)
-                    $group.Children.Add($member.Section)
-                }
-            }
-        }
         elseif ($choice -match '^[Xx]$') {
-            $row = Read-LayoutRow $rows 'Number of the group to remove (its sections stay)'
+            $row = Read-LayoutRow $rows 'Number of the section to remove (its servers stay, in its place)'
             if (-not $row) {
                 continue
             }
             if ($row.Section.Target) {
-                Write-Host "Section $($rows.IndexOf($row) + 1) is a server, not a group." -ForegroundColor Yellow
+                Write-Host "Number $($rows.IndexOf($row) + 1) is a server, not a section. Use H to hide it." -ForegroundColor Yellow
                 continue
             }
             $index = $row.Parent.IndexOf($row.Section)
@@ -422,7 +471,7 @@ function Edit-ReportLayout {
             $title = if ($answer -eq '-' -or $answer -eq $MoseDefaultReportTitle) { '' } else { $answer }
         }
         elseif ($choice -match '^[Jj]$') {
-            $current = if ($script:layout) { $script:layout } else { ConvertTo-Layout -Sections $sections -Title $title -Unlisted $unlisted }
+            $current = if ($script:layout) { $script:layout } else { $MoseDefaultLayout }
             try {
                 $edited = Edit-LayoutJson -Layout $current
             }
@@ -438,12 +487,18 @@ function Edit-ReportLayout {
             continue
         }
         elseif ($choice -match '^[Dd]$') {
-            if (Read-YesNo 'Go back to the default layout: one section per server, in module order?' $false) {
+            if (Read-YesNo 'Go back to the default layout: Hardware, Virtualization and storage, Backup?' $false) {
                 $script:layout = $null
                 $sections = Get-MoseReportSections -Layout $null -Targets $targets.ToArray()
                 $title = ''
                 $unlisted = ''
             }
+            continue
+        }
+        elseif ($choice -match '^[Pp]$') {
+            # This layout, saved or not, with sample data instead of the servers' own.
+            $preview = [pscustomobject]@{ Client = $client; Targets = $targets.ToArray(); Layout = $script:layout }
+            & (Join-Path $PSScriptRoot 'Report.ps1') -DryRun -Config $preview | Out-Null
             continue
         }
         elseif ($choice -match '^[Bb]$') {
@@ -474,9 +529,10 @@ Write-Host "MOSE client configuration" -ForegroundColor Cyan
 Write-Host "Saved in the SecretStore vault '$MoseVaultName' of $env:USERNAME on this computer, never in the scripts."
 Write-Host ""
 
-do {
-    $client = Read-Answer 'Client name (report title and file name)' $client
-} until ($client)
+# Asked once; C in the menu changes it.
+while (-not $client) {
+    $client = Read-Answer 'Client name (report title and file name)'
+}
 
 $moduleKeys = @($MoseModules.Keys)
 
@@ -486,13 +542,14 @@ while ($true) {
     for ($i = 0; $i -lt $moduleKeys.Count; $i++) {
         $names = @($targets | Where-Object { $_.Module -eq $moduleKeys[$i] } | ForEach-Object { Get-MoseTargetName $_ })
         $configured = if ($names.Count -gt 0) { $names -join ', ' } else { '-' }
-        Write-Host ("  {0}. {1,-28} {2}" -f ($i + 1), $MoseModules[$moduleKeys[$i]].Label, $configured)
+        Write-Host ("  {0,2}. {1,-28} {2}" -f ($i + 1), $MoseModules[$moduleKeys[$i]].Label, $configured)
     }
     $layoutText = if ($layout) { 'custom' } else { 'default' }
-    Write-Host "  L. Report layout ($layoutText): order, titles and groups of the sections"
+    Write-Host "   L. Report layout ($layoutText): the report sections and the servers in each"
+    Write-Host "   C. Client name: $client"
     Write-Host ""
 
-    $choice = Read-Answer 'Module number to add servers, R to remove one, L for the report layout, S to save, Q to quit without saving'
+    $choice = Read-Answer 'Module number to add servers, R to remove one, L for the report layout, C for the client name, S to save, Q to quit without saving'
     $number = 0
 
     if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $moduleKeys.Count) {
@@ -530,6 +587,9 @@ while ($true) {
     }
     elseif ($choice -match '^[Ll]$') {
         Edit-ReportLayout
+    }
+    elseif ($choice -match '^[Cc]$') {
+        $client = Read-Answer 'Client name (report title and file name)' $client
     }
     elseif ($choice -match '^[Ss]$') {
         Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout

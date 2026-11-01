@@ -89,6 +89,7 @@ $hostListMD = "### Check Host Esx`n"
 $hostListMD += "| Host                      | CPU Model                                 | Speed | # Cores | CPU usage % | # Memory GB | Memory usage % |`n"
 $hostListMD += "|---------------------------|-------------------------------------------|-------|---------|-------------|----------|----------------|`n"
 
+$Body += "`n### ESXi hosts`n"
 $hostIndex = 0
 foreach ($esxi in $hostList) { 
   $hostIndex++
@@ -184,7 +185,7 @@ $Body += $Volbarstacked
 
 $vInfoListMD = "### Vm Info`n" 
 $vInfoListMD += "| Name       | Power state         | CPU         | RAM GB | Provisioned RAM GB |   Consumed RAM  MiB | Consumed RAM  % | OS|`n"
-$vInfoListMD += "|------------|-------------|-------------|--------------------- |`n"
+$vInfoListMD += "|------------|-------------|-------------|--------|--------------------|---------------------|-----------------|----|`n"
 
 $vPartitionListMD = "### Vm Storage $(Get-Date -format 'dd/MM/yyyy'   )`n"
 $vPartitionListMD += "| Disk   | Capacity GB |Free GB |Free %|`n"
@@ -234,8 +235,8 @@ $Body += "`n"
 
 $Body += $vInfoListMD
 $Body += "`n"
-$Body += "(1) guest Memory usage`n"
-$Body += "(2) Esxi Memory usage`n"
+$Body += "- (1) guest Memory usage`n"
+$Body += "- (2) Esxi Memory usage`n"
 
 
 $Volbarstacked = "``````Volbarstacked`n" 
@@ -254,8 +255,7 @@ $vSnapshotListMD = "### Snapshot $(Get-Date -format 'dd/MM/yyyy'   )`n"
 Write-Progress -Id 14 -ParentId 10 -Activity 'Checking snapshots' -Status 'Querying vCenter' -PercentComplete 0
 $vsnapshotlist = get-vm | get-snapshot | Select-Object -property VM, Name, Created, @{Name='SizeGB';Expression={[math]::Round($_.SizeGB, 2)}}
 $snapshotIndex = 0
-$vsnapshotlist
-if ($vsnapshotlist -eq $null) {$Body += "No snapshot"}
+if ($vsnapshotlist -eq $null) {$vSnapshotListMD += "No snapshot`n"}
 
 else {
 
@@ -270,6 +270,8 @@ $vSnapshotListMD += "|------------|-------------|---------------------|------|`n
     
  }
  }
+$Body += "`n"
+$Body += $vSnapshotListMD
 
 $outfile = "$root\$file.md"
 $Body

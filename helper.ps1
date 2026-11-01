@@ -105,7 +105,8 @@ $MoseModules = [ordered]@{
     NAS             = @{ Label = 'Synology NAS'; Script = 'nas2.ps1' }
     StorMagic       = @{ Label = 'StorMagic SvSAN'; Script = 'stormagicHealth.ps1'; DropTitle = $true }
     VMware          = @{ Label = 'VMware vCenter'; Script = 'vmwarereport.ps1'; DropTitle = $true }
-    Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1' }
+    HyperV          = @{ Label = 'Microsoft Hyper-V'; Script = 'hypervreport.ps1'; DropTitle = $true }
+    Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1'; DropTitle = $true }
     CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
 }
@@ -173,6 +174,30 @@ function Format-MoseTitle {
 }
 
 $MoseDefaultReportTitle = '{Client} report {Date}'
+
+# Markdown heading of a report line. Markdown stops at ######, so a deeper level becomes a bold line
+# instead of being merged with the level above.
+function Format-MoseHeading {
+    param(
+        [int]$Level,
+        [string]$Text
+    )
+
+    if ($Level -le 6) {
+        return "$('#' * $Level) $Text"
+    }
+    return "**$Text**"
+}
+
+# Report layout of a client that has not changed it: three ## sections with their servers in ###.
+# A module missing here goes at the end of the report.
+$MoseDefaultLayout = [pscustomobject]@{
+    Sections = @(
+        [pscustomobject]@{ Title = 'Hardware'; Sections = @([pscustomobject]@{ Module = @('iLO', 'iDRAC', 'BMC') }) }
+        [pscustomobject]@{ Title = 'Virtualization and storage'; Sections = @([pscustomobject]@{ Module = @('VMware', 'HyperV', 'StorMagic') }) }
+        [pscustomobject]@{ Title = 'Backup'; Sections = @([pscustomobject]@{ Module = @('NAS', 'Veeam', 'CommvaultCloud', 'CommvaultOnPrem') }) }
+    )
+}
 
 # Title of a report section: its layout title, or by default the module and server.
 function Get-MoseSectionTitle {
@@ -254,14 +279,17 @@ function New-MoseReportSections {
     }
 }
 
-# Every configured server laid out by $Layout. The servers it does not place go at the end,
-# in module order, shown unless the layout says Unlisted = Hide.
+# Every configured server laid out by $Layout ($null for the default layout). The servers it does
+# not place go at the end, in module order, shown unless the layout says Unlisted = Hide.
 function Get-MoseReportSections {
     param(
         [object]$Layout,
         [object[]]$Targets = @()
     )
 
+    if (-not $Layout) {
+        $Layout = $MoseDefaultLayout
+    }
     $remaining = New-Object System.Collections.Generic.List[object]
     foreach ($target in @($Targets | Where-Object { $_ })) {
         $remaining.Add($target)

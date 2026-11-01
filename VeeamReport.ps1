@@ -323,6 +323,8 @@ Write-VeeamReportProgress -Status 'Collecting backup jobs' -PercentComplete 0
 $VbrJobs = Get-VBRJob
 $backupJobCount = @($VbrJobs).Count
 $backupJobIndex = 0
+# Same level as Check Backup Copy and SureBackup verification below.
+$Body += "`n### Backup jobs`n"
 
 foreach ($Job in $VbrJobs) { 
     $backupJobIndex++
@@ -334,11 +336,11 @@ foreach ($Job in $VbrJobs) {
 
         $s = $Job.FindLastSession()
         if ($null -eq $s) {
-            $Body += "`n### $($Job.Info.Name)`nNo backup session found.`n"
+            $Body += "`n#### $($Job.Info.Name)`nNo backup session found.`n"
             continue
         }
 
-        $Body += "`n### "
+        $Body += "`n#### "
         $Body += $Job.Info.Name + "`n"
         $totalsuccess = 0
         $totalwarning = 0
@@ -348,7 +350,7 @@ foreach ($Job in $VbrJobs) {
         $list = $s.GetTaskSessions()
         $totalVM = $list.Count
 
-        $vmDetails = "`n#### Details`n"
+        $vmDetails = "`n##### Details`n"
         $vmDetails += "| Name | Status  | Start time   | End time | Size | Read | Transferred | Duration |`n"
         $vmDetails += "|------|---------|--------------|----------|------|------|-------------|----------|`n"
 
@@ -402,11 +404,11 @@ foreach ($Job in $VbrJobs) {
 
                 $s = $Job.FindLastSession()
                 if ($null -eq $s) {
-                    $Body += "`n### $($Job.Info.Name)`nNo backup session found.`n"
+                    $Body += "`n#### $($Job.Info.Name)`nNo backup session found.`n"
                     continue
                 }
 
-                $Body += "`n### "
+                $Body += "`n#### "
                 $Body += $Job.Info.Name + "`n"
                 $totalsuccess = 0
                 $totalwarning = 0
@@ -416,7 +418,7 @@ foreach ($Job in $VbrJobs) {
                 $list = $s.GetTaskSessions()
                 $totalVM = $list.Count
 
-                $vmDetails = "`n#### Details`n"
+                $vmDetails = "`n##### Details`n"
                 $vmDetails += "| Name | Status  | Start time   | End time | Size | Read | Transferred | Duration |`n"
                 $vmDetails += "|------|---------|--------------|----------|------|------|-------------|----------|`n"
 
@@ -466,7 +468,7 @@ foreach ($Job in $VbrJobs) {
 
                     $s = $Job.FindLastSession()
                     if ($null -eq $s) {
-                        $Body += "`n### $($Job.Info.Name)`nNo backup session found.`n"
+                        $Body += "`n#### $($Job.Info.Name)`nNo backup session found.`n"
                         continue
                     }
                     $sessions = Get-VBRComputerBackupJobSession -Name "$($job.Name)" | Sort-Object –Property CreationTime –Descending | Select-Object -First 20
@@ -481,7 +483,7 @@ foreach ($Job in $VbrJobs) {
 
 
                     }
-                    $Body += "`n### "
+                    $Body += "`n#### "
                     $Body += $Job.Info.Name + "`n"
                     $totalsuccess = 0
                     $totalwarning = 0
@@ -490,7 +492,7 @@ foreach ($Job in $VbrJobs) {
    
                     $totalVM = $list.Count
   
-                    $vmDetails = "`n#### Details`n"
+                    $vmDetails = "`n##### Details`n"
                     $vmDetails += "| Name | Status  | Start time   | End time | Size | Read | Transferred | Duration |`n"
                     $vmDetails += "|------|---------|--------------|----------|------|------|-------------|----------|`n"
   
@@ -551,8 +553,9 @@ $list = @()
 $backupCopyJobs = @(Get-VBRBackupCopyJob)
 $backupCopyJobCount = $backupCopyJobs.Count
 $backupCopyJobIndex = 0
+$Bodycopy += "`n### Check Backup Copy`n"
 if ($backupCopyJobs.Count -eq 0) {
-    $Bodycopy += "`n### Check Backup Copy`nNo Backup Copy jobs are configured.`n"
+    $Bodycopy += "No Backup Copy jobs are configured.`n"
 }
 #$ListSession = [Veeam.Backup.Core.CBackupSession]::GetAll() | Sort-Object -Property EndTime
              
@@ -610,7 +613,6 @@ foreach ($BJob in $backupCopyJobs) {
     }
 
     $Bodycopy += "`n"
-    $Bodycopy += "### Check Backup Copy `n" 
     $Bodycopy += "#### " + $bJob.Name + "`n"
     if ($bJob.LastState -eq "Stopped" -and $null -ne $Session) {
         if ($Session.Result -eq "Success") { $status = ":heavy_check_mark:" }else { $status = ":x:" }

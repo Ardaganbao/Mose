@@ -524,7 +524,7 @@ if ($null -ne $Memories ) {
     }
 }
 else {
-    $Body += "No Processor data available.`n"
+    $Body += "No Memory data available.`n"
 }
 
 # Function to retrieve   controller information

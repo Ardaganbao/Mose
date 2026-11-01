@@ -295,7 +295,7 @@ $info = (ConvertFrom-Json $json).data
 
 $Body = "#### Check NAS Synology $($info.model) ( $($server) - SN: $($info.serial)) :`n"
 $Body += "| disk           | status                     |  model             |  size_total       |SMART status       |`n"
-$Body += "|------------------|----------------------------|--------------|---------|`n"
+$Body += "|------------------|----------------------------|--------------|---------|---------|`n"
 $status = "normal"
 foreach ($disk in $disks){
 $Body += "|$($disk.name)|$($disk.status)|$($disk.model)|$(Convert-Bytes ($disk.size_total))|$($disk.smart_status)|`n"

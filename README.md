@@ -27,6 +27,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `nas2.ps1` | Module: Synology NAS. |
 | `stormagicHealth.ps1` | Module: StorMagic SvSAN. |
 | `vmwarereport.ps1` | Module: VMware vCenter. |
+| `hypervreport.ps1` | Module: Microsoft Hyper-V host or failover cluster, over PowerShell remoting. |
 | `VeeamReport.ps1` | Module: Veeam Backup & Replication. |
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
@@ -61,8 +62,8 @@ The token is saved to `github-token.xml`, encrypted so only this Windows user on
 
 The first report on a computer asks for the client. To change it later, run `.\Start.ps1 -Configure`, or click **Configure client** in the Script Manager.
 
-1. Enter the client name. It is the report title and file name.
-2. Pick a module by its number (iLO, iDRAC, NAS, vCenter, Veeam, Commvault...), then how many servers to add.
+1. Enter the client name. It is the report title and file name. It is asked only the first time; `C` in the menu changes it.
+2. Pick a module by its number (iLO, iDRAC, NAS, vCenter, Hyper-V, Veeam, Commvault...), then how many servers to add.
 3. For each server, enter its IP address or host name and its login. Servers of the same module can share one login.
 4. Repeat for every module, `R` to remove a server, `L` for the [report layout](#report-layout), then `S` to save.
 
@@ -72,12 +73,17 @@ A computer only downloads the module scripts its client uses. Saving downloads t
 
 Commvault tokens already in the vault (for example saved by an older report script) are offered for reuse, so a Commvault Cloud token chain keeps going.
 
+### Hyper-V
+
+Enter a Hyper-V host, or a failover cluster name to report every node of the cluster. The report connects over PowerShell remoting (WinRM) as the current Windows user, or as another account when asked. On the hosts, PowerShell remoting must be enabled (`Enable-PSRemoting`), and an IP address or a host outside the domain must be in this computer's TrustedHosts. Hyper-V cannot see the free space inside a VM, so the VM disks show how full each virtual disk file is.
+
 ## Run the report
 
 ```powershell
 cd $HOME\Mose
 .\Start.ps1              # update, then run the report
 .\Start.ps1 -Configure   # update, then change the client configuration
+.\Start.ps1 -DryRun      # update, then preview the report with sample data
 .\Start.ps1 -Gui         # update, then open the Script Manager
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only
@@ -87,24 +93,34 @@ cd $HOME\Mose
 - The report asks for the SecretStore vault password.
 - From the Script Manager, the report and the configuration open in their own window to ask for it. The output also appears at the bottom of the Script Manager.
 - The report is saved next to the scripts as `<Client>_Report_<yyyy-MM-dd>.md` and opened in Notepad.
+- `-DryRun` (or **Sample report (dry run)** in the Script Manager, or `P` in the report layout menu) writes `<Client>_Report_<yyyy-MM-dd>_sample.md` with sample data, to check the sections, titles and heading levels in a few seconds. No server, API or saved login is used. Without any server configured, it shows one sample server per module.
 - If GitHub can't be reached, the local scripts run and a warning is shown. On the first run in a folder there are no local scripts yet, so it stops instead.
 
 ## Report layout
 
-By default the report has one `##` section per server, in module order (iLO, iDRAC, BMC, NAS, StorMagic, vCenter, Veeam, Commvault), titled `<Module> <server>`. To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`):
+The report title is `#`. By default the report has three `##` sections, each with its servers in `###` (`<Module> <server>`):
+
+| Section | Servers |
+|---|---|
+| Hardware | iLO, iDRAC, BMC |
+| Virtualization and storage | VMware vCenter, Hyper-V, StorMagic |
+| Backup | Synology NAS, Veeam, Commvault |
+
+To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`). The menu shows the heading level of each line:
 
 | Key | What it does |
 |---|---|
-| `M` | Move a section before another one, or to the end of a group or of the report. |
-| `T` | Rename a section (`-` for the default title). |
-| `H` | Hide or show a server. A group whose servers are all hidden is left out. |
-| `G` | New group: a heading with the sections you pick one level below. |
-| `X` | Remove a group, keeping its sections. |
+| `N` | New section, or a subsection inside a section, with the servers you put in it (`2,3,4` or `2-4`). |
+| `A` | Attach servers or subsections to a section. |
+| `M` | Move a section or a server before another one, or to the end of the report. |
+| `T` | Rename a section or a server (`-` for the default title). |
+| `H` | Hide or show a server. A section whose servers are all hidden is left out. |
+| `X` | Remove a section, keeping its servers in its place. |
 | `R` | Report title. |
-| `J` | Edit the layout as JSON in Notepad, for wildcards or groups inside groups. |
+| `J` | Edit the layout as JSON in Notepad, for wildcards or sections inside sections. |
 | `D` | Back to the default layout. |
 
-The layout is saved with the client configuration in the vault (`S`), since titles can name servers. A server added later goes at the end of the report.
+The layout is saved with the client configuration in the vault (`S`), since titles can name servers. A server added later goes into its default section with the default layout, or at the end of the report once the layout is changed.
 
 The JSON (`J`) looks like this:
 
@@ -126,13 +142,13 @@ The JSON (`J`) looks like this:
 }
 ```
 
-- `Sections` lists the report sections in order. An entry with `Module` adds one section per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
+- `Sections` lists the report sections in order. An entry with `Module` adds one `###` per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
 - A server goes under the first entry that matches it. `"Hide": true` leaves the servers it matches out of the report.
-- An entry with `Title` and `Sections` is a group: a heading with its sections one level below. Groups can be nested.
+- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested.
 - `Title` placeholders: `{Client}` and `{Date}` everywhere, and for a server `{Label}` (module name), `{Module}`, `{Server}` and `{Site}`.
 - `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up.
 
-Each module's own headings are moved one level below its section, whatever level the module uses, and the heading that only repeated the section title is removed (`DropTitle` in `$MoseModules`).
+Each module's own headings are moved one level below its server heading, whatever level the module uses and however deep the server is in subsections. The heading that only repeated the server title is removed (`DropTitle` in `$MoseModules`). Markdown stops at `######`, so a deeper heading becomes a bold line.
 
 ## Commvault Cloud token renewal
 

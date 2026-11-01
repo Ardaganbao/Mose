@@ -246,6 +246,11 @@ Add-Button "Configure client" {
     Add-Job -Label "Configure client" -Path (Join-Path $PSScriptRoot "Configure.ps1")
 }
 
+# The report with sample data, to check its sections quickly: no server is contacted.
+Add-Button "Sample report (dry run)" {
+    Add-Job -Label "Sample report (dry run)" -Path (Join-Path $PSScriptRoot "Report.ps1") -Arguments "-DryRun"
+}
+
 Add-Button "Check for updates" {
     Add-Job -Label "Check for updates" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-UpdateOnly" -ReloadList -Hidden
 }
