@@ -650,7 +650,7 @@ function Add-MarkdownSpacing {
     return ($result -join [Environment]::NewLine).Trim()
 }
 
-# A group is shown when one of its sections is.
+# A group is shown when it has text, or when one of its sections is shown.
 function Test-ReportSectionShown {
     param(
         [object]$Section
@@ -659,7 +659,7 @@ function Test-ReportSectionShown {
     if ($Section.Hide) {
         return $false
     }
-    if ($Section.Target) {
+    if ($Section.Target -or $Section.Text) {
         return $true
     }
     return @($Section.Children | Where-Object { Test-ReportSectionShown $_ }).Count -gt 0
@@ -676,6 +676,11 @@ function Add-ReportSection {
     }
     $title = Get-MoseSectionTitle -Section $Section -Client $config.Client -Date $reportDate
     $report.Add((Format-MoseHeading -Level $Level -Text $title))
+    if ($Section.Text) {
+        # Written in the layout menu; its own headings, if any, go below the section's.
+        $text = Format-MoseTitle $Section.Text @{ Client = $config.Client; Date = $reportDate }
+        $report.Add((Set-MarkdownHeadingLevel -Markdown $text -TopLevel ($Level + 1)))
+    }
     foreach ($child in $Section.Children) {
         Add-ReportSection -Section $child -Level ($Level + 1)
     }

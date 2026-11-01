@@ -224,9 +224,10 @@ function Get-MoseSectionTitle {
     return Format-MoseTitle $template $values
 }
 
-# Turns layout entries into report sections: a group (Title, Children) or one server (Target),
-# with its layout Title ('' for the default) and Hide. An entry takes the servers it matches
-# from $Remaining, so a server appears once, under the first entry that matches it.
+# Turns layout entries into report sections: a group (Title, Text written under its heading,
+# Children) or one server (Target), with its layout Title ('' for the default) and Hide. An entry
+# takes the servers it matches from $Remaining, so a server appears once, under the first entry
+# that matches it.
 function New-MoseReportSections {
     param(
         [object[]]$Entries,
@@ -241,7 +242,7 @@ function New-MoseReportSections {
                 $children.Add($child)
             }
             if ($title) {
-                [pscustomobject]@{ Title = $title; Target = $null; Children = $children; Hide = $false }
+                [pscustomobject]@{ Title = $title; Text = "$(Get-MoseProperty $entry 'Text')"; Target = $null; Children = $children; Hide = $false }
             }
             else {
                 Write-Warning "Report layout: a group of sections has no Title, so its sections are listed without one."
@@ -269,6 +270,7 @@ function New-MoseReportSections {
                     [void]$Remaining.Remove($target)
                     [pscustomobject]@{
                         Title    = $title
+                        Text     = ''
                         Target   = $target
                         Children = New-Object System.Collections.Generic.List[object]
                         Hide     = [bool](Get-MoseProperty $entry 'Hide')

@@ -113,7 +113,8 @@ To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`). 
 | `N` | New section, or a subsection inside a section, with the servers you put in it (`2,3,4` or `2-4`). |
 | `A` | Attach servers or subsections to a section. |
 | `M` | Move a section or a server before another one, or to the end of the report. |
-| `T` | Rename a section or a server (`-` for the default title). |
+| `T` | Change the title of a server or a section. It shows the current and default titles; Enter keeps the title, `-` goes back to the default (`<Module> <server>`). Placeholders: `{Label}`, `{Server}`, `{Site}`, `{Client}`, `{Date}`. |
+| `W` | Write the text of a section or subsection, shown under its title before its servers: type it here (a line with only `.` ends it) or edit it in Notepad. Markdown is allowed, with `{Client}` and `{Date}`. A section with text is shown even without servers, e.g. a Summary. |
 | `H` | Hide or show a server. A section whose servers are all hidden is left out. |
 | `X` | Remove a section, keeping its servers in its place. |
 | `R` | Report title. |
@@ -144,7 +145,7 @@ The JSON (`J`) looks like this:
 
 - `Sections` lists the report sections in order. An entry with `Module` adds one `###` per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
 - A server goes under the first entry that matches it. `"Hide": true` leaves the servers it matches out of the report.
-- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested.
+- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested. `Text` adds Markdown under its heading.
 - `Title` placeholders: `{Client}` and `{Date}` everywhere, and for a server `{Label}` (module name), `{Module}`, `{Server}` and `{Site}`.
 - `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up.
 

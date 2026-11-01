@@ -174,7 +174,12 @@ function ConvertTo-LayoutEntry {
     )
 
     if (-not $Section.Target) {
-        return [pscustomobject][ordered]@{ Title = $Section.Title; Sections = @($Section.Children | ForEach-Object { ConvertTo-LayoutEntry $_ }) }
+        $group = [ordered]@{ Title = $Section.Title }
+        if ($Section.Text) {
+            $group.Text = $Section.Text
+        }
+        $group.Sections = @($Section.Children | ForEach-Object { ConvertTo-LayoutEntry $_ })
+        return [pscustomobject]$group
     }
     $entry = [ordered]@{
         Module = $Section.Target.Module
@@ -259,6 +264,28 @@ function Test-InGroup {
     return $false
 }
 
+# Opens $Content in Notepad and returns it as saved there.
+function Edit-InNotepad {
+    param(
+        [string]$Content,
+        [string]$Extension,
+        [string]$What
+    )
+
+    # Deleted right after: the layout can name the client's servers.
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) "MOSE-layout-$([guid]::NewGuid().ToString('N'))$Extension"
+    try {
+        Set-Content -LiteralPath $path -Value $Content -Encoding UTF8
+        Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$path`""
+        # Notepad can open the file in an existing window and return at once, so the user says when.
+        Read-Host -Prompt "Edit $What in Notepad, save it, then press Enter here" | Out-Null
+        return "$(Get-Content -LiteralPath $path -Raw)".Trim()
+    }
+    finally {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Opens the layout in Notepad, for what the menu does not do: wildcards, groups in groups...
 # Returns the edited layout, or throws when it is not valid JSON.
 function Edit-LayoutJson {
@@ -266,23 +293,27 @@ function Edit-LayoutJson {
         [object]$Layout
     )
 
-    # Deleted right after: the layout can name the client's servers.
-    $path = Join-Path ([System.IO.Path]::GetTempPath()) "MOSE-layout-$([guid]::NewGuid().ToString('N')).json"
+    $json = Edit-InNotepad -Content (ConvertTo-Json -InputObject $Layout -Depth 20) -Extension '.json' -What 'the layout (see README, "Report layout")'
     try {
-        ConvertTo-Json -InputObject $Layout -Depth 20 | Set-Content -LiteralPath $path -Encoding UTF8
-        Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$path`""
-        # Notepad can open the file in an existing window and return at once, so the user says when.
-        Read-Host -Prompt 'Edit the layout in Notepad, save it, then press Enter here (see README, "Report layout")' | Out-Null
-        try {
-            return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-        }
-        catch {
-            throw "The layout is not valid JSON: $($_.Exception.Message)"
-        }
+        return $json | ConvertFrom-Json
     }
-    finally {
-        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    catch {
+        throw "The layout is not valid JSON: $($_.Exception.Message)"
     }
+}
+
+# Text typed here, line by line, until a line with only a dot. Blank lines separate paragraphs.
+function Read-TextLines {
+    Write-Host "  Type the text (Markdown: **bold**, - list, | table |...). A line with only . ends it." -ForegroundColor DarkGray
+    $lines = New-Object System.Collections.Generic.List[string]
+    while ($true) {
+        $line = "$(Read-Host -Prompt ' ')"
+        if ($line.Trim() -eq '.') {
+            break
+        }
+        $lines.Add($line)
+    }
+    return ($lines -join [Environment]::NewLine).Trim()
 }
 
 # Asks for several numbers at once, e.g. "2,3,4" or "2-4"; returns their rows.
@@ -348,7 +379,15 @@ function Edit-ReportLayout {
             $color = 'Gray'
             if (-not $section.Target) {
                 $color = 'Cyan'
-                if ($section.Children.Count -eq 0) {
+                if ($section.Text) {
+                    # The start of its text, to recognise it.
+                    $firstLine = (($section.Text -split '\r?\n' | Where-Object { $_.Trim() }) | Select-Object -First 1).Trim()
+                    if ($firstLine.Length -gt 40) {
+                        $firstLine = $firstLine.Substring(0, 40) + '...'
+                    }
+                    $text += "  (text: $firstLine)"
+                }
+                elseif ($section.Children.Count -eq 0) {
                     $text += '  (empty, left out of the report)'
                 }
             }
@@ -366,7 +405,8 @@ function Edit-ReportLayout {
             Write-Host ("  {0,2}. {1}{2,-4}{3}" -f ($i + 1), ('  ' * $rows[$i].Depth), $heading, $text) -ForegroundColor $color
         }
         Write-Host ""
-        Write-Host "  N new section or subsection   A attach servers to a section   M move   T rename   H hide/show a server"
+        Write-Host "  N new section or subsection   A attach servers to a section   M move   H hide/show a server"
+        Write-Host "  T change the title of a server or a section   W write the text of a section"
         Write-Host "  X remove a section (its servers stay)   R report title   J edit as JSON   D default layout"
         Write-Host "  P preview the report with sample data   B back"
         $choice = Read-Answer 'Choice'
@@ -381,7 +421,7 @@ function Edit-ReportLayout {
                 Write-Host "Number $($rows.IndexOf($parent) + 1) is a server, not a section." -ForegroundColor Yellow
                 continue
             }
-            $newSection = [pscustomobject]@{ Title = $sectionTitle; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false }
+            $newSection = [pscustomobject]@{ Title = $sectionTitle; Text = ''; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false }
             if ($parent) {
                 $parent.Section.Children.Add($newSection)
             }
@@ -430,16 +470,53 @@ function Edit-ReportLayout {
             }
         }
         elseif ($choice -match '^[Tt]$') {
-            $row = Read-LayoutRow $rows 'Number of the section or server to rename'
+            $row = Read-LayoutRow $rows 'Number of the server or section to give another title'
             if (-not $row) {
                 continue
             }
             if ($row.Section.Target) {
-                $answer = Read-Answer 'New title, - for the default. Placeholders: {Label} {Server} {Site} {Client} {Date}' $row.Section.Title
-                $row.Section.Title = if ($answer -eq '-') { '' } else { $answer }
+                $default = Get-MoseSectionTitle -Section ([pscustomobject]@{ Title = ''; Target = $row.Section.Target }) -Client $client -Date $date
+                Write-Host "  Title now:      $(Get-MoseSectionTitle -Section $row.Section -Client $client -Date $date)"
+                Write-Host "  Default title:  $default"
+                Write-Host "  Placeholders:   {Label} module, {Server} name or address, {Site}, {Client}, {Date}" -ForegroundColor DarkGray
+                $answer = Read-Answer 'New title of this server in the report (Enter keeps it, - for the default)'
+                if ($answer -eq '-') {
+                    $row.Section.Title = ''
+                }
+                elseif ($answer) {
+                    $row.Section.Title = $answer
+                }
             }
             else {
                 $row.Section.Title = Read-Answer 'New section title. Placeholders: {Client} {Date}' $row.Section.Title
+            }
+        }
+        elseif ($choice -match '^[Ww]$') {
+            $row = Read-LayoutRow $rows 'Number of the section to write the text of'
+            if (-not $row) {
+                continue
+            }
+            if ($row.Section.Target) {
+                Write-Host "Number $($rows.IndexOf($row) + 1) is a server: text goes in a section. Make one with N." -ForegroundColor Yellow
+                continue
+            }
+            if ($row.Section.Text) {
+                Write-Host "  Text now:" -ForegroundColor DarkGray
+                $row.Section.Text -split '\r?\n' | ForEach-Object { Write-Host "  | $_" }
+            }
+            Write-Host "  Written under the section title, before its servers. Placeholders: {Client} {Date}" -ForegroundColor DarkGray
+            $how = Read-Answer 'T to type it here, E to edit it in Notepad, - to remove it, Enter to keep it'
+            if ($how -match '^[Tt]$') {
+                $row.Section.Text = Read-TextLines
+            }
+            elseif ($how -match '^[Ee]$') {
+                $row.Section.Text = Edit-InNotepad -Content $row.Section.Text -Extension '.md' -What "the text of $($row.Section.Title)"
+            }
+            elseif ($how -eq '-') {
+                $row.Section.Text = ''
+            }
+            else {
+                continue
             }
         }
         elseif ($choice -match '^[Hh]$') {
