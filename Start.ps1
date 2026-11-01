@@ -6,7 +6,9 @@ param(
     [Parameter()]
     [string]$Repository = "Mose",
 
+    # Branch, tag or commit to update to, e.g. -Version v1.0.0-rc.1. The next run without it goes back to main.
     [Parameter()]
+    [Alias("Version")]
     [string]$Branch = "main",
 
     # Where the one-liner installs the scripts.
@@ -277,6 +279,7 @@ elseif (-not $Quiet) {
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Version v1.0.0-rc.1  Update to a tag (or a branch or commit) instead of the latest" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SaveToken   Replace the saved GitHub token" -ForegroundColor DarkGray
     Write-Host ""
     if ($FirstRun) {

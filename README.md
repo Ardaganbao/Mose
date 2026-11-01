@@ -88,6 +88,7 @@ cd $HOME\Mose
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only
 .\Start.ps1 -SkipUpdate  # run without checking GitHub
+.\Start.ps1 -Version v1.0.0-rc.1  # update to a tag, branch or commit instead of the latest
 ```
 
 - The report asks for the SecretStore vault password.
