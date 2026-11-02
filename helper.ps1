@@ -107,6 +107,8 @@ $MoseModules = [ordered]@{
     VMware          = @{ Label = 'VMware vCenter'; Script = 'vmwarereport.ps1'; DropTitle = $true }
     HyperV          = @{ Label = 'Microsoft Hyper-V'; Script = 'hypervreport.ps1'; DropTitle = $true }
     Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1'; DropTitle = $true }
+    # The same report over Veeam's REST API: no Veeam console, PowerShell remoting or administrator rights needed.
+    VeeamApi        = @{ Label = 'Veeam Backup & Replication (REST API)'; Script = 'VeeamRestReport.ps1'; DropTitle = $true }
     CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
 }
@@ -204,7 +206,7 @@ $MoseDefaultLayout = [pscustomobject]@{
     Sections = @(
         [pscustomobject]@{ Title = 'Hardware'; Sections = @([pscustomobject]@{ Module = @('iLO', 'iDRAC', 'BMC') }) }
         [pscustomobject]@{ Title = 'Virtualization and storage'; Sections = @([pscustomobject]@{ Module = @('VMware', 'HyperV', 'StorMagic') }) }
-        [pscustomobject]@{ Title = 'Backup'; Sections = @([pscustomobject]@{ Module = @('NAS', 'Veeam', 'CommvaultCloud', 'CommvaultOnPrem') }) }
+        [pscustomobject]@{ Title = 'Backup'; Sections = @([pscustomobject]@{ Module = @('NAS', 'Veeam', 'VeeamApi', 'CommvaultCloud', 'CommvaultOnPrem') }) }
     )
 }
 
@@ -353,7 +355,9 @@ function Invoke-MoseModule {
         [Parameter(Mandatory)] [object]$Target,
         [pscredential]$Credential,
         [string]$Client,
-        [int]$CommvaultJobLookbackDays = 30
+        [int]$CommvaultJobLookbackDays = 30,
+        # With Report.ps1 -DebugLog: where the modules that can write what their server answered do so.
+        [string]$DebugDumpPath
     )
 
     # The module scripts were written without strict mode, which Start.ps1 turns on for the scripts it runs.
@@ -365,7 +369,14 @@ function Invoke-MoseModule {
     }
 
     switch ($Target.Module) {
-        { $_ -in 'iLO', 'iDRAC', 'BMC' } {
+        'iLO' {
+            $iloParameters = @{ server = $Target.Server; credential = $Credential }
+            if ($DebugDumpPath) {
+                $iloParameters.StorageDebugPath = $DebugDumpPath
+            }
+            & $scriptPath @iloParameters
+        }
+        { $_ -in 'iDRAC', 'BMC' } {
             & $scriptPath -server $Target.Server -credential $Credential
         }
         'NAS' {
@@ -402,6 +413,19 @@ function Invoke-MoseModule {
             finally {
                 Remove-Item -LiteralPath $veeamParameters.OutputPath -Force -ErrorAction SilentlyContinue
             }
+        }
+        'VeeamApi' {
+            $veeamApiParameters = @{ Server = $Target.Server; Credential = $Credential }
+            if ($Target.PSObject.Properties['CertificateThumbprint'] -and $Target.CertificateThumbprint) {
+                $veeamApiParameters.CertificateThumbprint = $Target.CertificateThumbprint
+            }
+            if ($Target.PSObject.Properties['AcceptAnyCertificate'] -and $Target.AcceptAnyCertificate) {
+                $veeamApiParameters.AcceptAnyCertificate = $true
+            }
+            if ($DebugDumpPath) {
+                $veeamApiParameters.ApiDumpPath = $DebugDumpPath
+            }
+            & $scriptPath @veeamApiParameters
         }
         { $_ -in 'CommvaultCloud', 'CommvaultOnPrem' } {
             # The Commvault script writes its report to a file, read back here.
@@ -475,6 +499,10 @@ function ConvertTo-MoseFailure {
         Detail               = @(Get-MoseErrorDetail $ErrorRecord)
         # Set by Veeam and Hyper-V when the server refused the login over PowerShell remoting.
         RemotingAccessDenied = [bool]$ErrorRecord.Exception.Data['RemotingAccessDenied']
+        # Set by the Veeam REST API module: a refused login, or a certificate this computer doesn't trust.
+        LoginRefused         = [bool]$ErrorRecord.Exception.Data['LoginRefused']
+        UntrustedCertificate = "$($ErrorRecord.Exception.Data['UntrustedCertificate'])"
+        CertificateSubject   = "$($ErrorRecord.Exception.Data['CertificateSubject'])"
     }
 }
 

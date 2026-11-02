@@ -28,7 +28,8 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `stormagicHealth.ps1` | Module: StorMagic SvSAN. |
 | `vmwarereport.ps1` | Module: VMware vCenter. |
 | `hypervreport.ps1` | Module: Microsoft Hyper-V host or failover cluster, over PowerShell remoting. |
-| `VeeamReport.ps1` | Module: Veeam Backup & Replication. |
+| `VeeamReport.ps1` | Module: Veeam Backup & Replication, with the Veeam PowerShell module (on the Veeam server, or there over PowerShell remoting). |
+| `VeeamRestReport.ps1` | Module: Veeam Backup & Replication over its REST API. |
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
 
@@ -82,6 +83,12 @@ Enter a Hyper-V host, or a failover cluster name to report every node of the clu
 ### Veeam and Hyper-V by IP address
 
 PowerShell remoting only connects to an IP address that is in this computer's TrustedHosts, and only with a login given explicitly. With the server's name in the domain, Kerberos needs neither and checks the server's identity, so prefer the name. For an IP address, the configuration asks for the login, and both the configuration and the report offer to add the address to TrustedHosts. Windows asks for administrator rights for that. The report also shows the server's name when DNS knows it. By hand, as administrator: `Set-Item WSMan:\localhost\Client\TrustedHosts -Value '<IP>' -Concatenate -Force`. Add an address only on a network you trust: Windows does not check the identity of a server in TrustedHosts.
+
+### Veeam over the REST API
+
+**Veeam Backup & Replication (REST API)** reads the same report from Veeam's REST API (Veeam 11 or later, HTTPS port 9419 of the Veeam server), with the repositories' free space too. It needs no Veeam console, no PowerShell remoting and no Windows administrator rights on the Veeam server: only port 9419 open from this computer, and a Veeam account with a role (Users and Roles in the Veeam console, e.g. Veeam Backup Viewer), entered as `DOMAIN\user`.
+
+The REST API usually has Veeam's own certificate, which this computer doesn't trust. Give its SHA-1 thumbprint when adding the server, or leave it empty: the first report then shows the certificate's thumbprint and offers to trust it for this server, after you checked it on the Veeam server. When Veeam refuses the login, the report offers to enter another one. With `-DebugLog`, every API answer is written to `<Client>_Debug_<date>_VeeamApi_<server>.log`, to adapt the module to another Veeam version.
 
 ## Run the report
 

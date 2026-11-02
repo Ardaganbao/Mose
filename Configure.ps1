@@ -149,7 +149,8 @@ function Read-Target {
         [void](Confirm-MoseTrustedHost $server)
     }
 
-    if ($Module -eq 'NAS') {
+    # Both usually have a certificate of their own; for the Veeam REST API, the report can also trust it on its first run.
+    if ($Module -in 'NAS', 'VeeamApi') {
         $target | Add-Member -NotePropertyName CertificateThumbprint -NotePropertyValue (Read-Answer 'Trusted certificate SHA-1 thumbprint (Enter for the normal certificate check)')
         $target | Add-Member -NotePropertyName AcceptAnyCertificate -NotePropertyValue (Read-YesNo 'Accept any certificate? Insecure, only on a trusted network' $false)
     }

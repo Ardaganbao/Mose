@@ -158,7 +158,12 @@ function Start-TargetRun {
         elseif ($target.Module -notin 'Veeam', 'HyperV' -or (Get-MoseProperty $target 'Secret')) {
             $credential = Get-TargetCredential $target
         }
-        $Run.Job = Start-TargetJob -Target $target -Credential $credential -VaultPassword $vaultPassword
+        # With -DebugLog, what the server answered goes next to the debug log, for the modules that can write it.
+        $dumpPath = ''
+        if ($debugLogPath) {
+            $dumpPath = $debugLogPath -replace '\.log$', "_$($target.Module)_$((Get-MoseTargetName $target) -replace '[\\/:*?"<>|\s]', '_').log"
+        }
+        $Run.Job = Start-TargetJob -Target $target -Credential $credential -VaultPassword $vaultPassword -DebugDumpPath $dumpPath
     }
     catch {
         $Run.Error = $_
@@ -169,11 +174,12 @@ function Start-TargetJob {
     param(
         [object]$Target,
         [pscredential]$Credential,
-        [securestring]$VaultPassword
+        [securestring]$VaultPassword,
+        [string]$DebugDumpPath
     )
 
-    Start-Job -ArgumentList $PSScriptRoot, $Target, $Credential, $config.Client, $CommvaultJobLookbackDays, $VaultPassword -ScriptBlock {
-        param([string]$Folder, [object]$Target, [pscredential]$Credential, [string]$Client, [int]$CommvaultJobLookbackDays, [securestring]$VaultPassword)
+    Start-Job -ArgumentList $PSScriptRoot, $Target, $Credential, $config.Client, $CommvaultJobLookbackDays, $VaultPassword, $DebugDumpPath -ScriptBlock {
+        param([string]$Folder, [object]$Target, [pscredential]$Credential, [string]$Client, [int]$CommvaultJobLookbackDays, [securestring]$VaultPassword, [string]$DebugDumpPath)
 
         $ErrorActionPreference = 'Stop'
         # As Start.ps1 does: TLS 1.2 added to the versions allowed, unless Windows chooses them.
@@ -190,6 +196,9 @@ function Start-TargetJob {
             $moduleParameters = @{ Target = $Target; Client = $Client; CommvaultJobLookbackDays = $CommvaultJobLookbackDays }
             if ($Credential) {
                 $moduleParameters.Credential = $Credential
+            }
+            if ($DebugDumpPath) {
+                $moduleParameters.DebugDumpPath = $DebugDumpPath
             }
             Invoke-MoseModule @moduleParameters | Where-Object { $_ -is [string] }
         }
@@ -308,6 +317,9 @@ function Complete-TargetRun {
                 $exception.Data['MoseLocation'] = $failure.Location
                 $exception.Data['MoseDetail'] = @($failure.Detail)
                 $exception.Data['RemotingAccessDenied'] = [bool]$failure.RemotingAccessDenied
+                $exception.Data['LoginRefused'] = [bool]$failure.LoginRefused
+                $exception.Data['UntrustedCertificate'] = "$($failure.UntrustedCertificate)"
+                $exception.Data['CertificateSubject'] = "$($failure.CertificateSubject)"
                 throw $exception
             }
             $Run.Lines = @($Run.Output | Where-Object { $_ -is [string] })
@@ -660,7 +672,7 @@ function Get-SampleMarkdown {
 | SAMPLE-VM-01 | Primary | Replicating | :heavy_check_mark: Normal | hv-dr-01.sample.local | $((Get-Date).AddMinutes(-5)) |
 "@
         }
-        'Veeam' {
+        { $_ -in 'Veeam', 'VeeamApi' } {
             @"
 ## Check Backup Veeam VM's:
 - Veeam version: 12.3
@@ -708,6 +720,16 @@ function Get-SampleMarkdown {
 |---|---|
 | SAMPLE-VM-01 | Success |
 "@
+            # The REST API module also shows the repositories.
+            if ($Target.Module -eq 'VeeamApi') {
+                @"
+
+### Repositories
+| Name | Type | Host | Path | Capacity | Free | Used | Free space |
+|------|------|------|------|----------|------|------|------------|
+| Default Backup Repository | WinLocal | veeam-01.sample.local | D:\Backup | 4,00 TB | 1,60 TB | 2,40 TB | 40 % :heavy_check_mark: |
+"@
+            }
         }
         { $_ -in 'CommvaultCloud', 'CommvaultOnPrem' } {
             # Same job status table as New-JobStatusTable, over the last 7 days.
@@ -989,19 +1011,20 @@ function Confirm-RemotingAccess {
     if ($secret -or -not (Read-YesNo "Enter a Windows login for $server now? It is saved for the next reports")) {
         return
     }
-    [void](Save-RemotingLogin $Target)
+    [void](Save-TargetLogin $Target)
 }
 
-# Asks for the Windows login of a Veeam or Hyper-V server and saves it with the client
-# configuration. Returns $true when one was entered.
-function Save-RemotingLogin {
+# Asks for the login of a server and saves it with the client configuration. Returns $true when
+# one was entered.
+function Save-TargetLogin {
     param(
         [object]$Target,
-        [string]$UserName = ''
+        [string]$UserName = '',
+        [string]$Use = 'PowerShell remoting'
     )
 
     $server = $Target.Server
-    $message = "$($MoseModules[$Target.Module].Label) $server, PowerShell remoting: DOMAIN\user, or $server\user for an account of the server itself"
+    $message = "$($MoseModules[$Target.Module].Label) $server, $($Use): DOMAIN\user, or $server\user for an account of the server itself"
     $credential = if ($UserName) { Get-Credential -Message $message -UserName $UserName } else { Get-Credential -Message $message }
     if (-not $credential) {
         return $false
@@ -1045,7 +1068,83 @@ function Request-RemotingLogin {
     if (-not (Read-YesNo "Enter another login for $server and try again?")) {
         return $false
     }
-    return (Save-RemotingLogin $Target -UserName $userName)
+    return (Save-TargetLogin $Target -UserName $userName)
+}
+
+# After the Veeam REST API refused the login (the module said why): the offer to enter another one.
+function Request-ApiLogin {
+    param(
+        [object]$Target
+    )
+
+    if (-not [Environment]::UserInteractive) {
+        return $false
+    }
+    $userName = ''
+    if (Get-MoseProperty $Target 'Secret') {
+        $userName = (Get-TargetCredential $Target).UserName
+    }
+    if (-not (Read-YesNo "Enter another login for $($Target.Server) and try again?")) {
+        return $false
+    }
+    return (Save-TargetLogin $Target -UserName $userName -Use 'Veeam account with a Veeam role')
+}
+
+# The certificate of a server that this computer does not trust: the offer to trust it, by its
+# thumbprint, for this server only. Returns $true when it was saved, to try once more.
+function Request-CertificateTrust {
+    param(
+        [object]$Target,
+        [string]$Thumbprint,
+        [string]$Subject
+    )
+
+    if (-not [Environment]::UserInteractive) {
+        return $false
+    }
+    $server = $Target.Server
+    Write-Host "This computer does not trust the certificate of $server ($Subject)." -ForegroundColor Yellow
+    Write-Host "  SHA-1 thumbprint: $Thumbprint" -ForegroundColor Yellow
+    Write-Host "  Compare it with the certificate on the server first: anyone in between could show another one." -ForegroundColor Yellow
+    if (-not (Read-YesNo "Trust this certificate for $server and try again?" $false)) {
+        return $false
+    }
+    if ($Target.PSObject.Properties['CertificateThumbprint']) {
+        $Target.CertificateThumbprint = $Thumbprint
+    }
+    else {
+        $Target | Add-Member -NotePropertyName CertificateThumbprint -NotePropertyValue $Thumbprint
+    }
+    if ($configFromVault) {
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout')
+        Write-Host "Saved the certificate of $server in the client configuration." -ForegroundColor Green
+    }
+    return $true
+}
+
+# After a server failed for a reason the user can fix here (a refused login, an untrusted
+# certificate): the offer to fix it. Returns $true when the server should run again.
+function Request-RunRetry {
+    param(
+        [object]$Run
+    )
+
+    $data = $Run.Error.Exception.Data
+    try {
+        if ($data['RemotingAccessDenied']) {
+            return (Request-RemotingLogin $Run.Target)
+        }
+        if ($data['UntrustedCertificate']) {
+            return (Request-CertificateTrust $Run.Target $data['UntrustedCertificate'] $data['CertificateSubject'])
+        }
+        if ($data['LoginRefused']) {
+            return (Request-ApiLogin $Run.Target)
+        }
+    }
+    catch {
+        Write-Warning "Could not offer to fix $($Run.Title): $($_.Exception.Message)"
+    }
+    return $false
 }
 
 function Add-ReportSection {
@@ -1169,21 +1268,15 @@ try {
         Write-Host "Collecting $($runs.Count) server(s)$parallel..." -ForegroundColor DarkGray
         Invoke-TargetRuns -Runs $runs.ToArray()
 
-        # A login refused by Veeam or Hyper-V: asked once every server ended, then that server runs again.
+        # A refused login or an untrusted certificate: offered to fix once every server ended, then
+        # that server runs again; twice at most, e.g. a certificate, then the login.
         foreach ($run in $runs) {
-            if (-not ($run.Error -and $run.Error.Exception.Data['RemotingAccessDenied'])) {
-                continue
-            }
-            try {
-                $retry = Request-RemotingLogin $run.Target
-            }
-            catch {
-                Write-Warning "Could not ask for another login for $($run.Target.Server): $($_.Exception.Message)"
-                $retry = $false
-            }
-            if ($retry) {
-                Write-Host "Trying $($run.Target.Server) again with the new login..." -ForegroundColor DarkGray
-                Write-DebugLog "  Refused login, $($run.Title) runs again with a new one"
+            for ($attempt = 1; $attempt -le 2 -and $run.Error; $attempt++) {
+                if (-not (Request-RunRetry $run)) {
+                    break
+                }
+                Write-Host "Trying $($run.Title) again..." -ForegroundColor DarkGray
+                Write-DebugLog "  $($run.Title) runs again after: $($run.Error.Exception.Message)"
                 Invoke-TargetRuns -Runs @($run)
             }
         }
