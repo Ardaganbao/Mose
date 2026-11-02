@@ -239,7 +239,10 @@ try {
     $Body += "`n### $storageTitle`n"
     $Body += "| Name | # VMs total | Capacity GB | Provisioned GB | In Use GB | Free GB | Free % |`n"
     $Body += "|------|-------------|-------------|----------------|-----------|---------|--------|`n"
-    $volumeGraphs = ''
+    # One graph for all the volumes: a column per volume, a row of free %.
+    $volumeGraphL1 = '| Disk % |'
+    $volumeGraphL2 = '|--------|'
+    $volumeGraphL3 = '| Free   |'
     foreach ($volume in @($volumes | Sort-Object -Property Name)) {
         $prefix = $volume.Path.TrimEnd('\') + '\'
         $volumeDisks = @($vms | ForEach-Object { $vm = $_; $_.Disks | Where-Object { $_.Path -like "$prefix*" } | ForEach-Object { [pscustomobject]@{ VM = $vm.Name; Disk = $_ } } })
@@ -248,14 +251,14 @@ try {
         $freePercent = Get-Percent $volume.Free $volume.Size
         $Body += "| $(Format-Cell $volume.Name) | $vmCount | $(Get-Gb $volume.Size) | $(Get-Gb $provisioned) | $(Get-Gb ($volume.Size - $volume.Free)) | $(Get-Gb $volume.Free) | $freePercent |`n"
 
-        $volumeGraphs += "``````Volbarstacked`n"
-        $volumeGraphs += "| Disk % | $(Format-Cell $volume.Name) |`n"
-        $volumeGraphs += "|--------|------------|`n"
-        $volumeGraphs += "| Free   |  $freePercent        |`n"
-        $volumeGraphs += "```````n`n"
+        $volumeGraphL1 += " $(Format-Cell $volume.Name) |"
+        $volumeGraphL2 += '------------|'
+        $volumeGraphL3 += "  $freePercent        |"
     }
     $Body += "`n"
-    $Body += $volumeGraphs
+    if (@($volumes).Count -gt 0) {
+        $Body += "``````Volbarstacked`n$volumeGraphL1`n$volumeGraphL2`n$volumeGraphL3`n```````n`n"
+    }
 
     $Body += "`n### Vm Info`n"
     $Body += "| Name | Host | State | CPU | RAM GB | Dynamic memory | Memory demand GB | Memory demand % | Generation | OS |`n"

@@ -155,7 +155,10 @@ $datastoreListMD += "|------------|-------------|--------------|----------------
 
  
 
-$Volbarstacked = ""
+# One graph for all the datastores: a column per datastore, a row of free %.
+$datastoreGraphL1 = "| Disk % |"
+$datastoreGraphL2 = "|--------|"
+$datastoreGraphL3 = "| Free   |"
 $datastoreIndex = 0
 foreach ($datastore in $datastoreList) {
   $datastoreIndex++
@@ -168,11 +171,13 @@ foreach ($datastore in $datastoreList) {
   }
   $datastoreListMD += "| $( $datastore.Name ) | $( ($datastore|get-vm).count  )         |  $( $datastore.CapacityMB )      |  $( [Math]::Round($provisionGB,2)  )         |  $( $datastore.CapacityMB- $datastore.FreeSpaceMB )    |  $($datastore.FreeSpaceMB  )   |  $( [Math]::Round($datastore.FreeSpaceMB*100/$datastore.CapacityMB)  )     |`n"
  
-  $Volbarstacked += "``````Volbarstacked`n"
-  $Volbarstacked += "| Disk % | $( $datastore.Name ) |`n"
-  $Volbarstacked += "|--------|------------|`n"
-  $Volbarstacked += "| Free   |  $( [Math]::Round($datastore.FreeSpaceMB*100/$datastore.CapacityMB))        |`n"
-  $Volbarstacked += "```````n`n"
+  $datastoreGraphL1 += " $( $datastore.Name ) |"
+  $datastoreGraphL2 += "------------|"
+  $datastoreGraphL3 += "  $( [Math]::Round($datastore.FreeSpaceMB*100/$datastore.CapacityMB))        |"
+}
+$Volbarstacked = ""
+if ($datastoreIndex -gt 0) {
+  $Volbarstacked = "``````Volbarstacked`n$datastoreGraphL1`n$datastoreGraphL2`n$datastoreGraphL3`n```````n`n"
 }
 Write-Progress -Id 12 -ParentId 10 -Activity 'Collecting datastores' -Completed
 Write-Progress -Id 10 -Activity "VMware report: $Site" -Status 'Collecting virtual machines and disks' -PercentComplete 45

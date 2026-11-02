@@ -291,15 +291,9 @@ function Get-SampleMarkdown {
 | datastore2 | 5 | 1907200 | 1100 | 1430400 | 476800 | 25 |
 
 ``````Volbarstacked
-| Disk % | datastore1 |
-|--------|------------|
-| Free   |  34        |
-``````
-
-``````Volbarstacked
-| Disk % | datastore2 |
-|--------|------------|
-| Free   |  25        |
+| Disk % | datastore1 | datastore2 |
+|--------|------------|------------|
+| Free   |  34        |  25        |
 ``````
 ### Vm Info
 | Name | Power state | CPU | RAM GB | Provisioned RAM GB | Consumed RAM  MiB | Consumed RAM  % | OS |
