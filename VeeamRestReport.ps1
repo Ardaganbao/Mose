@@ -405,6 +405,33 @@ function Get-RecentSessions {
     $script:RecentSessions
 }
 
+# Every backup, read once: the restore points of a backup copy job's VMs.
+$script:AllBackups = $null
+function Get-AllBackups {
+    if ($null -eq $script:AllBackups) {
+        $script:AllBackups = @(Get-VeeamApiItems -Path '/api/v1/backups' -MaxItems 5000)
+    }
+    $script:AllBackups
+}
+
+# The newest session of each worker of a backup copy job: Veeam 12 and later run a backup copy job
+# as one worker job per source job, whose sessions are named "<copy job>\<source job> (<copy type>)".
+function Get-CopyWorkerSessions {
+    param(
+        $JobState
+    )
+
+    $prefix = "$($JobState.name)\"
+    $workerSessions = @(Get-RecentSessions | Where-Object { "$($_.name)".StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) })
+    $workers = $workerSessions | Group-Object -Property {
+        $workerId = Get-VeeamValue $_ 'jobId'
+        if ($workerId) { $workerId } else { "$($_.name)" -replace ' \([^)]*\)$', '' }
+    }
+    foreach ($worker in $workers) {
+        Get-NewestSession $worker.Group
+    }
+}
+
 function Get-NewestSession {
     param(
         [object[]]$Sessions
@@ -538,22 +565,34 @@ function Format-BackupJob {
     return $text
 }
 
-# A backup copy job: its last session, and per VM the last copy, its result and its restore points.
+# A backup copy job: the last session of each of its workers (one per source job, or the job's own
+# session), and per VM the last copy, its result and its restore points.
 function Format-BackupCopyJob {
     param(
         $JobState
     )
 
     $text = "`n#### $($JobState.name)`n"
-    $session = Get-LastJobSession $JobState
-    if ($null -eq $session) {
+    $sessions = @(Get-CopyWorkerSessions $JobState | Sort-Object -Property name)
+    if ($sessions.Count -eq 0) {
+        $session = Get-LastJobSession $JobState
+        if ($null -ne $session) {
+            $sessions = @($session)
+        }
+    }
+    if ($sessions.Count -eq 0) {
         return $text + "$($JobState.name) has no backup session available :warning:`n"
     }
-    $result = Get-VeeamResult $session
+
+    # The worst result of the workers is the job's.
+    $results = @($sessions | ForEach-Object { Get-VeeamResult $_ })
+    $result = if ($results -match '(?i)fail|error') { 'Failed' } elseif ($results -match '(?i)warning') { 'Warning' } elseif ($results -match '(?i)success') { 'Success' } else { $results[0] }
     $status = if ($result -match '(?i)success') { ':heavy_check_mark:' } else { ':x:' }
-    $start = Get-VeeamValue $session 'creationTime'
-    $end = Get-VeeamValue $session 'endTime'
-    $tasks = @(Get-TaskSessions $session)
+    $starts = @($sessions | ForEach-Object { ConvertTo-LocalTime (Get-VeeamValue $_ 'creationTime') } | Where-Object { $_ } | Sort-Object)
+    $ends = @($sessions | ForEach-Object { ConvertTo-LocalTime (Get-VeeamValue $_ 'endTime') } | Where-Object { $_ } | Sort-Object)
+    $start = if ($starts.Count -gt 0) { $starts[0] } else { $null }
+    $end = if ($ends.Count -gt 0) { $ends[-1] } else { $null }
+    $tasks = @(foreach ($session in $sessions) { Get-TaskSessions $session })
     $text += "| Result |  |`n"
     $text += "|----|----|`n"
     $text += "| Status |  $result $status |`n"
@@ -566,15 +605,33 @@ function Format-BackupCopyJob {
     }
     $text += "| VM count |  $($tasks.Count) |`n"
 
-    # Restore points per VM, from the backups this job made.
+    # A worker's session is named "<copy job>\<source job> (<copy type>)".
+    $workerIds = @($sessions | ForEach-Object { Get-VeeamValue $_ 'jobId' } | Where-Object { $_ })
+    if (@($sessions | Where-Object { "$($_.name)".StartsWith("$($JobState.name)\") }).Count -gt 0) {
+        $text += "`n##### Source jobs`n"
+        $text += "| Source job | Copy | Start | End | Duration | Result |`n"
+        $text += "|------------|------|-------|-----|----------|--------|`n"
+        foreach ($session in $sessions) {
+            $source = "$($session.name)"
+            $kind = ''
+            if ($source -match '^(?:.*?\\)?(?<source>.+?)(?: \((?<kind>[^)]+)\))?$') {
+                $source = $Matches['source']
+                $kind = $Matches['kind']
+            }
+            $sessionStart = Get-VeeamValue $session 'creationTime'
+            $sessionEnd = Get-VeeamValue $session 'endTime'
+            $text += "| $source | $kind | $(Format-Time $sessionStart 'yyyy-MM-dd HH:mm:ss') | $(Format-Time $sessionEnd 'yyyy-MM-dd HH:mm:ss') | $(Format-Duration $null $sessionStart $sessionEnd) | $(Get-VeeamResult $session) |`n"
+        }
+    }
+
+    # Restore points per VM, from the backups of the job or of its workers.
     $restorePoints = @{}
     try {
-        $jobId = Get-VeeamValue $JobState 'id'
-        $backups = @(Get-VeeamApiItems -Path '/api/v1/backups' -Query @{ jobIdFilter = $jobId })
-        # The backups of this job, by its ID, else by its name (the filter may be ignored).
-        $ownBackups = @($backups | Where-Object { $jobId -and (Get-VeeamValue $_ 'jobId') -eq $jobId })
+        $jobIds = @(@(Get-VeeamValue $JobState 'id') + $workerIds | Where-Object { $_ })
+        $backups = @(Get-AllBackups)
+        $ownBackups = @($backups | Where-Object { (Get-VeeamValue $_ 'jobId') -in $jobIds })
         if ($ownBackups.Count -eq 0) {
-            $ownBackups = @($backups | Where-Object { $_.name -eq $JobState.name })
+            $ownBackups = @($backups | Where-Object { "$($_.name)" -eq $JobState.name -or "$($_.name)".StartsWith("$($JobState.name)\") })
         }
         foreach ($backup in $ownBackups) {
             foreach ($object in @(Get-VeeamApiItems -Path "/api/v1/backups/$($backup.id)/objects")) {
@@ -634,6 +691,30 @@ function Format-SureBackupSession {
         $text += "| $($task.name) | $(Get-VeeamResult $task) |`n"
     }
     return $text
+}
+
+# SureBackup sessions of the last 400 days, asked by their session type: Known says whether this
+# Veeam has that type (an unknown one is refused with HTTP 400, or ignored).
+function Find-SureBackupSessions {
+    $since = (Get-Date).ToUniversalTime().AddDays(-400).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    foreach ($type in 'SureBackupJob', 'SureBackup') {
+        try {
+            $page = Invoke-VeeamApi -Path '/api/v1/sessions' -Query @{ typeFilter = $type; createdAfterFilter = $since; skip = 0; limit = 200 }
+        }
+        catch {
+            if ($_.Exception.Data['HttpStatus'] -eq 400) {
+                continue
+            }
+            throw
+        }
+        $items = @(Get-VeeamData $page)
+        if (@($items | Where-Object { "$(Get-VeeamValue $_ 'sessionType')" -notmatch '(?i)sure' }).Count -gt 0) {
+            # The filter was ignored: this Veeam has no such type.
+            break
+        }
+        return [pscustomobject]@{ Known = $true; Sessions = $items }
+    }
+    return [pscustomobject]@{ Known = $false; Sessions = @() }
 }
 
 function Format-SureBackupJob {
@@ -745,13 +826,29 @@ try {
 
     $Body += "`n### SureBackup verification`n"
     if ($sureBackupJobs.Count -eq 0) {
-        # Not listed with the jobs by every Veeam version: the newest SureBackup session of each job
-        # in the last 31 days.
+        # Not listed with the jobs by every Veeam version: the newest SureBackup session of each job,
+        # from the last 31 days, else asked for by type over 400 days.
         $sureBackupSessions = @(Get-RecentSessions | Where-Object { "$(Get-VeeamValue $_ 'sessionType')" -match '(?i)sure' })
         if ($sureBackupSessions.Count -eq 0) {
-            $Body += "No SureBackup job is listed, and no SureBackup session ran in the last 31 days.`n"
-            $sessionTypes = @(Get-RecentSessions | ForEach-Object { "$(Get-VeeamValue $_ 'sessionType')" } | Sort-Object -Unique) -join ', '
-            Write-Warning "No SureBackup session among the Veeam sessions of the last 31 days (their types: $sessionTypes)."
+            Write-VeeamReportProgress -Status 'Looking for SureBackup sessions' -PercentComplete 90
+            try {
+                $found = Find-SureBackupSessions
+            }
+            catch {
+                Write-Warning "SureBackup sessions could not be asked for: $($_.Exception.Message)"
+                $found = [pscustomobject]@{ Known = $false; Sessions = @() }
+            }
+            $sureBackupSessions = [object[]]$found.Sessions
+            if ($sureBackupSessions.Count -eq 0) {
+                if ($found.Known) {
+                    $Body += "No SureBackup job is listed, and no SureBackup session ran in the last 400 days.`n"
+                }
+                else {
+                    $Body += ":warning: The REST API of this Veeam ($(if ($version) { $version } else { 'version unknown' })) gives no SureBackup jobs or sessions: check SureBackup in the Veeam console.`n"
+                }
+                $sessionTypes = @(Get-RecentSessions | ForEach-Object { "$(Get-VeeamValue $_ 'sessionType')" } | Sort-Object -Unique) -join ', '
+                Write-Warning "No SureBackup session found (session types of the last 31 days: $sessionTypes)."
+            }
         }
         foreach ($group in @($sureBackupSessions | Group-Object -Property { "$($_.name)" } | Sort-Object -Property Name)) {
             Write-VeeamReportProgress -Status "SureBackup sessions: $($group.Name)" -PercentComplete 90
