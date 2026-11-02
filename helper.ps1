@@ -106,10 +106,10 @@ $MoseModules = [ordered]@{
     StorMagic       = @{ Label = 'StorMagic SvSAN'; Script = 'stormagicHealth.ps1'; DropTitle = $true }
     VMware          = @{ Label = 'VMware vCenter'; Script = 'vmwarereport.ps1'; DropTitle = $true }
     HyperV          = @{ Label = 'Microsoft Hyper-V'; Script = 'hypervreport.ps1'; DropTitle = $true }
-    Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1'; DropTitle = $true }
+    Veeam           = @{ Label = 'Veeam Backup & Replication local'; Script = 'VeeamReport.ps1'; DropTitle = $true }
     # The same report over Veeam's REST API: no Veeam console, PowerShell remoting or administrator rights needed.
     # SureBackup, which Veeam 13 doesn't give over REST, through VeeamReport.ps1 when the Veeam console is installed.
-    VeeamApi        = @{ Label = 'Veeam Backup & Replication (REST API)'; Script = 'VeeamRestReport.ps1'; Uses = @('VeeamReport.ps1'); DropTitle = $true }
+    VeeamApi        = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamRestReport.ps1'; Uses = @('VeeamReport.ps1'); DropTitle = $true }
     CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
 }
