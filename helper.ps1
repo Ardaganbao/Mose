@@ -112,10 +112,19 @@ $MoseModules = [ordered]@{
 }
 
 function Open-MoseVault {
+    param(
+        # Given by Report.ps1 to the Commvault module, which runs in its own process and reads the vault itself.
+        [Security.SecureString]$Password
+    )
+
     Ensure-Module -Name 'Microsoft.PowerShell.SecretManagement' -MinimumVersion '1.1.0'
     Ensure-Module -Name 'Microsoft.PowerShell.SecretStore' -MinimumVersion '1.0.6'
-    Ensure-SecretVault -VaultName $MoseVaultName
-    Unlock-SecretVaultIfNeeded -VaultName $MoseVaultName
+    if (-not $Password) {
+        Ensure-SecretVault -VaultName $MoseVaultName
+        $Password = Read-Host -Prompt "Password for SecretStore vault '$MoseVaultName'" -AsSecureString
+    }
+    Unlock-SecretVaultIfNeeded -VaultName $MoseVaultName -Password $Password
+    $script:MoseVaultPassword = $Password
 }
 
 # Returns $null when this computer has no client configuration yet.
@@ -334,6 +343,138 @@ function Save-MoseModuleList {
     if ($added.Count -gt 0) {
         Write-Host "Downloading the modules: $($added -join ', ')" -ForegroundColor DarkGray
         & (Join-Path $PSScriptRoot 'Start.ps1') -UpdateOnly -Quiet | Out-Null
+    }
+}
+
+# Runs the module of one server and returns its Markdown. Report.ps1 runs it in a process of its
+# own, with the server's login ($Credential) read from the vault; Commvault reads the vault itself.
+function Invoke-MoseModule {
+    param(
+        [Parameter(Mandatory)] [object]$Target,
+        [pscredential]$Credential,
+        [string]$Client,
+        [int]$CommvaultJobLookbackDays = 30
+    )
+
+    # The module scripts were written without strict mode, which Start.ps1 turns on for the scripts it runs.
+    Set-StrictMode -Off
+
+    $scriptPath = Join-Path $PSScriptRoot $MoseModules[$Target.Module].Script
+    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+        throw "Module script was not found: $scriptPath. Run .\Start.ps1 -UpdateOnly to download it."
+    }
+
+    switch ($Target.Module) {
+        { $_ -in 'iLO', 'iDRAC', 'BMC' } {
+            & $scriptPath -server $Target.Server -credential $Credential
+        }
+        'NAS' {
+            $nasParameters = @{ server = $Target.Server; user = $Credential.UserName; pass = $Credential.Password }
+            if ($Target.CertificateThumbprint) {
+                $nasParameters.CertificateThumbprint = $Target.CertificateThumbprint
+            }
+            if ($Target.AcceptAnyCertificate) {
+                $nasParameters.AcceptAnyCertificate = $true
+            }
+            & $scriptPath @nasParameters
+        }
+        'StorMagic' {
+            & $scriptPath -Server $Target.Server -Credential $Credential.GetNetworkCredential()
+        }
+        'VMware' {
+            & $scriptPath -server $Target.Server -user $Credential.UserName -pass $Credential.Password -Client $Client -Site $Target.Site
+        }
+        'HyperV' {
+            $hyperVParameters = @{ Server = $Target.Server; Site = $Target.Site }
+            if ($Credential) {
+                $hyperVParameters.Credential = $Credential
+            }
+            & $scriptPath @hyperVParameters
+        }
+        'Veeam' {
+            $veeamParameters = @{ Server = $Target.Server; OutputPath = [System.IO.Path]::GetTempFileName(); NoOpen = $true }
+            if ($Credential) {
+                $veeamParameters.RemotingCredential = $Credential
+            }
+            try {
+                & $scriptPath @veeamParameters
+            }
+            finally {
+                Remove-Item -LiteralPath $veeamParameters.OutputPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        { $_ -in 'CommvaultCloud', 'CommvaultOnPrem' } {
+            # The Commvault script writes its report to a file, read back here.
+            $folder = Join-Path ([System.IO.Path]::GetTempPath()) ("CommvaultReport_{0}" -f [guid]::NewGuid().ToString('N'))
+            New-Item -Path $folder -ItemType Directory | Out-Null
+            try {
+                & $scriptPath -ClientName $Target.Secret -Mode ($Target.Module -replace '^Commvault', '') -SecretSuffix '' `
+                    -SecretVaultName $MoseVaultName -JobLookbackDays $CommvaultJobLookbackDays -OutputFolder $folder | Out-Null
+
+                $files = @(Get-ChildItem -LiteralPath $folder -Filter 'CommvaultReport_*.md' -File)
+                if ($files.Count -ne 1) {
+                    throw "Expected one Commvault Markdown report in '$folder', found $($files.Count)."
+                }
+                Get-Content -LiteralPath $files[0].FullName -Raw
+            }
+            finally {
+                Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        default {
+            throw "Unknown module '$($Target.Module)'."
+        }
+    }
+}
+
+# Where an error stopped a module, e.g. "iloreport.ps1 line 835".
+function Get-MoseErrorLocation {
+    param(
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $info = $ErrorRecord.InvocationInfo
+    if (-not $info -or -not $info.ScriptName) {
+        return ''
+    }
+    return "$(Split-Path -Leaf $info.ScriptName) line $($info.ScriptLineNumber)"
+}
+
+# For -DebugLog: the error, the statement that failed and the calls that led to it, as lines.
+function Get-MoseErrorDetail {
+    param(
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $exception = $ErrorRecord.Exception
+    $lines = @("  Error: $($exception.GetType().FullName): $($exception.Message)")
+    for ($inner = $exception.InnerException; $inner; $inner = $inner.InnerException) {
+        $lines += "  Because: $($inner.GetType().FullName): $($inner.Message)"
+    }
+    if ($ErrorRecord.InvocationInfo) {
+        # The script, line and statement, with ~~~ under the part that failed.
+        $lines += @($ErrorRecord.InvocationInfo.PositionMessage -split '\r?\n' | ForEach-Object { "  $_" })
+    }
+    if ($ErrorRecord.ScriptStackTrace) {
+        $lines += '  Call stack:'
+        $lines += @($ErrorRecord.ScriptStackTrace -split '\r?\n' | ForEach-Object { "    $_" })
+    }
+    return $lines
+}
+
+# A module's error as plain data, which reaches Report.ps1 intact from the module's own process.
+function ConvertTo-MoseFailure {
+    param(
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    [pscustomobject]@{
+        MoseFailure          = $true
+        Message              = $ErrorRecord.Exception.Message
+        Location             = Get-MoseErrorLocation $ErrorRecord
+        Detail               = @(Get-MoseErrorDetail $ErrorRecord)
+        # Set by Veeam and Hyper-V when the server refused the login over PowerShell remoting.
+        RemotingAccessDenied = [bool]$ErrorRecord.Exception.Data['RemotingAccessDenied']
     }
 }
 

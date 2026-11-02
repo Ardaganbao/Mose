@@ -89,83 +89,134 @@ function Get-TargetCredential {
     return $credential
 }
 
-# Runs the module of one server and returns its Markdown.
-function Invoke-Target {
+# Runs the module of one server in its own PowerShell process (a background job) and returns its
+# Markdown. What a module changes for its whole process, like the certificate check or the TLS
+# versions, then cannot break the next ones. Its Write-Host lines, warnings and progress bars are
+# shown here as they come, and the warnings also go to the debug log.
+function Invoke-TargetProcess {
     param(
         [object]$Target
     )
 
-    # The module scripts were written without strict mode, which Start.ps1 turns on for the scripts it runs.
-    Set-StrictMode -Off
-
-    $scriptPath = Join-Path $PSScriptRoot $MoseModules[$Target.Module].Script
-    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
-        throw "Module script was not found: $scriptPath. Run .\Start.ps1 -UpdateOnly to download it."
+    # Logins are read here, where the vault is open. Commvault reads and saves its tokens itself.
+    $credential = $null
+    $vaultPassword = $null
+    if ($Target.Module -like 'Commvault*') {
+        # Kept by Open-MoseVault.
+        $vaultPassword = Get-Variable -Name MoseVaultPassword -ValueOnly -ErrorAction SilentlyContinue
+    }
+    elseif ($Target.Module -notin 'Veeam', 'HyperV' -or (Get-MoseProperty $Target 'Secret')) {
+        $credential = Get-TargetCredential $Target
     }
 
-    switch ($Target.Module) {
-        { $_ -in 'iLO', 'iDRAC', 'BMC' } {
-            & $scriptPath -server $Target.Server -credential (Get-TargetCredential $Target)
-        }
-        'NAS' {
-            $credential = Get-TargetCredential $Target
-            $nasParameters = @{ server = $Target.Server; user = $credential.UserName; pass = $credential.Password }
-            if ($Target.CertificateThumbprint) {
-                $nasParameters.CertificateThumbprint = $Target.CertificateThumbprint
-            }
-            if ($Target.AcceptAnyCertificate) {
-                $nasParameters.AcceptAnyCertificate = $true
-            }
-            & $scriptPath @nasParameters
-        }
-        'StorMagic' {
-            & $scriptPath -Server $Target.Server -Credential (Get-TargetCredential $Target).GetNetworkCredential()
-        }
-        'VMware' {
-            $credential = Get-TargetCredential $Target
-            & $scriptPath -server $Target.Server -user $credential.UserName -pass $credential.Password -Client $config.Client -Site $Target.Site
-        }
-        'HyperV' {
-            $hyperVParameters = @{ Server = $Target.Server; Site = $Target.Site }
-            if ($Target.Secret) {
-                $hyperVParameters.Credential = Get-TargetCredential $Target
-            }
-            & $scriptPath @hyperVParameters
-        }
-        'Veeam' {
-            $veeamParameters = @{ Server = $Target.Server; OutputPath = [System.IO.Path]::GetTempFileName(); NoOpen = $true }
-            if ($Target.Secret) {
-                $veeamParameters.RemotingCredential = Get-TargetCredential $Target
-            }
-            try {
-                & $scriptPath @veeamParameters
-            }
-            finally {
-                Remove-Item -LiteralPath $veeamParameters.OutputPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-        { $_ -in 'CommvaultCloud', 'CommvaultOnPrem' } {
-            # The Commvault script writes its report to a file, read back here.
-            $folder = Join-Path ([System.IO.Path]::GetTempPath()) ("CommvaultReport_{0}" -f [guid]::NewGuid().ToString('N'))
-            New-Item -Path $folder -ItemType Directory | Out-Null
-            try {
-                & $scriptPath -ClientName $Target.Secret -Mode ($Target.Module -replace '^Commvault', '') -SecretSuffix '' `
-                    -SecretVaultName $MoseVaultName -JobLookbackDays $CommvaultJobLookbackDays -OutputFolder $folder | Out-Null
+    $job = Start-Job -ArgumentList $PSScriptRoot, $Target, $credential, $config.Client, $CommvaultJobLookbackDays, $vaultPassword -ScriptBlock {
+        param([string]$Folder, [object]$Target, [pscredential]$Credential, [string]$Client, [int]$CommvaultJobLookbackDays, [securestring]$VaultPassword)
 
-                $files = @(Get-ChildItem -LiteralPath $folder -Filter 'CommvaultReport_*.md' -File)
-                if ($files.Count -ne 1) {
-                    throw "Expected one Commvault Markdown report in '$folder', found $($files.Count)."
+        $ErrorActionPreference = 'Stop'
+        # As Start.ps1 does: TLS 1.2 added to the versions allowed, unless Windows chooses them.
+        if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        }
+        # The module scripts expect to run from their own folder.
+        Set-Location -LiteralPath $Folder
+        . (Join-Path $Folder 'helper.ps1')
+        try {
+            if ($VaultPassword) {
+                Open-MoseVault -Password $VaultPassword
+            }
+            $moduleParameters = @{ Target = $Target; Client = $Client; CommvaultJobLookbackDays = $CommvaultJobLookbackDays }
+            if ($Credential) {
+                $moduleParameters.Credential = $Credential
+            }
+            Invoke-MoseModule @moduleParameters | Where-Object { $_ -is [string] }
+        }
+        catch {
+            ConvertTo-MoseFailure $_
+        }
+    }
+
+    $child = $job.ChildJobs[0]
+    $output = New-Object System.Collections.Generic.List[object]
+    $activities = @{}
+    $outputRead = 0; $warningRead = 0; $informationRead = 0; $progressRead = 0; $errorRead = 0
+    try {
+        do {
+            $finished = $job.State -notin 'NotStarted', 'Running'
+            for (; $outputRead -lt $child.Output.Count; $outputRead++) {
+                $output.Add($child.Output[$outputRead])
+            }
+            for (; $warningRead -lt $child.Warning.Count; $warningRead++) {
+                $message = $child.Warning[$warningRead].Message
+                Write-Warning $message
+                Write-DebugLog "  WARNING: $message"
+            }
+            for (; $informationRead -lt $child.Information.Count; $informationRead++) {
+                # Write-Host lines, with their colours.
+                $data = $child.Information[$informationRead].MessageData
+                if ($null -ne $data -and $data.PSObject.Properties['Message'] -and $data.PSObject.Properties['NoNewLine']) {
+                    $hostParameters = @{ Object = $data.Message; NoNewline = [bool]$data.NoNewLine }
+                    if ("$($data.ForegroundColor)") {
+                        $hostParameters.ForegroundColor = "$($data.ForegroundColor)"
+                    }
+                    if ("$($data.BackgroundColor)") {
+                        $hostParameters.BackgroundColor = "$($data.BackgroundColor)"
+                    }
+                    Write-Host @hostParameters
                 }
-                Get-Content -LiteralPath $files[0].FullName -Raw
+                else {
+                    Write-Host "$data"
+                }
             }
-            finally {
-                Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+            for (; $progressRead -lt $child.Progress.Count; $progressRead++) {
+                $record = $child.Progress[$progressRead]
+                $progressParameters = @{ Id = $record.ActivityId; Activity = $record.Activity }
+                if ($record.ParentActivityId -ge 0) {
+                    $progressParameters.ParentId = $record.ParentActivityId
+                }
+                if ("$($record.RecordType)" -eq 'Completed') {
+                    $activities.Remove($record.ActivityId)
+                    Write-Progress @progressParameters -Completed
+                    continue
+                }
+                $activities[$record.ActivityId] = $record.Activity
+                $progressParameters.Status = if ($record.StatusDescription) { $record.StatusDescription } else { 'Processing' }
+                $progressParameters.PercentComplete = $record.PercentComplete
+                if ($record.CurrentOperation) {
+                    $progressParameters.CurrentOperation = $record.CurrentOperation
+                }
+                Write-Progress @progressParameters
             }
-        }
-        default {
-            throw "Unknown module '$($Target.Module)'."
+            for (; $errorRead -lt $child.Error.Count; $errorRead++) {
+                # Errors a module wrote without stopping.
+                $message = "$($child.Error[$errorRead])"
+                Write-Host "ERROR: $message" -ForegroundColor Red
+                Write-DebugLog "  ERROR: $message"
+            }
+            if (-not $finished) {
+                Start-Sleep -Milliseconds 200
+            }
+        } while (-not $finished)
+
+        if ($job.State -eq 'Failed') {
+            throw "The PowerShell process of the module failed: $($child.JobStateInfo.Reason.Message)"
         }
     }
+    finally {
+        foreach ($id in @($activities.Keys)) {
+            Write-Progress -Id $id -Activity $activities[$id] -Completed
+        }
+        Remove-Job -Job $job -Force
+    }
+
+    $failure = @($output | Where-Object { $_.PSObject.Properties['MoseFailure'] }) | Select-Object -First 1
+    if ($failure) {
+        $exception = [System.Exception]::new($failure.Message)
+        $exception.Data['MoseLocation'] = $failure.Location
+        $exception.Data['MoseDetail'] = @($failure.Detail)
+        $exception.Data['RemotingAccessDenied'] = [bool]$failure.RemotingAccessDenied
+        throw $exception
+    }
+    return @($output | Where-Object { $_ -is [string] })
 }
 
 # Sample Markdown of a module for -DryRun, with the headings and tables the module writes,
@@ -676,19 +727,6 @@ function Test-ReportSectionShown {
     return @($Section.Children | Where-Object { Test-ReportSectionShown $_ }).Count -gt 0
 }
 
-# Where an error stopped a module, e.g. "iloreport.ps1 line 835".
-function Get-ErrorLocation {
-    param(
-        [System.Management.Automation.ErrorRecord]$ErrorRecord
-    )
-
-    $info = $ErrorRecord.InvocationInfo
-    if (-not $info -or -not $info.ScriptName) {
-        return ''
-    }
-    return "$(Split-Path -Leaf $info.ScriptName) line $($info.ScriptLineNumber)"
-}
-
 # Lines of the -DebugLog file. Written here rather than by a transcript, which a module
 # (PowerCLI) can stop.
 function Write-DebugLog {
@@ -701,24 +739,16 @@ function Write-DebugLog {
     }
 }
 
-# For -DebugLog: the error, the statement that failed and the calls that led to it.
+# For -DebugLog: the error, the statement that failed and the calls that led to it. An error of a
+# module comes from its own process with these already worked out.
 function Write-ErrorDetail {
     param(
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
 
-    $exception = $ErrorRecord.Exception
-    $lines = @("  Error: $($exception.GetType().FullName): $($exception.Message)")
-    for ($inner = $exception.InnerException; $inner; $inner = $inner.InnerException) {
-        $lines += "  Because: $($inner.GetType().FullName): $($inner.Message)"
-    }
-    if ($ErrorRecord.InvocationInfo) {
-        # The script, line and statement, with ~~~ under the part that failed.
-        $lines += @($ErrorRecord.InvocationInfo.PositionMessage -split '\r?\n' | ForEach-Object { "  $_" })
-    }
-    if ($ErrorRecord.ScriptStackTrace) {
-        $lines += '  Call stack:'
-        $lines += @($ErrorRecord.ScriptStackTrace -split '\r?\n' | ForEach-Object { "    $_" })
+    $lines = @($ErrorRecord.Exception.Data['MoseDetail'])
+    if ($lines.Count -eq 0 -or $null -eq $lines[0]) {
+        $lines = @(Get-MoseErrorDetail $ErrorRecord)
     }
     $lines | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
     Write-DebugLog $lines
@@ -816,23 +846,6 @@ function Request-RemotingLogin {
     return (Save-RemotingLogin $Target -UserName $userName)
 }
 
-# The Markdown of one server. The module's warnings pass through here to reach the debug log too.
-function Get-TargetOutput {
-    param(
-        [object]$Target
-    )
-
-    @(Invoke-Target $Target 3>&1 | ForEach-Object {
-            if ($_ -is [System.Management.Automation.WarningRecord]) {
-                Write-Warning $_.Message
-                Write-DebugLog "  WARNING: $($_.Message)"
-            }
-            else {
-                $_
-            }
-        } | Where-Object { $_ -is [string] })
-}
-
 function Add-ReportSection {
     param(
         [object]$Section,
@@ -875,7 +888,7 @@ function Add-ReportSection {
         }
         else {
             try {
-                Get-TargetOutput $Section.Target
+                Invoke-TargetProcess $Section.Target
             }
             catch {
                 # Veeam and Hyper-V mark a login refused over PowerShell remoting.
@@ -884,7 +897,7 @@ function Add-ReportSection {
                 }
                 Write-Host "Trying $($Section.Target.Server) again with the new login..." -ForegroundColor DarkGray
                 Write-DebugLog '  Refused login, trying again with a new one'
-                Get-TargetOutput $Section.Target
+                Invoke-TargetProcess $Section.Target
             }
         }
         $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
@@ -898,7 +911,10 @@ function Add-ReportSection {
     }
     catch {
         $report.Add("Collection failed: $($_.Exception.Message)")
-        $location = Get-ErrorLocation $_
+        $location = $_.Exception.Data['MoseLocation']
+        if (-not $location) {
+            $location = Get-MoseErrorLocation $_
+        }
         $where = if ($location) { " ($location)" } else { '' }
         Write-Warning "$title collection failed: $($_.Exception.Message)$where"
         $script:failedCount++
@@ -909,10 +925,6 @@ function Add-ReportSection {
         }
     }
     finally {
-        # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
-        [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
-        [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
-        [Net.ServicePointManager]::CertificatePolicy = $certificatePolicy
         if ($DebugLog) {
             $elapsed = $timer.Elapsed.ToString('m\:ss')
             Write-Host "  $title took $elapsed." -ForegroundColor DarkGray
@@ -967,13 +979,6 @@ try {
     if ($DryRun) {
         $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
     }
-    $securityProtocol = [Net.ServicePointManager]::SecurityProtocol
-    # Some modules accept any certificate of their servers (iDRAC, BMC, StorMagic) and leave that in
-    # place, which would skip the check for the next modules too, or break their HTTPS calls (see
-    # Start.ps1), so each module starts with the normal check.
-    $certificatePolicy = [Net.ServicePointManager]::CertificatePolicy
-    [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
-
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2
     }
