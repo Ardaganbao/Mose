@@ -66,6 +66,16 @@ if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
 
+# The scripts downloaded from GitHub are run, so GitHub always gets the normal certificate check. A
+# module run earlier in this PowerShell window may have left its own in place: one accepting any
+# certificate (iDRAC, BMC), or one written in PowerShell ({ $true }), which .NET cannot run on its
+# own threads, so that every HTTPS call fails with "There is no Runspace available".
+[Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+$defaultCertPolicy = [Net.ServicePointManager].Assembly.GetType('System.Net.DefaultCertPolicy')
+if ($defaultCertPolicy -and [Net.ServicePointManager]::CertificatePolicy -isnot $defaultCertPolicy) {
+    [Net.ServicePointManager]::CertificatePolicy = [Activator]::CreateInstance($defaultCertPolicy, $true)
+}
+
 # Started from the one-liner (irm ... | iex): there is no file yet, so save Start.ps1
 # into $InstallPath and run it from there in a new process, which keeps this session
 # clean and works whatever the execution policy is. It then opens the Script Manager.

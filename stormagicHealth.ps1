@@ -17,9 +17,24 @@ function New-HTTPSessionJson {
     )
 
     if ($IgnoreCert) {
-        # Ignore certificate errors
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-       
+        # Accept the VSA's own certificate. Compiled, because .NET may check certificates on a thread
+        # where PowerShell cannot run a script block: { $true } broke every later HTTPS call.
+        if (-not ('StorMagicCertificateValidation' -as [type])) {
+            Add-Type -TypeDefinition @"
+                using System.Net.Security;
+                using System.Security.Cryptography.X509Certificates;
+                public static class StorMagicCertificateValidation {
+                    public static bool Validate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
+                        return true;
+                    }
+                }
+"@ -ErrorAction Stop
+        }
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [Delegate]::CreateDelegate(
+            [System.Net.Security.RemoteCertificateValidationCallback],
+            [StorMagicCertificateValidation],
+            'Validate'
+        )
     }
 
     # Prepare JSON request body

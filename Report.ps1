@@ -851,6 +851,8 @@ function Add-ReportSection {
     finally {
         # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
         [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+        [Net.ServicePointManager]::CertificatePolicy = $certificatePolicy
         if ($DebugLog) {
             $elapsed = $timer.Elapsed.ToString('m\:ss')
             Write-Host "  $title took $elapsed." -ForegroundColor DarkGray
@@ -906,6 +908,11 @@ try {
         $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
     }
     $securityProtocol = [Net.ServicePointManager]::SecurityProtocol
+    # Some modules accept any certificate of their servers (iDRAC, BMC, StorMagic) and leave that in
+    # place, which would skip the check for the next modules too, or break their HTTPS calls (see
+    # Start.ps1), so each module starts with the normal check.
+    $certificatePolicy = [Net.ServicePointManager]::CertificatePolicy
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = $null
 
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2
