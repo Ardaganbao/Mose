@@ -108,7 +108,8 @@ $MoseModules = [ordered]@{
     HyperV          = @{ Label = 'Microsoft Hyper-V'; Script = 'hypervreport.ps1'; DropTitle = $true }
     Veeam           = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamReport.ps1'; DropTitle = $true }
     # The same report over Veeam's REST API: no Veeam console, PowerShell remoting or administrator rights needed.
-    VeeamApi        = @{ Label = 'Veeam Backup & Replication (REST API)'; Script = 'VeeamRestReport.ps1'; DropTitle = $true }
+    # SureBackup, which Veeam 13 doesn't give over REST, through VeeamReport.ps1 when the Veeam console is installed.
+    VeeamApi        = @{ Label = 'Veeam Backup & Replication (REST API)'; Script = 'VeeamRestReport.ps1'; Uses = @('VeeamReport.ps1'); DropTitle = $true }
     CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
 }
@@ -336,8 +337,9 @@ function Save-MoseModuleList {
         # Inner parentheses: Windows PowerShell returns a JSON array as one object.
         $previous = @((Get-Content -LiteralPath $MoseModuleListPath -Raw | ConvertFrom-Json))
     }
+    # With the other scripts a module runs (Uses).
     $scripts = @($Targets | Where-Object { $MoseModules.Contains($_.Module) } |
-        ForEach-Object { $MoseModules[$_.Module].Script } | Sort-Object -Unique)
+        ForEach-Object { $MoseModules[$_.Module].Script; $MoseModules[$_.Module]['Uses'] } | Where-Object { $_ } | Sort-Object -Unique)
     ConvertTo-Json -InputObject $scripts | Set-Content -LiteralPath $MoseModuleListPath -Encoding utf8
 
     # A module added since the last update is downloaded (or brought up to date) right away.

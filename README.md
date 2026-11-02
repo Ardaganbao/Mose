@@ -88,6 +88,8 @@ PowerShell remoting only connects to an IP address that is in this computer's Tr
 
 **Veeam Backup & Replication (REST API)** reads the same report from Veeam's REST API (Veeam 11 or later, HTTPS port 9419 of the Veeam server), with the repositories' free space too. It needs no Veeam console, no PowerShell remoting and no Windows administrator rights on the Veeam server: only port 9419 open from this computer, and a Veeam account with a role (Users and Roles in the Veeam console, e.g. Veeam Backup Viewer), entered as `DOMAIN\user`.
 
+Veeam 13's REST API gives no SureBackup jobs or runs. When the Veeam Backup & Replication Console of the same version is installed on this computer, the module reads SureBackup through its PowerShell module (`VeeamReport.ps1 -SureBackupOnly`, with the same Veeam account; no PowerShell remoting). Without it, the report says so.
+
 The REST API usually has Veeam's own certificate, which this computer doesn't trust. Give its SHA-1 thumbprint when adding the server, or leave it empty: the first report then shows the certificate's thumbprint and offers to trust it for this server, after you checked it on the Veeam server. When Veeam refuses the login, the report offers to enter another one. With `-DebugLog`, every API answer is written to `<Client>_Debug_<date>_VeeamApi_<server>.log`, to adapt the module to another Veeam version.
 
 ## Run the report

@@ -13,11 +13,30 @@ param (
     [switch]$RunOnVbrServer,
 
     [Parameter(HelpMessage = 'Optional credential for PowerShell Remoting to the Veeam server.')]
-    [System.Management.Automation.PSCredential]$RemotingCredential
+    [System.Management.Automation.PSCredential]$RemotingCredential,
+
+    [Parameter(HelpMessage = 'Veeam account for connecting to the Veeam server through the Veeam console installed on this computer.')]
+    [System.Management.Automation.PSCredential]$Credential,
+
+    [Parameter(HelpMessage = 'Only the SureBackup verification section (used by VeeamRestReport.ps1, whose REST API does not give SureBackup).')]
+    [switch]$SureBackupOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $veeamModuleName = 'Veeam.Backup.PowerShell'
+
+# The Veeam PowerShell module on this computer: loaded, findable, or where the Veeam console installs it.
+function Test-VeeamModuleHere {
+    if ((Get-Command Connect-VBRServer -ErrorAction SilentlyContinue) -or (Get-Module -ListAvailable -Name $veeamModuleName -ErrorAction SilentlyContinue)) {
+        return $true
+    }
+    $core = Get-ItemProperty -Path 'HKLM:\Software\Veeam\Veeam Backup and Replication\' -Name 'CorePath' -ErrorAction SilentlyContinue
+    $manifests = @(Join-Path $env:ProgramFiles 'Veeam\Backup and Replication\Console\Veeam.Backup.PowerShell\Veeam.Backup.PowerShell.psd1')
+    if ($core -and $core.CorePath) {
+        $manifests += Join-Path $core.CorePath 'Console\Veeam.Backup.PowerShell\Veeam.Backup.PowerShell.psd1'
+    }
+    return [bool]@($manifests | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count
+}
 # Like the other modules' progress bars. Run remotely, the Veeam server's bar shows here too.
 $progressServer = if ($Server -in @('localhost', '.')) { $env:COMPUTERNAME } else { $Server }
 $progressActivity = "Veeam report: $progressServer"
@@ -36,21 +55,23 @@ function Write-VeeamReportProgress {
 
 Write-VeeamReportProgress -Status 'Starting report' -PercentComplete 0
 
-if ($RunOnVbrServer -or (-not (Get-Command Connect-VBRServer -ErrorAction SilentlyContinue) -and $Server -notin @('localhost', '.'))) {
+# With the Veeam console installed here, its module connects to the server itself; without it, the
+# report runs on the Veeam server over PowerShell remoting.
+if ($RunOnVbrServer -or (-not (Test-VeeamModuleHere) -and $Server -notin @('localhost', '.'))) {
     if (-not (Test-Path -LiteralPath $PSCommandPath -PathType Leaf)) {
         throw 'Remote execution requires running this from the saved VeeamReport.ps1 file.'
     }
 
     $scriptContent = [System.IO.File]::ReadAllText($PSCommandPath)
     $remoteCommand = {
-        param([string]$Source)
+        param([string]$Source, [bool]$SureBackupOnly)
         $reportScript = [scriptblock]::Create($Source)
-        & $reportScript -Server 'localhost' -OutputPath '' -NoOpen
+        & $reportScript -Server 'localhost' -OutputPath '' -NoOpen -SureBackupOnly:$SureBackupOnly
     }
     $invokeParameters = @{
         ComputerName = $Server
         ScriptBlock = $remoteCommand
-        ArgumentList = @($scriptContent)
+        ArgumentList = @($scriptContent, [bool]$SureBackupOnly)
         ErrorAction = 'Stop'
     }
     if ($null -ne $RemotingCredential) {
@@ -192,16 +213,29 @@ if ($null -ne $requiredPowerShellVersion -and
         if ($RunOnVbrServer) {
             $commandParts += '-RunOnVbrServer'
         }
+        if ($SureBackupOnly) {
+            $commandParts += '-SureBackupOnly'
+        }
+        # The logins go through a file only this Windows user can read (Export-Clixml), removed below.
+        $credentials = @{}
         if ($null -ne $RemotingCredential) {
+            $credentials.RemotingCredential = $RemotingCredential
+        }
+        if ($null -ne $Credential) {
+            $credentials.Credential = $Credential
+        }
+        if ($credentials.Count -gt 0) {
             $credentialFile = Join-Path ([System.IO.Path]::GetTempPath()) ("VeeamReportCredential_{0}.xml" -f [guid]::NewGuid())
-            $RemotingCredential | Export-Clixml -LiteralPath $credentialFile -ErrorAction Stop
-            $commandParts += '-RemotingCredential'
-            $commandParts += '$veeamReportCredential'
+            $credentials | Export-Clixml -LiteralPath $credentialFile -ErrorAction Stop
+            foreach ($name in $credentials.Keys) {
+                $commandParts += "-$name"
+                $commandParts += "`$veeamReportCredentials['$name']"
+            }
         }
 
         $childCommand = $commandParts -join ' '
         if ($credentialFile) {
-            $childCommand = '$veeamReportCredential = Import-Clixml -LiteralPath ' +
+            $childCommand = '$veeamReportCredentials = Import-Clixml -LiteralPath ' +
                 (& $quotePowerShellLiteral $credentialFile) + '; ' + $childCommand
         }
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
@@ -225,7 +259,8 @@ if ($corePath -and -not [string]::IsNullOrWhiteSpace([string]$corePath.CorePath)
 if ($depDLLPath) {
     $file = Get-Item -LiteralPath $depDLLPath -ErrorAction Stop
     if ($file.VersionInfo.ProductMajorPart -ge 10) {
-        Import-Module $veeamModuleName -ErrorAction Stop
+        # Not found by name when the console's folder is not in PSModulePath: imported by its path below.
+        Import-Module $veeamModuleName -ErrorAction SilentlyContinue
     }
     
 }
@@ -255,7 +290,12 @@ $script:VbrConnected = $false
 Write-VeeamReportProgress -Status "Connecting to Veeam server '$Server'" -PercentComplete 0
 try {
     try {
-        Connect-VBRServer -Server $Server -ErrorAction Stop | Out-Null
+        if ($null -ne $Credential) {
+            Connect-VBRServer -Server $Server -Credential $Credential -ErrorAction Stop | Out-Null
+        }
+        else {
+            Connect-VBRServer -Server $Server -ErrorAction Stop | Out-Null
+        }
         $script:VbrConnected = $true
     }
     catch {
@@ -311,7 +351,9 @@ $crit = 15
  
 $veeamLicInfo = $null
 try {
-    $veeamLicInfo = Get-VBRInstalledLicense -ErrorAction Stop
+    if (-not $SureBackupOnly) {
+        $veeamLicInfo = Get-VBRInstalledLicense -ErrorAction Stop
+    }
 }
 catch {
     Write-Warning "Unable to retrieve Veeam license information: $($_.Exception.Message)"
@@ -336,7 +378,7 @@ else {
     $Body += "- :warning: UNKNOWN: Cannot get Veeam License information`n"
 }
 Write-VeeamReportProgress -Status 'Collecting backup jobs' -PercentComplete 0
-$VbrJobs = Get-VBRJob
+$VbrJobs = if ($SureBackupOnly) { @() } else { Get-VBRJob }
 $backupJobCount = @($VbrJobs).Count
 $backupJobIndex = 0
 # Same level as Check Backup Copy and SureBackup verification below.
@@ -566,7 +608,7 @@ Write-VeeamReportProgress -Status 'Collecting Backup Copy jobs' -PercentComplete
 
  
 $list = @()
-$backupCopyJobs = @(Get-VBRBackupCopyJob)
+$backupCopyJobs = if ($SureBackupOnly) { @() } else { @(Get-VBRBackupCopyJob) }
 $backupCopyJobCount = $backupCopyJobs.Count
 $backupCopyJobIndex = 0
 $Bodycopy += "`n### Check Backup Copy`n"
@@ -791,8 +833,13 @@ else {
 }
 
 Write-VeeamReportProgress -Status 'Finishing report' -PercentComplete 100
-$Body += $Bodycopy
-$Body += $BodySureBackup
+if ($SureBackupOnly) {
+    $Body = $BodySureBackup
+}
+else {
+    $Body += $Bodycopy
+    $Body += $BodySureBackup
+}
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     $outputDirectory = Split-Path -Path $OutputPath -Parent
     if (-not [string]::IsNullOrWhiteSpace($outputDirectory) -and -not (Test-Path -LiteralPath $outputDirectory)) {

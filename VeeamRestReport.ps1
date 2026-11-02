@@ -693,6 +693,19 @@ function Format-SureBackupSession {
     return $text
 }
 
+# The Veeam PowerShell module of the Veeam console, when it is installed on this computer.
+function Test-VeeamConsoleHere {
+    if ((Get-Command Connect-VBRServer -ErrorAction SilentlyContinue) -or (Get-Module -ListAvailable -Name 'Veeam.Backup.PowerShell' -ErrorAction SilentlyContinue)) {
+        return $true
+    }
+    $core = Get-ItemProperty -Path 'HKLM:\Software\Veeam\Veeam Backup and Replication\' -Name 'CorePath' -ErrorAction SilentlyContinue
+    $manifests = @(Join-Path $env:ProgramFiles 'Veeam\Backup and Replication\Console\Veeam.Backup.PowerShell\Veeam.Backup.PowerShell.psd1')
+    if ($core -and $core.CorePath) {
+        $manifests += Join-Path $core.CorePath 'Console\Veeam.Backup.PowerShell\Veeam.Backup.PowerShell.psd1'
+    }
+    return [bool]@($manifests | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count
+}
+
 # SureBackup sessions, asked by their session type: Veeam 13 has no SureBackup endpoint and leaves
 # these sessions out of the list of all sessions, but gives them by type ("SureBackup" in its
 # ESessionType). Known says whether this Veeam has that type (an unknown one is refused with HTTP
@@ -840,15 +853,23 @@ try {
                 $found = [pscustomobject]@{ Known = $false; Sessions = @() }
             }
             $sureBackupSessions = [object[]]$found.Sessions
-            if ($sureBackupSessions.Count -eq 0) {
-                if ($found.Known) {
-                    $Body += "No SureBackup session was found.`n"
+            $consoleReport = Join-Path $PSScriptRoot 'VeeamReport.ps1'
+            if ($sureBackupSessions.Count -eq 0 -and (Test-VeeamConsoleHere) -and (Test-Path -LiteralPath $consoleReport -PathType Leaf)) {
+                # Veeam 13 gives no SureBackup run through its REST API, even by type: they are read
+                # through the PowerShell module of the Veeam console installed on this computer.
+                Write-VeeamReportProgress -Status 'SureBackup through the Veeam console' -PercentComplete 92
+                try {
+                    $lines = @(& $consoleReport -Server $Server -Credential $Credential -SureBackupOnly -NoOpen -OutputPath '' | Where-Object { $_ -is [string] })
+                    $Body += (($lines -join "`n") -replace '^\s*### SureBackup verification\s*', '') + "`n"
                 }
-                else {
-                    $Body += ":warning: The REST API of this Veeam ($(if ($version) { $version } else { 'version unknown' })) gives no SureBackup jobs or sessions: check SureBackup in the Veeam console.`n"
+                catch {
+                    $Body += ":warning: SureBackup could not be read through the Veeam console on this computer: $($_.Exception.Message)`n"
                 }
+            }
+            elseif ($sureBackupSessions.Count -eq 0) {
+                $Body += ":warning: Veeam's REST API gave no SureBackup run (Veeam $(if ($version) { $version } else { 'version unknown' }); Veeam 13 gives none through it, even when they ran). To report them, install the Veeam Backup & Replication Console of the same version on this computer: the report then reads SureBackup through it. Until then, check SureBackup in the Veeam console.`n"
                 $sessionTypes = @(Get-RecentSessions | ForEach-Object { "$(Get-VeeamValue $_ 'sessionType')" } | Sort-Object -Unique) -join ', '
-                Write-Warning "No SureBackup session found (session types of the last 31 days: $sessionTypes)."
+                Write-Warning "No SureBackup session from the REST API, and no Veeam console on this computer (session types of the last 31 days: $sessionTypes)."
             }
         }
         foreach ($group in @($sureBackupSessions | Group-Object -Property { "$($_.name)" } | Sort-Object -Property Name)) {
