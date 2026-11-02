@@ -58,6 +58,28 @@ function Convert-Bytes {
   }
   return $check
 }
+# The operating system shortly: "Microsoft Windows Server 2019 Standard" is Windows 2019, "Microsoft
+# Windows 10 (64-bit)" Windows 10, "CentOS Stream 9 (64-bit)" CentOS 9.
+function Get-ShortOsName {
+  param(
+    [string]$Name
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Name)) {
+    return 'Unknown'
+  }
+  if ($Name -match 'Windows Server (\d{4})') {
+    return "Windows $($Matches[1])"
+  }
+  if ($Name -match 'Windows (\d+)') {
+    return "Windows $($Matches[1])"
+  }
+  if ($Name -match '(?i)centos\D*(\d+)') {
+    return "CentOS $($Matches[1])"
+  }
+  return ($Name -replace '^Microsoft\s+', '' -replace '\s*\((32|64)-bit\)', '').Trim()
+}
+
 #Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true
 $connected = $false
 try {
@@ -196,9 +218,11 @@ $vPartitionListMD = "### Vm Storage $(Get-Date -format 'dd/MM/yyyy'   )`n"
 $vPartitionListMD += "| Disk   | Capacity GB |Free GB |Free %|`n"
 $vPartitionListMD += "|------------|-------------|---------------------|------|`n"
 
-$VolbarstackedL1 = "|Disk (%) | " 
+$VolbarstackedL1 = "|Disk (%) | "
 $VolbarstackedL2 = "|--------|"
 $VolbarstackedL3 = "| $(Get-Date -format 'dd/MM/yyyy'   )  |"
+# The Virtual System section: every VM with its folder and operating system.
+$virtualSystems = New-Object System.Collections.Generic.List[object]
 $vmIndex = 0
 foreach ($vInfo in $vInfoList) {
   $vmIndex++
@@ -219,7 +243,14 @@ foreach ($vInfo in $vInfoList) {
     $Powerstate = "OFF"
   }
   $vInfoListMD += "| $( $vInfo.Name )               |  $( $Powerstate  ) | $( $vInfo.NumCpu  )  |  $( $vInfo.MemoryMB  ) |   $( [Math]::Round(($granted/1024  ) ) )          |  $( [Math]::Round(($active/1024  ) ) )  |  $( [Math]::Round(($usage ) ) )       | $( $extra.OSFullName  )                |`n"
- 
+
+  # vSphere's own cluster VMs are left out. The OS as VMware Tools reports it, else as configured.
+  if ($vInfo.Name -notlike 'vCLS*') {
+    $osName = if ($extra.OSFullName) { $extra.OSFullName } else { $vInfo.ExtensionData.Config.GuestFullName }
+    $folderName = if ($vInfo.Folder -and $vInfo.Folder.Name -ne 'vm') { $vInfo.Folder.Name } elseif ($vInfo.Folder) { 'No folder' } else { 'vApp' }
+    $virtualSystems.Add([pscustomobject]@{ Name = $vInfo.Name; Folder = $folderName; Os = Get-ShortOsName $osName })
+  }
+
 
   $vPartitionList = $extra.Disks
   foreach ($vPartition in $vPartitionList) { 
@@ -277,6 +308,20 @@ $vSnapshotListMD += "|------------|-------------|---------------------|------|`n
  }
 $Body += "`n"
 $Body += $vSnapshotListMD
+
+# Virtual System: a table per VM folder (Production, Acceptance...), with the VMs' operating system.
+$Body += "`n### Virtual System`n"
+if ($virtualSystems.Count -eq 0) {
+  $Body += "No virtual machine.`n"
+}
+foreach ($folder in @($virtualSystems | Group-Object -Property Folder | Sort-Object -Property Name)) {
+  $Body += "`n#### $($folder.Name)`n"
+  $Body += "| PC | Windows Version |`n"
+  $Body += "|----|-----------------|`n"
+  foreach ($vm in @($folder.Group | Sort-Object -Property Name)) {
+    $Body += "| $($vm.Name) | $($vm.Os) |`n"
+  }
+}
 
 $outfile = "$root\$file.md"
 $Body

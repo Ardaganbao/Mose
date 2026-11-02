@@ -605,6 +605,19 @@ function Get-SampleMarkdown {
 | VM | Name | Created | Size GB |
 |----|------|---------|---------|
 | SAMPLE-VM-01 | before-update | 2026-01-01 | 4 |
+
+### Virtual System
+
+#### Acceptance (sample)
+| PC | Windows Version |
+|----|-----------------|
+| SAMPLE-VM-02_AC | Windows 2019 |
+
+#### Production (sample)
+| PC | Windows Version |
+|----|-----------------|
+| SAMPLE-VM-01 | Windows 2019 |
+| SAMPLE-VM-02 | CentOS 9 |
 "@
         }
         'HyperV' {
