@@ -157,6 +157,14 @@ foreach ($esxi in $hostList) {
   $Body += "| BIOS release date  | $($info.Hardware.BiosInfo.releaseDate)      |`n"
   $Body += "| Boot time          | $($Info.runtime.BootTime)     |`n"
 
+  # For the report's Physical System table (Report.ps1): the host and its ESXi.
+  [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'VMware'; Name = "$($esxi.Name)"; Brand = "$($esxi.Manufacturer)"; Model = "$($esxi.Model)"
+    Serial = "$serviceTag"; ProductId = ''; Bios = "$($info.Hardware.BiosInfo.BiosVersion)"; Server = $server
+  }
+  [pscustomobject]@{ MoseInventory = 'Service'; Machine = "$($esxi.Name)"; MachineSerial = "$serviceTag"; Name = 'Host VMware'; Version = "$($esxi.Version), $($esxi.Build)"
+    Product = 'ESXi'; ProductVersion = "$($esxi.Version)"; Build = "$($esxi.Build)"; Server = $server
+  }
+
   $object | Add-Member -type NoteProperty -name "CPU usage %" -value ([Math]::Round($esxi.CpuUsageMhz * 100 / $esxi.CpuTotalMhz))
   $object | Add-Member -type NoteProperty -name "Memory usage %" -value ([Math]::Round($esxi.MemoryUsageGB * 100 / $esxi.MemoryTotalGB))
     
@@ -248,7 +256,8 @@ foreach ($vInfo in $vInfoList) {
   if ($vInfo.Name -notlike 'vCLS*') {
     $osName = if ($extra.OSFullName) { $extra.OSFullName } else { $vInfo.ExtensionData.Config.GuestFullName }
     $folderName = if ($vInfo.Folder -and $vInfo.Folder.Name -ne 'vm') { $vInfo.Folder.Name } elseif ($vInfo.Folder) { 'No folder' } else { 'vApp' }
-    $virtualSystems.Add([pscustomobject]@{ MoseInventory = 'VM'; Name = $vInfo.Name; Folder = $folderName; Os = Get-ShortOsName $osName; Server = $server })
+    # Host: where a StorMagic VSA runs, for the Physical System table.
+    $virtualSystems.Add([pscustomobject]@{ MoseInventory = 'VM'; Name = $vInfo.Name; Folder = $folderName; Os = Get-ShortOsName $osName; Host = "$($vInfo.VMHost.Name)"; Server = $server })
   }
 
 

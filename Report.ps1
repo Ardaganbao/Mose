@@ -849,12 +849,49 @@ function Get-SampleInventory {
 
     $server = Get-MoseTargetName $Target
     switch ($Target.Module) {
+        'iLO' {
+            [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'iLO'; Name = 'esx-01.sample.local'; Brand = 'HPE'; Model = 'ProLiant DL380 Gen10'; Serial = 'CZSAMPLE01'
+                ProductId = 'P00000-B21'; Bios = 'U30 v2.90 (01/01/2026)'; Server = $server
+            }
+        }
+        'iDRAC' {
+            [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'iDRAC'; Name = 'esx-02.sample.local'; Brand = 'Dell Inc.'; Model = 'PowerEdge R650'; Serial = 'SAMPLE02'
+                ProductId = 'SAMPLE02'; Bios = '1.10.2'; Server = $server
+            }
+        }
+        { $_ -in 'BMC', 'HyperV' } {
+            [pscustomobject]@{ MoseInventory = 'Machine'; Source = $Target.Module; Name = 'HV-NODE-01'; Brand = 'Lenovo'; Model = 'ThinkSystem SR650'; Serial = 'J300SAMP'
+                ProductId = ''; Bios = 'IVE1'; Server = $server
+            }
+            if ($Target.Module -eq 'HyperV') {
+                [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'HV-NODE-01'; MachineSerial = 'J300SAMP'; Name = 'Host Hyper-V'; Version = 'Microsoft Windows Server 2022 Datacenter (20348)'; Server = $server }
+            }
+        }
         'VMware' {
+            [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'VMware'; Name = 'esx-01.sample.local'; Brand = 'HPE'; Model = 'ProLiant DL380 Gen10'; Serial = 'CZSAMPLE01'
+                ProductId = ''; Bios = 'U30'; Server = $server
+            }
+            [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'esx-01.sample.local'; MachineSerial = 'CZSAMPLE01'; Name = 'Host VMware'; Version = '8.0.3, 24022510'
+                Product = 'ESXi'; ProductVersion = '8.0.3'; Build = '24022510'; Server = $server
+            }
             foreach ($vm in @(
                     @('SAMPLE-VM-01', 'Production (sample)', 'Windows 2022'),
                     @('SAMPLE-VM-02', 'Production (sample)', 'CentOS 9'),
-                    @('SAMPLE-VM-01_AC', 'Acceptance (sample)', 'Windows 2019'))) {
-                [pscustomobject]@{ MoseInventory = 'VM'; Name = $vm[0]; Folder = $vm[1]; Os = $vm[2]; Server = $server }
+                    @('SAMPLE-VM-01_AC', 'Acceptance (sample)', 'Windows 2019'),
+                    @('SAMPLE-VSA-01', 'StorMagic (sample)', 'Red Hat Enterprise Linux 8'))) {
+                [pscustomobject]@{ MoseInventory = 'VM'; Name = $vm[0]; Folder = $vm[1]; Os = $vm[2]; Host = 'esx-01.sample.local'; Server = $server }
+            }
+        }
+        'StorMagic' {
+            [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'SAMPLE-VSA-01'; Name = 'StorMagic sVSAN'; Version = '6.3.U1.52061'; Product = 'StorMagic'
+                Support = 'Platinum'; SupportEnd = (Get-Date).AddYears(1).ToString('yyyy-MM-dd'); Assumed = $false; Server = $server
+            }
+            [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'SAMPLE-WITNESS'; Name = 'StorMagic NSH'; Version = '6.3.U1.52061'; Product = 'StorMagic'; Assumed = $true; Server = $server }
+        }
+        'NAS' {
+            [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'NAS'; Name = 'SAMPLE-NAS'; Brand = 'Synology'; Model = 'RS2418+'; Serial = 'SAMPLESN01'; ProductId = ''; Bios = ''; Server = $server }
+            [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'SAMPLE-NAS'; MachineSerial = 'SAMPLESN01'; Name = 'NAS storage'; Version = 'DSM 7.3.2-86009'; Product = 'DSM'
+                UpToDate = $true; Latest = ''; Server = $server
             }
         }
         { $_ -in 'Veeam', 'VeeamApi' } {
@@ -1095,7 +1132,8 @@ function Save-TargetLogin {
         $Target | Add-Member -NotePropertyName Secret -NotePropertyValue $secretName
     }
     if ($configFromVault) {
-        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ })
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') `
+            -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -Machines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
         Write-Host "Saved the login for $server in the client configuration." -ForegroundColor Green
     }
     return $true
@@ -1173,7 +1211,8 @@ function Request-CertificateTrust {
         $Target | Add-Member -NotePropertyName CertificateThumbprint -NotePropertyValue $Thumbprint
     }
     if ($configFromVault) {
-        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ })
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') `
+            -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -Machines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
         Write-Host "Saved the certificate of $server in the client configuration." -ForegroundColor Green
     }
     return $true
@@ -1210,19 +1249,401 @@ function Format-InventoryCell {
     return ("$Value" -replace '\|', '/' -replace '\r?\n', ' ').Trim()
 }
 
+# The latest version of each product the Physical System table checks: latest-versions.json,
+# shipped with MOSE (Updated says when it was written), and with -Online the ESXi builds virten.net
+# publishes, when this computer can reach it.
+function Get-LatestVersions {
+    param(
+        [switch]$Online
+    )
+
+    $latest = [pscustomobject]@{ Updated = ''; ESXi = @{}; StorMagic = ''; DSM = @{} }
+    try {
+        $file = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'latest-versions.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        $latest.Updated = "$(Get-MoseProperty $file 'Updated')"
+        $latest.StorMagic = "$(Get-MoseProperty $file 'StorMagic')"
+        foreach ($product in 'ESXi', 'DSM') {
+            $releases = Get-MoseProperty $file $product
+            $table = $latest.$product
+            if ($releases) {
+                foreach ($property in $releases.PSObject.Properties) {
+                    $table[$property.Name] = $property.Value
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "latest-versions.json could not be read, so the versions are not checked: $($_.Exception.Message)"
+    }
+    if ($Online) {
+        try {
+            $answer = Invoke-RestMethod -Uri 'https://www.virten.net/repo/esxiReleases.json' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+            $builds = Get-EsxiLatestBuilds -Releases @($answer.data.esxiReleases)
+            foreach ($minor in $builds.Keys) {
+                $latest.ESXi[$minor] = $builds[$minor]
+            }
+        }
+        catch {
+            Write-Host "virten.net could not be reached, so the latest ESXi builds are those of latest-versions.json ($($latest.Updated)): $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    }
+    return $latest
+}
+
+# The latest build of each ESXi release (8.0...) in virten.net's list, on its newest update line
+# (8.0.3): a later patch of an older line, like 8.0 Update 2f after Update 3k, is not the latest.
+function Get-EsxiLatestBuilds {
+    param(
+        [object[]]$Releases
+    )
+
+    $latest = @{}
+    foreach ($release in $Releases) {
+        $minor = "$(Get-MoseProperty $release 'minorRelease')"
+        $build = 0
+        # Not ESXi for ARM (8.0ARM).
+        if ($minor -notmatch '^\d+\.\d+$' -or -not [int]::TryParse("$(Get-MoseProperty $release 'build')", [ref]$build)) {
+            continue
+        }
+        if ("$(Get-MoseProperty $release 'patchRelease')" -match '^ESXi[_-](\d+\.\d+\.\d+)') {
+            $line = [version]$Matches[1]
+        }
+        elseif ("$(Get-MoseProperty $release 'releaseLevel')" -match '(\d+)\.(\d+)\.\d+ Update (\d+)') {
+            $line = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+        }
+        else {
+            $line = [version]"$minor.0"
+        }
+        $current = $latest[$minor]
+        if (-not $current -or $line -gt $current.Line -or ($line -eq $current.Line -and $build -gt $current.Build)) {
+            # ESXi 6 hosts say 6.7.0 whatever their update, so their version is the release's.
+            $version = if ($line.Major -lt 7) { "$minor.0" } else { "$line" }
+            $latest[$minor] = [pscustomobject]@{ Version = $version; Build = $build; Line = $line }
+        }
+    }
+    return $latest
+}
+
+# "DSM 7.3.2-86009 Update 1": its major version, build and update.
+function ConvertTo-DsmVersion {
+    param(
+        [string]$Text
+    )
+
+    if ($Text -match '(\d+)\.\d+(?:\.\d+)?-(\d+)(?:\s+Update\s+(\d+))?') {
+        $update = 0
+        if ($Matches[3]) {
+            $update = [int]$Matches[3]
+        }
+        return [pscustomobject]@{ Major = [int]$Matches[1]; Build = [int]$Matches[2]; Update = $update }
+    }
+    return $null
+}
+
+# The mark after a service's version: :white_check_mark: when it is the latest of its product,
+# :warning: with the latest one when it is not, nothing when that is not known. The NAS asks DSM
+# itself (UpToDate); the others are compared with $Latest (Get-LatestVersions).
+function Get-VersionMark {
+    param(
+        [object]$Service,
+        [object]$Latest
+    )
+
+    $upToDate = Get-MoseProperty $Service 'UpToDate'
+    $newer = "$(Get-MoseProperty $Service 'Latest')"
+    $version = "$(Get-MoseProperty $Service 'Version')"
+    switch ("$(Get-MoseProperty $Service 'Product')") {
+        'ESXi' {
+            $hostVersion = $null
+            $build = 0
+            if ([version]::TryParse("$(Get-MoseProperty $Service 'ProductVersion')", [ref]$hostVersion) -and [int]::TryParse("$(Get-MoseProperty $Service 'Build')", [ref]$build)) {
+                $newest = $Latest.ESXi["$($hostVersion.Major).$($hostVersion.Minor)"]
+                if ($newest) {
+                    $upToDate = ($hostVersion.Major -lt 7 -or $hostVersion -ge [version]"$($newest.Version)") -and $build -ge [int]$newest.Build
+                    $newer = "$($newest.Version), $($newest.Build)"
+                }
+            }
+        }
+        'StorMagic' {
+            # 6.3.U1.52061: the build, at the end, grows with every version.
+            if ($Latest.StorMagic -match '(\d+)$') {
+                $newestBuild = [int]$Matches[1]
+                if ($version -match '(\d+)$') {
+                    $upToDate = [int]$Matches[1] -ge $newestBuild
+                    $newer = $Latest.StorMagic
+                }
+            }
+        }
+        'DSM' {
+            if ($upToDate -isnot [bool]) {
+                $installed = ConvertTo-DsmVersion $version
+                if ($installed -and $Latest.DSM.ContainsKey("$($installed.Major)")) {
+                    $newest = ConvertTo-DsmVersion "$($Latest.DSM["$($installed.Major)"])"
+                    if ($newest) {
+                        $upToDate = $installed.Build -gt $newest.Build -or ($installed.Build -eq $newest.Build -and $installed.Update -ge $newest.Update)
+                        $newer = "$($Latest.DSM["$($installed.Major)"])"
+                    }
+                }
+            }
+        }
+    }
+    if ($upToDate -isnot [bool]) {
+        return ''
+    }
+    if ($upToDate) {
+        return ':white_check_mark:'
+    }
+    if ($newer) {
+        return ":warning: (latest $newer)"
+    }
+    return ':warning: (an update is available)'
+}
+
+# An end date of the warranty or support column, dd/MM/yyyy as in the rest of the report, with
+# :white_check_mark: more than 60 days before it, :warning: in the last 60 days, :x: once past.
+function Format-EndDate {
+    param(
+        [string]$Date
+    )
+
+    $end = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($Date, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$end)) {
+        return $Date
+    }
+    $days = ($end - (Get-Date).Date).Days
+    $mark = if ($days -gt 60) { ':white_check_mark:' } elseif ($days -ge 0) { ':warning:' } else { ':x:' }
+    return "$($end.ToString('dd/MM/yyyy')) $mark"
+}
+
+# A machine's name without its domain (esxi01.example.local is esxi01); an IP address stays whole.
+function Get-ShortMachineName {
+    param(
+        [string]$Name
+    )
+
+    $Name = $Name.Trim()
+    if (-not $Name -or (Test-MoseIPAddress $Name)) {
+        return $Name
+    }
+    return ($Name -split '\.')[0]
+}
+
+# A serial number, or '' for the placeholders of machines that have none.
+function Get-MachineSerial {
+    param(
+        [string]$Serial
+    )
+
+    $Serial = $Serial.Trim()
+    if ($Serial -match '^(0+|N/?A|None|Not Specified|To be filled by O\.E\.M\.|Default string|System Serial Number|\?)$') {
+        return ''
+    }
+    return $Serial
+}
+
+# The row of the Physical System table for a machine, by its serial number, else its name: a new
+# one when there is none yet (unless -NoNew).
+function Get-MachineRow {
+    param(
+        [System.Collections.Generic.List[object]]$Rows,
+        [string]$Name,
+        [string]$Serial,
+        [switch]$NoNew
+    )
+
+    $found = $null
+    if ($Serial) {
+        $found = $Rows | Where-Object { $_.Serials -contains $Serial } | Select-Object -First 1
+    }
+    if (-not $found -and $Name) {
+        $found = $Rows | Where-Object { $_.Names -contains $Name } | Select-Object -First 1
+    }
+    if (-not $found) {
+        if ($NoNew) {
+            return $null
+        }
+        $found = [pscustomobject]@{
+            Names    = New-Object System.Collections.Generic.List[string]
+            Serials  = New-Object System.Collections.Generic.List[string]
+            Sources  = New-Object System.Collections.Generic.List[object]
+            Services = New-Object System.Collections.Generic.List[object]
+            Line     = $null
+        }
+        $Rows.Add($found)
+    }
+    if ($Name -and $found.Names -notcontains $Name) {
+        $found.Names.Add($Name)
+    }
+    if ($Serial -and $found.Serials -notcontains $Serial) {
+        $found.Serials.Add($Serial)
+    }
+    return $found
+}
+
+# The first of these objects that has a value for $Field.
+function Get-FirstValue {
+    param(
+        [object[]]$Objects,
+        [string]$Field
+    )
+
+    foreach ($object in $Objects) {
+        $value = "$(Get-MoseProperty $object $Field)".Trim()
+        if ($value) {
+            return $value
+        }
+    }
+    return ''
+}
+
+# The Physical System table: a row per machine with the services it runs below each other, from
+# what the modules read of it, merged by serial number or name. The hardware is as the iLO, iDRAC or
+# BMC reads it, the name as VMware, Hyper-V or the NAS does. A StorMagic VSA is a VM: it goes to the
+# host that runs it (from the VMware VMs). The lines entered in the configuration (Configure.ps1, I)
+# give the warranty and what no module reads; a line that matches no machine is a machine of its
+# own, in a full report only.
+function Get-PhysicalSystemMarkdown {
+    param(
+        [object[]]$Inventory,
+        [object[]]$MachineLines,
+        [object]$Latest,
+        [switch]$Partial
+    )
+
+    $vmHosts = @{}
+    foreach ($vm in @($Inventory | Where-Object { $_.MoseInventory -eq 'VM' })) {
+        $vmHost = Get-ShortMachineName "$(Get-MoseProperty $vm 'Host')"
+        if ($vmHost) {
+            $vmHosts[(Get-ShortMachineName "$($vm.Name)")] = $vmHost
+        }
+    }
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $Inventory) {
+        if ($item.MoseInventory -eq 'Machine') {
+            $row = Get-MachineRow -Rows $rows -Name (Get-ShortMachineName "$($item.Name)") -Serial (Get-MachineSerial "$($item.Serial)")
+            $row.Sources.Add($item)
+        }
+        elseif ($item.MoseInventory -eq 'Service') {
+            $name = Get-ShortMachineName "$(Get-MoseProperty $item 'Machine')"
+            $serial = Get-MachineSerial "$(Get-MoseProperty $item 'MachineSerial')"
+            if (-not $serial -and $vmHosts.ContainsKey($name)) {
+                $name = $vmHosts[$name]
+            }
+            if (-not $name -and -not $serial) {
+                continue
+            }
+            $row = Get-MachineRow -Rows $rows -Name $name -Serial $serial
+            # Once per machine; read on its own server rather than assumed from another one.
+            $index = -1
+            for ($i = 0; $i -lt $row.Services.Count; $i++) {
+                if ("$($row.Services[$i].Name)" -eq "$($item.Name)") {
+                    $index = $i
+                }
+            }
+            if ($index -lt 0) {
+                $row.Services.Add($item)
+            }
+            elseif ((Get-MoseProperty $row.Services[$index] 'Assumed') -and -not (Get-MoseProperty $item 'Assumed')) {
+                $row.Services[$index] = $item
+            }
+        }
+    }
+    foreach ($line in @($MachineLines | Where-Object { $_ })) {
+        $name = Get-ShortMachineName "$(Get-MoseProperty $line 'Name')"
+        $serial = Get-MachineSerial "$(Get-MoseProperty $line 'Serial')"
+        if ($name -or $serial) {
+            $row = Get-MachineRow -Rows $rows -Name $name -Serial $serial -NoNew:$Partial
+            if ($row -and -not $row.Line) {
+                $row.Line = $line
+            }
+        }
+    }
+    if ($rows.Count -eq 0) {
+        return ''
+    }
+
+    $redfish = 'iLO', 'iDRAC', 'BMC'
+    $hostSources = 'VMware', 'HyperV', 'NAS'
+    $text = "### Physical System`n| System name | Brand | Model | Serial number | Product ID | BIOS version | Services | Services version | Warranty expiration date |`n|---|---|---|---|---|---|---|---|---|"
+    foreach ($row in $rows) {
+        $line = $row.Line
+        $hardware = @($row.Sources | Where-Object { $_.Source -in $redfish }) + @($row.Sources | Where-Object { $_.Source -notin $redfish }) + @($line | Where-Object { $_ })
+        $named = @($row.Sources | Where-Object { $_.Source -in $hostSources }) + @($row.Sources | Where-Object { $_.Source -notin $hostSources })
+        $name = Get-FirstValue @($line | Where-Object { $_ }) 'Name'
+        if (-not $name) {
+            $name = Get-ShortMachineName (Get-FirstValue $named 'Name')
+        }
+        if (-not $name) {
+            $name = $row.Names[0]
+        }
+        $brand = (Get-FirstValue $hardware 'Brand') -replace ',?\s+Inc\.?$', '' -replace '^Hewlett Packard Enterprise$', 'HPE' -replace '^Hewlett-Packard$', 'HP'
+        $serial = Get-MachineSerial (Get-FirstValue $hardware 'Serial')
+        $machineCells = @($name, $brand, (Get-FirstValue $hardware 'Model'), $serial, (Get-FirstValue $hardware 'ProductId'), (Get-FirstValue $hardware 'Bios'))
+
+        # Services, version, and the support of the service (StorMagic) or the warranty of the machine.
+        $serviceName = Get-FirstValue @($line | Where-Object { $_ }) 'Service'
+        $entries = New-Object System.Collections.Generic.List[object]
+        for ($i = 0; $i -lt $row.Services.Count; $i++) {
+            $service = $row.Services[$i]
+            $shownName = if ($i -eq 0 -and $serviceName) { $serviceName } else { "$($service.Name)" }
+            $versionCell = ("$(Get-MoseProperty $service 'Version')".Trim() + ' ' + (Get-VersionMark $service $Latest)).Trim()
+            $support = ''
+            $supportEnd = "$(Get-MoseProperty $service 'SupportEnd')"
+            if ($supportEnd) {
+                $support = ("$(Get-MoseProperty $service 'Support') - Expires $(Format-EndDate $supportEnd)" -replace '^ - ', '')
+            }
+            $entries.Add(@($shownName, $versionCell, $support))
+        }
+        if ($entries.Count -eq 0 -and $serviceName) {
+            $entries.Add(@($serviceName, '', ''))
+        }
+        $warranty = ''
+        $warrantyEnd = "$(Get-MoseProperty $line 'WarrantyEnd')"
+        if ($warrantyEnd) {
+            $warranty = Format-EndDate $warrantyEnd
+        }
+        $note = "$(Get-MoseProperty $line 'WarrantyNote')".Trim()
+        if ($note) {
+            $warranty = if ($warranty) { "$warranty ($note)" } else { $note }
+        }
+        if ($entries.Count -eq 0 -or ($warranty -and $entries[0][2])) {
+            $entries.Insert(0, @('', '', ''))
+        }
+        if ($warranty) {
+            $entries[0][2] = $warranty
+        }
+
+        for ($i = 0; $i -lt $entries.Count; $i++) {
+            $cells = if ($i -eq 0) { $machineCells } else { @('', '', '', '', '', '') }
+            $cells = @(@($cells) + @($entries[$i]) | ForEach-Object { Format-InventoryCell $_ })
+            $text += "`n| $($cells -join ' | ') |"
+        }
+    }
+    return $text
+}
+
 # The tables of the layout's Inventory group (Infrastructure detail), from what the modules found
-# ($Inventory): Virtual System, the VMs of the VMware modules in a table per VM folder, and
-# Software, Veeam and msSQL as their modules read them with the lines entered in the configuration
-# (Configure.ps1, I). A line with the name of one read gives its purpose, or a version to show
-# instead; the other lines are only in a full report, not in a partial one.
+# ($Inventory): Physical System (Get-PhysicalSystemMarkdown), Virtual System, the VMs of the VMware
+# modules in a table per VM folder, and Software, Veeam and msSQL as their modules read them with
+# the lines entered in the configuration (Configure.ps1, I). A line with the name of one read gives
+# its purpose, or a version to show instead; the other lines are only in a full report, not in a
+# partial one.
 function Get-InventoryMarkdown {
     param(
         [object[]]$Inventory,
         [object[]]$SoftwareLines,
+        [object[]]$MachineLines,
+        [object]$Latest,
         [switch]$Partial
     )
 
     $parts = New-Object System.Collections.Generic.List[string]
+
+    $physical = Get-PhysicalSystemMarkdown -Inventory $Inventory -MachineLines $MachineLines -Latest $Latest -Partial:$Partial
+    if ($physical) {
+        $parts.Add($physical)
+    }
 
     $vms = @($Inventory | Where-Object { $_.MoseInventory -eq 'VM' })
     if ($vms.Count -gt 0) {
@@ -1492,7 +1913,11 @@ try {
             }
         }
     }
-    $inventoryMarkdown = Get-InventoryMarkdown -Inventory $inventory.ToArray() -SoftwareLines @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -Partial:([bool]$selection.Tag)
+    # The latest ESXi builds are looked up online only for a real report with ESXi hosts.
+    $esxiHosts = @($inventory | Where-Object { (Get-MoseProperty $_ 'Product') -eq 'ESXi' }).Count
+    $latest = Get-LatestVersions -Online:(-not $DryRun -and $esxiHosts -gt 0)
+    $inventoryMarkdown = Get-InventoryMarkdown -Inventory $inventory.ToArray() -Latest $latest -Partial:([bool]$selection.Tag) `
+        -SoftwareLines @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -MachineLines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2
     }

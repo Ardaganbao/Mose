@@ -745,21 +745,82 @@ function Edit-SavedSecrets {
     }
 }
 
-# I in the menu: the lines of the Software table entered by hand (e.g. Microsoft Defender). The
-# report reads Veeam and msSQL itself; a line with the same name gives their purpose, or a version to
-# show instead.
-function Edit-Inventory {
+# The fields of the lines entered under I, in the order they are asked. More: asked for a new line
+# only when wanted; Date: yyyy-MM-dd.
+$softwareFields = @(
+    @{ Name = 'Name'; Prompt = 'Name (e.g. Microsoft Defender)' }
+    @{ Name = 'Version'; Prompt = 'Version (Enter for none, or for the one the report reads)' }
+    @{ Name = 'Purpose'; Prompt = 'Purpose (e.g. security and antivirus)' }
+)
+$machineFields = @(
+    @{ Name = 'Name'; Prompt = 'Name as the report shows it (e.g. esxi01), or of a machine no module reads' }
+    @{ Name = 'Serial'; Prompt = 'Serial number (Enter if the name is enough)' }
+    @{ Name = 'WarrantyEnd'; Prompt = 'Warranty end date, yyyy-MM-dd (Enter for none)'; Date = $true }
+    @{ Name = 'WarrantyNote'; Prompt = 'Warranty note (e.g. parts on site)' }
+    @{ Name = 'Service'; Prompt = 'Service shown (e.g. NAS store for Veeam backup; Enter: as the report reads it)' }
+    @{ Name = 'Brand'; Prompt = 'Brand'; More = $true }
+    @{ Name = 'Model'; Prompt = 'Model'; More = $true }
+    @{ Name = 'ProductId'; Prompt = 'Product ID'; More = $true }
+    @{ Name = 'Bios'; Prompt = 'BIOS version'; More = $true }
+)
+
+# Asks the fields of a line under I. With $Line, Enter keeps a value and - empties it.
+function Read-InventoryLine {
+    param(
+        [object[]]$Fields,
+        [object]$Line
+    )
+
+    $values = [ordered]@{}
+    $more = $null
+    foreach ($field in $Fields) {
+        $current = "$(Get-MoseProperty $Line $field.Name)"
+        if ($field['More'] -and -not $Line) {
+            if ($null -eq $more) {
+                $more = Read-YesNo 'Also its brand, model, Product ID and BIOS, for a machine no module reads?' $false
+            }
+            if (-not $more) {
+                $values[$field.Name] = ''
+                continue
+            }
+        }
+        $prompt = if ($Line) { "$($field.Prompt) (Enter keeps it, - to empty it)" } else { $field.Prompt }
+        while ($true) {
+            $value = Read-Answer $prompt $current
+            if ($value -eq '-') {
+                $value = ''
+            }
+            $date = [datetime]::MinValue
+            if ($field['Date'] -and $value -and -not [datetime]::TryParseExact($value, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$date)) {
+                Write-Host "Write the date as yyyy-MM-dd, e.g. 2027-11-30." -ForegroundColor Yellow
+                continue
+            }
+            break
+        }
+        $values[$field.Name] = $value
+    }
+    return [pscustomobject]$values
+}
+
+# A list of lines under I: A adds one, its number changes or removes it.
+function Edit-InventoryList {
+    param(
+        [System.Collections.Generic.List[object]]$Lines,
+        [object[]]$Fields,
+        [string]$Title,
+        [string]$Help,
+        [scriptblock]$Show
+    )
+
     while ($true) {
         Write-Host ""
-        Write-Host "Lines of the Software table ($MoseInventoryTitle)" -ForegroundColor Cyan
-        Write-Host "The report reads Veeam and msSQL itself: a line with the same name gives their purpose." -ForegroundColor DarkGray
-        if ($software.Count -eq 0) {
+        Write-Host $Title -ForegroundColor Cyan
+        Write-Host $Help -ForegroundColor DarkGray
+        if ($Lines.Count -eq 0) {
             Write-Host "  None."
         }
-        for ($i = 0; $i -lt $software.Count; $i++) {
-            $line = $software[$i]
-            $version = if ($line.Version) { $line.Version } else { '-' }
-            Write-Host ("  {0,2}. {1,-24} {2,-16} {3}" -f ($i + 1), $line.Name, $version, $line.Purpose)
+        for ($i = 0; $i -lt $Lines.Count; $i++) {
+            Write-Host ("  {0,2}. {1}" -f ($i + 1), (& $Show $Lines[$i]))
         }
         Write-Host ""
 
@@ -769,29 +830,47 @@ function Edit-Inventory {
             return
         }
         if ($answer -match '^[Aa]$') {
-            $name = Read-Answer 'Name (e.g. Microsoft Defender)'
-            if ($name) {
-                $software.Add([pscustomobject]@{
-                        Name    = $name
-                        Version = Read-Answer 'Version (Enter for none, or for the one the report reads)'
-                        Purpose = Read-Answer 'Purpose (e.g. security and antivirus)'
-                    })
+            $line = Read-InventoryLine -Fields $Fields
+            if ($line.Name -or (Get-MoseProperty $line 'Serial')) {
+                $Lines.Add($line)
             }
         }
-        elseif ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $software.Count) {
-            $line = $software[$number - 1]
-            $action = Read-Answer "$($line.Name): E to change it, D to remove it, Enter for neither"
+        elseif ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $Lines.Count) {
+            $line = $Lines[$number - 1]
+            $action = Read-Answer "$(Get-MoseProperty $line 'Name'): E to change it, D to remove it, Enter for neither"
             if ($action -match '^[Ee]$') {
-                # Enter keeps a value, - empties it.
-                $values = foreach ($field in 'Name', 'Version', 'Purpose') {
-                    $value = Read-Answer "$field (Enter keeps it, - to empty it)" "$($line.$field)"
-                    if ($value -eq '-') { '' } else { $value }
-                }
-                $software[$number - 1] = [pscustomobject]@{ Name = $values[0]; Version = $values[1]; Purpose = $values[2] }
+                $Lines[$number - 1] = Read-InventoryLine -Fields $Fields -Line $line
             }
             elseif ($action -match '^[Dd]$') {
-                $software.RemoveAt($number - 1)
+                $Lines.RemoveAt($number - 1)
             }
+        }
+    }
+}
+
+# I in the menu: what the inventory tables cannot read. The Software lines no module reads (e.g.
+# Microsoft Defender), or the purpose of Veeam and msSQL; the warranty of the machines of the
+# Physical System table, and the machines no module reads.
+function Edit-Inventory {
+    while ($true) {
+        Write-Host ""
+        Write-Host "Inventory tables ($MoseInventoryTitle)" -ForegroundColor Cyan
+        Write-Host "   S. Software: lines no module reads, or the purpose of Veeam and msSQL ($($software.Count))"
+        Write-Host "   M. Physical System: the warranty of the machines, and machines no module reads ($($machines.Count))"
+        Write-Host ""
+        $choice = Read-Answer 'S or M, Enter to go back'
+        if (-not $choice) {
+            return
+        }
+        if ($choice -match '^[Ss]$') {
+            Edit-InventoryList -Lines $software -Fields $softwareFields -Title 'Lines of the Software table' `
+                -Help 'The report reads Veeam and msSQL itself: a line with the same name gives their purpose, or a version to show instead.' `
+                -Show { param($l) $version = Get-MoseProperty $l 'Version'; '{0,-24} {1,-16} {2}' -f (Get-MoseProperty $l 'Name'), $(if ($version) { $version } else { '-' }), (Get-MoseProperty $l 'Purpose') }
+        }
+        elseif ($choice -match '^[Mm]$') {
+            Edit-InventoryList -Lines $machines -Fields $machineFields -Title 'Machines of the Physical System table' `
+                -Help 'A line matches the machine of the same serial number, else of the same name: it gives its warranty, and what the report does not read.' `
+                -Show { param($l) $end = Get-MoseProperty $l 'WarrantyEnd'; '{0,-20} {1,-16} warranty {2} {3}' -f (Get-MoseProperty $l 'Name'), (Get-MoseProperty $l 'Serial'), $(if ($end) { $end } else { '-' }), (Get-MoseProperty $l 'WarrantyNote') }
         }
     }
 }
@@ -800,6 +879,7 @@ $config = Get-MoseConfig
 $client = ''
 $targets = New-Object System.Collections.Generic.List[object]
 $software = New-Object System.Collections.Generic.List[object]
+$machines = New-Object System.Collections.Generic.List[object]
 $secretsToRemove = New-Object System.Collections.Generic.List[string]
 $layout = $null
 if ($config) {
@@ -809,6 +889,9 @@ if ($config) {
     }
     foreach ($line in @(Get-MoseProperty $config 'Software' | Where-Object { $_ })) {
         $software.Add($line)
+    }
+    foreach ($line in @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })) {
+        $machines.Add($line)
     }
     $layout = Get-MoseProperty $config 'Layout'
 }
@@ -835,7 +918,7 @@ while ($true) {
     }
     $layoutText = if ($layout) { 'custom' } else { 'default' }
     Write-Host "   P. Saved logins and tokens: edit or remove them, and the servers that use each"
-    Write-Host "   I. Inventory: the lines of the Software table ($($software.Count))"
+    Write-Host "   I. Inventory: lines of the Software ($($software.Count)) and Physical System ($($machines.Count)) tables"
     Write-Host "   L. Report layout ($layoutText): the report sections and the servers in each"
     Write-Host "   C. Client name: $client"
     Write-Host ""
@@ -889,7 +972,7 @@ while ($true) {
         $client = Read-Answer 'Client name (report title and file name)' $client
     }
     elseif ($choice -match '^[Ss]$') {
-        Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout -Software $software.ToArray()
+        Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout -Software $software.ToArray() -Machines $machines.ToArray()
         Write-Host "Saved the configuration of $client ($($targets.Count) servers)." -ForegroundColor Green
         foreach ($name in $secretsToRemove) {
             # A server added since may have reused it.

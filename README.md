@@ -23,6 +23,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
 | `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`) and reports shown in the Script Manager (`Scripts`). |
 | `helper.ps1` | SecretStore helpers, the client configuration and the list of modules. |
+| `latest-versions.json` | The latest ESXi, StorMagic and DSM versions, for the [Physical System](#infrastructure-detail) check marks when they can't be read online. |
 | `iloreport.ps1`, `IDRAC.ps1`, `BMCreport.ps1` | Modules: HPE iLO, Dell iDRAC, Lenovo BMC. |
 | `nas2.ps1` | Module: Synology NAS. |
 | `stormagicHealth.ps1` | Module: StorMagic SvSAN. |
@@ -71,7 +72,10 @@ The first report on a computer asks for the client. To change it later, run `.\S
 
 The vault password is asked first. Logins are saved as `MOSE:<module>:<server>` and the configuration as `MOSE:Config`, in the vault `SecretStore1`.
 
-`I` in the menu holds the lines of the report's [Software table](#infrastructure-detail) that no module reads, e.g. Microsoft Defender: a name, a version and a purpose. `A` adds a line; its number changes it (Enter keeps a value, `-` empties it) or removes it.
+`I` in the menu holds what the report's [inventory tables](#infrastructure-detail) cannot read. `A` adds a line; its number changes it (Enter keeps a value, `-` empties it) or removes it.
+
+- `S`, Software: the lines no module reads, e.g. Microsoft Defender, with a version and a purpose.
+- `M`, Physical System: a machine by the name the report shows (e.g. `esxi01`) or its serial number, with its warranty end date (`yyyy-MM-dd`) and a note, the service to show (e.g. `NAS store for Veeam backup`), and for a machine no module reads (e.g. the StorMagic witness) its brand, model, Product ID and BIOS.
 
 `P` in the menu lists every login and token in the vault with the servers that use it. Pick one to edit it: the user name and password, or the Commvault tokens and ring or URL (Enter keeps each value). Or remove it: only a login or token no server uses can be removed, and it leaves the vault when you save with `S`.
 
@@ -190,10 +194,21 @@ The section with the inventory tables, at the start of the report by default. Th
 
 | Table | What it holds |
 |---|---|
+| Physical System | A row per machine: name, brand, model, serial number, Product ID and BIOS, from the iLO, iDRAC or BMC, the VMware or Hyper-V host and the NAS, merged by serial number or name. Below each other, the services it runs with their version: the ESXi or Windows of a host, the StorMagic VSA it runs (from the VMware VMs) with its support end, the StorMagic witness, the NAS's DSM. Then the warranty end entered with `I`. The StorMagic module reads its own VSA's version and support: its mirror partners and witness get the same unless they are StorMagic servers of the report too. |
 | Virtual System | The VMs of the VMware vCenters, a table per VM folder (Production, Acceptance...), with their operating system as VMware Tools reports it, else as configured: `Windows 2019`, `Windows 11`, `CentOS 9`. vSphere's own cluster VMs (`vCLS`) are left out. |
 | Software | Veeam with its version (both Veeam modules), msSQL with the SQL Server version (`2019 CU20 (15.0.4298.1)`) and `(with Always On)` when it is on (SQL Server maintenance plans module), then the lines entered with `I` in the configuration. A line with the name of one read (`Veeam`, `msSQL`) gives its purpose, or a version to show instead. Servers with the same version share a line. |
 
-Its text (`W`) goes before the tables, e.g. a schema of the network. `L` moves it (`M`) or renames it (`T`) like any other section; a layout saved without it gets it at the start. A partial report has only the tables of its servers, without the lines entered by hand. With nothing to show (no text, no table, no server of its own), the section is left out.
+A version gets :white_check_mark: when it is the latest of its product, else :warning: with the latest one:
+
+| Product | The latest version |
+|---|---|
+| ESXi | The newest build of the host's release (8.0...) on its newest update line (8.0.3), from [virten.net](https://www.virten.net/repo/esxiReleases.json) when this computer can reach it, else from `latest-versions.json`. A newer patch of an older update line (8.0 Update 2) is not the latest. |
+| DSM | DSM's own update check on the NAS, else `latest-versions.json`. |
+| StorMagic | `latest-versions.json`. |
+
+`latest-versions.json` comes with MOSE (and its updates); `Updated` says when it was written. A warranty or support end gets :white_check_mark: more than 60 days before it, :warning: in the last 60 days, :x: once past.
+
+Its text (`W`) goes before the tables, e.g. a schema of the network. `L` moves it (`M`) or renames it (`T`) like any other section; a layout saved without it gets it at the start. A partial report has only the tables of its servers, without the lines entered by hand for other machines or software. With nothing to show (no text, no table, no server of its own), the section is left out.
 
 ## Commvault Cloud token renewal
 

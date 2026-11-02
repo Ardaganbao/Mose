@@ -404,6 +404,11 @@ function Format-HealthStatus {
     return "$Status :x:"
 }
 
+# For the report's Physical System table (Report.ps1).
+[pscustomobject]@{ MoseInventory = 'Machine'; Source = 'iDRAC'; Name = "$($ComputerSystems.HostName)"; Brand = "$($ComputerSystems.Manufacturer)"; Model = "$($ComputerSystems.Model)"
+    Serial = "$($ComputerSystems.SerialNumber)"; ProductId = "$($ComputerSystems.SKU)"; Bios = "$($ComputerSystems.BiosVersion)"; Server = $server
+}
+
 # Build the report body
 $Body = "### Check Status Hardware (iDRAC:  $($server))`n"
 $Body += "- General Health status : $(Format-HealthStatus $ComputerSystems.Status.Health)`n`n"

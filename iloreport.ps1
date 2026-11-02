@@ -620,6 +620,11 @@ if ($null -eq $omehp ) {
 }
 Write-Progress -Activity "Build the report body"
 
+# For the report's Physical System table (Report.ps1).
+[pscustomobject]@{ MoseInventory = 'Machine'; Source = 'iLO'; Name = "$($ComputerSystems.HostName)"; Brand = "$($ComputerSystems.Manufacturer)"; Model = "$($ComputerSystems.Model)"
+    Serial = "$($ComputerSystems.SerialNumber)"; ProductId = "$($ComputerSystems.SKU)"; Bios = "$($omehp.Bios.Current.VersionString)"; Server = $server
+}
+
 # Build the report body
 $Body = "`n"
 $Body += "- General Health status : $($ComputerSystems.Status.Health)`n`n"

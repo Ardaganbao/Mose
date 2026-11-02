@@ -239,7 +239,7 @@ try {
 
 $passwordBstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass)
 $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordBstr)
-$url = "https://$($server):5001/webapi/query.cgi?api=SYNO.API.Info&method=Query&version=1&query=SYNO.API.Auth,SYNO.Storage.CGI.Storage,SYNO.Core.System"
+$url = "https://$($server):5001/webapi/query.cgi?api=SYNO.API.Info&method=Query&version=1&query=SYNO.API.Auth,SYNO.Storage.CGI.Storage,SYNO.Core.System,SYNO.Core.Network,SYNO.Core.Upgrade.Server"
 $response = Invoke-NasWebRequest -Uri $url -Method Get -Stage 'API discovery'
 
 $json = $response.Content 
@@ -249,6 +249,7 @@ if (-not $json) {
     throw "Empty response from Synology API (check URL or connectivity)"
 }
 
+$apiList = (ConvertFrom-Json $json).data
 $authpath = (ConvertFrom-Json $json).data.'SYNO.API.Auth'.path
 $storagepath= (ConvertFrom-Json $json).data.'SYNO.Storage.CGI.Storage'.path 
 $infopath = (ConvertFrom-Json $json).data.'SYNO.Core.System'.path
@@ -290,8 +291,44 @@ $disks = (ConvertFrom-Json $json).data.disks
 $url = "https://$($server):5001/webapi/$($infopath)?api=SYNO.Core.System&version=3&method=info&_sid=$($sid)"
 $response = Invoke-NasWebRequest -Uri $url -Method Get -Stage 'System information'
 
-$json = $response.Content 
+$json = $response.Content
 $info = (ConvertFrom-Json $json).data
+
+# For the report's Physical System table (Report.ps1): the NAS by its name, and whether its DSM is
+# the latest (DSM's own update check). Both are optional: an older DSM without them still reports.
+$nasName = ''
+$dsmUpToDate = $null
+$dsmLatest = ''
+try {
+  $networkApi = $apiList.'SYNO.Core.Network'
+  if ($networkApi) {
+    $response = Invoke-NasWebRequest -Uri "https://$($server):5001/webapi/$($networkApi.path)?api=SYNO.Core.Network&version=1&method=get&_sid=$($sid)" -Method Get -Stage 'Host name'
+    $nasName = "$((ConvertFrom-Json $response.Content).data.server_name)"
+  }
+  $upgradeApi = $apiList.'SYNO.Core.Upgrade.Server'
+  if ($upgradeApi) {
+    $response = Invoke-NasWebRequest -Uri "https://$($server):5001/webapi/$($upgradeApi.path)?api=SYNO.Core.Upgrade.Server&version=$($upgradeApi.maxVersion)&method=check&_sid=$($sid)" -Method Get -Stage 'DSM update check'
+    $check = (ConvertFrom-Json $response.Content).data
+    # DSM 7 gives the update under "update", older versions at the top.
+    $update = if ($check -and $check.PSObject.Properties['update']) { $check.update } else { $check }
+    if ($update -and $update.available -is [bool]) {
+      $dsmUpToDate = -not $update.available
+      if ($update.available) {
+        $dsmLatest = "$($update.version)"
+      }
+    }
+  }
+}
+catch {
+  Write-Verbose "NAS host name or DSM update check: $($_.Exception.Message)"
+}
+if (-not $nasName) {
+  $nasName = "$server"
+}
+[pscustomobject]@{ MoseInventory = 'Machine'; Source = 'NAS'; Name = $nasName; Brand = 'Synology'; Model = "$($info.model)"; Serial = "$($info.serial)"; ProductId = ''; Bios = ''; Server = $server }
+[pscustomobject]@{ MoseInventory = 'Service'; Machine = $nasName; MachineSerial = "$($info.serial)"; Name = 'NAS storage'; Version = "$($info.firmware_ver)"; Product = 'DSM'
+  UpToDate = $dsmUpToDate; Latest = $dsmLatest; Server = $server
+}
 
 $Body = "#### Check NAS Synology $($info.model) ( $($server) - SN: $($info.serial)) :`n"
 $Body += "| disk           | status                     |  model             |  size_total       |SMART status       |`n"

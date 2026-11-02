@@ -359,6 +359,11 @@ if ([string]::IsNullOrWhiteSpace([string]$managerHostname)) {
     $managerHostname = 'N/A'
 }
 
+# For the report's Physical System table (Report.ps1).
+[pscustomobject]@{ MoseInventory = 'Machine'; Source = 'BMC'; Name = "$($computerSystem.HostName)"; Brand = "$($computerSystem.Manufacturer)"; Model = "$($computerSystem.Model)"
+    Serial = "$($computerSystem.SerialNumber)"; ProductId = "$($computerSystem.SKU)"; Bios = "$($computerSystem.BiosVersion)"; Server = "$($BMC.IP)"
+}
+
 $Body = "### Lenovo BMC Hardware Status ($($BMC.IP))`n"
 $Body += "- General Health status : $(Format-BmcHealth $health)`n`n"
 $Body += "| Information | Value |`n"

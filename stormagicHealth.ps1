@@ -153,8 +153,11 @@ $session = New-HTTPSessionJson -URL $URLTarget -Credential $Credential -IgnoreCe
 $resultOBJ = (ConvertFrom-Json $session.session.content)
 $targetsfromAPI = $resultOBJ.targets
 $targets = New-Object System.Collections.ArrayList
+# The VSAs of the mirrors and their witnesses, for the report's Physical System table.
+$vsaNames = New-Object System.Collections.Generic.List[string]
+$witnessNames = New-Object System.Collections.Generic.List[string]
 
-Foreach ($targetfromAPI in $targetsfromAPI.added) { 
+Foreach ($targetfromAPI in $targetsfromAPI.added) {
     $State = "offline :x:"
     if ( $targetfromAPI.online) {
         $State = "online :white_check_mark:"
@@ -180,7 +183,10 @@ Foreach ($targetfromAPI in $targetsfromAPI.added) {
         Name  = $targetfromAPI.nsh.name
         State = $StateNSH
     }
-    $nsh | add-member scriptmethod tostring { '{0} ({1})' -f $this.Name, $this.State } -force 
+    $nsh | add-member scriptmethod tostring { '{0} ({1})' -f $this.Name, $this.State } -force
+    if ($nsh.Name -and -not $witnessNames.Contains("$($nsh.Name)")) {
+        $witnessNames.Add("$($nsh.Name)")
+    }
 
     $si = New-Object System.Collections.ArrayList
     Foreach ($nodefromAPI in  $targetfromAPI.lu.plexes) { 
@@ -207,7 +213,10 @@ Foreach ($targetfromAPI in $targetsfromAPI.added) {
             Name  = $nodefromAPI.node.name
             State = $statenode 
         }
-        $pso | add-member scriptmethod tostring { '{0} ({1})' -f $this.Name, $this.State } -force 
+        $pso | add-member scriptmethod tostring { '{0} ({1})' -f $this.Name, $this.State } -force
+        if ($pso.Name -and -not $vsaNames.Contains("$($pso.Name)")) {
+            $vsaNames.Add("$($pso.Name)")
+        }
 
         $si.add($pso)> $null 
 
@@ -350,5 +359,28 @@ $Body += ConvertTo-MarkdownList -InputObject $system -Property @('hostname', 'st
 # | Serial Number       | <serial number>               |
 $Body += "`r`n#### Targets`r`n"
 $Body += ConvertTo-MarkdownTable -InputObject @($targets) -Property @('Name', 'EUI-64', 'Enabled', 'State', 'Size (Tb)', 'Sessions', 'Storage Information', 'Witness')
+
+# For the report's Physical System table (Report.ps1): this VSA, its mirror partners and their
+# witnesses, on the machines that run them. Only this VSA's version and support are read: the
+# others get them too (Assumed), unless the report also reads them.
+$supportEnd = ''
+if ($licences.maintenance.supportExpiry) {
+    $supportEnd = ([datetime]'1970-01-01T00:00:00Z').ToUniversalTime().AddSeconds($licences.maintenance.supportExpiry).ToString('yyyy-MM-dd')
+}
+$supportType = "$($licences.maintenance.supportType)"
+if ($supportType) {
+    $supportType = (Get-Culture).TextInfo.ToTitleCase($supportType.ToLowerInvariant())
+}
+if ("$($system.hostname)" -and -not $vsaNames.Contains("$($system.hostname)")) {
+    $vsaNames.Insert(0, "$($system.hostname)")
+}
+foreach ($name in $vsaNames) {
+    [pscustomobject]@{ MoseInventory = 'Service'; Machine = $name; Name = 'StorMagic sVSAN'; Version = "$($system.version)"; Product = 'StorMagic'
+        Support = $supportType; SupportEnd = $supportEnd; SupportExpired = [bool]$licences.maintenance.supportExpired; Assumed = $name -ne "$($system.hostname)"; Server = $Server
+    }
+}
+foreach ($name in $witnessNames) {
+    [pscustomobject]@{ MoseInventory = 'Service'; Machine = $name; Name = 'StorMagic NSH'; Version = "$($system.version)"; Product = 'StorMagic'; Assumed = $true; Server = $Server }
+}
 
 return $Body

@@ -330,6 +330,14 @@ try {
         }
     }
 
+    # For the report's Physical System table (Report.ps1): the hosts and their Windows.
+    foreach ($hostItem in $hosts) {
+        [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'HyperV'; Name = "$($hostItem.Name)"; Brand = "$($hostItem.Manufacturer)"; Model = "$($hostItem.Model)"
+            Serial = "$($hostItem.Serial)"; ProductId = ''; Bios = "$($hostItem.BiosVersion)"; Server = $Server
+        }
+        [pscustomobject]@{ MoseInventory = 'Service'; Machine = "$($hostItem.Name)"; MachineSerial = "$($hostItem.Serial)"; Name = 'Host Hyper-V'; Version = "$($hostItem.Os)"; Server = $Server }
+    }
+
     Write-Progress -Id 10 -Activity $activity -Status 'Report complete' -PercentComplete 100
     $Body
 }

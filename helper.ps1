@@ -145,15 +145,17 @@ function Get-MoseConfig {
 
 # $Layout: order, titles and groups of the report sections, $null for the default (see README, "Report layout").
 # $Software: the lines of the Software table entered by hand (Name, Version, Purpose).
+# $Machines: those of the Physical System table (Name, Serial, warranty...), see Configure.ps1.
 function Save-MoseConfig {
     param(
         [Parameter(Mandatory)] [string]$Client,
         [object[]]$Targets = @(),
         [object]$Layout,
-        [object[]]$Software = @()
+        [object[]]$Software = @(),
+        [object[]]$Machines = @()
     )
 
-    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets); Layout = $Layout; Software = @($Software) } | ConvertTo-Json -Depth 20
+    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets); Layout = $Layout; Software = @($Software); Machines = @($Machines) } | ConvertTo-Json -Depth 20
     Set-Secret -Vault $MoseVaultName -Name $MoseConfigSecretName -Secret $json
     Save-MoseModuleList -Targets $Targets
 }

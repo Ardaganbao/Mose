@@ -10,7 +10,8 @@
         "helper.ps1",
         "Configure.ps1",
         "Report.ps1",
-        "Renew-CommvaultToken.ps1"
+        "Renew-CommvaultToken.ps1",
+        "latest-versions.json"
     ],
     "Modules": [
         "IDRAC.ps1",
