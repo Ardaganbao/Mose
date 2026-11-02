@@ -693,13 +693,14 @@ function Format-SureBackupSession {
     return $text
 }
 
-# SureBackup sessions of the last 400 days, asked by their session type: Known says whether this
-# Veeam has that type (an unknown one is refused with HTTP 400, or ignored).
+# SureBackup sessions, asked by their session type: Veeam 13 has no SureBackup endpoint and leaves
+# these sessions out of the list of all sessions, but gives them by type ("SureBackup" in its
+# ESessionType). Known says whether this Veeam has that type (an unknown one is refused with HTTP
+# 400, or ignored).
 function Find-SureBackupSessions {
-    $since = (Get-Date).ToUniversalTime().AddDays(-400).ToString('yyyy-MM-ddTHH:mm:ssZ')
-    foreach ($type in 'SureBackupJob', 'SureBackup') {
+    foreach ($type in 'SureBackup', 'SureBackupJob') {
         try {
-            $page = Invoke-VeeamApi -Path '/api/v1/sessions' -Query @{ typeFilter = $type; createdAfterFilter = $since; skip = 0; limit = 200 }
+            $page = Invoke-VeeamApi -Path '/api/v1/sessions' -Query @{ typeFilter = $type; skip = 0; limit = 200 }
         }
         catch {
             if ($_.Exception.Data['HttpStatus'] -eq 400) {
@@ -841,7 +842,7 @@ try {
             $sureBackupSessions = [object[]]$found.Sessions
             if ($sureBackupSessions.Count -eq 0) {
                 if ($found.Known) {
-                    $Body += "No SureBackup job is listed, and no SureBackup session ran in the last 400 days.`n"
+                    $Body += "No SureBackup session was found.`n"
                 }
                 else {
                     $Body += ":warning: The REST API of this Veeam ($(if ($version) { $version } else { 'version unknown' })) gives no SureBackup jobs or sessions: check SureBackup in the Veeam console.`n"
