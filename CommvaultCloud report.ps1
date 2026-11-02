@@ -1380,6 +1380,23 @@ if ($protectedItemLines.Count -eq 0) {
     $protectedItemLines = @('| No protected items were returned by the inventory and job APIs. | | | | | | | | |')
 }
 
+# SLA graph (drawn by the WordPress plugin): items that met and missed the SLA, in total and, with
+# several workloads, per workload. Excluded items are not counted.
+$slaGraph = ''
+$slaCounted = @($protectedItems | Where-Object { $_.SlaStatus -eq 'Met' -or $_.SlaStatus -like 'Missed*' })
+if ($slaCounted.Count -gt 0) {
+    $slaGraphRows = @("| All protected items | $slaMet | $slaMissed |")
+    $slaWorkloads = @($slaCounted | Group-Object -Property Application | Sort-Object -Property Name)
+    if ($slaWorkloads.Count -gt 1) {
+        foreach ($workload in $slaWorkloads) {
+            $workloadMet = @($workload.Group | Where-Object { $_.SlaStatus -eq 'Met' }).Count
+            $workloadName = if ($workload.Name) { $workload.Name } else { 'Other' }
+            $slaGraphRows += '| {0} | {1} | {2} |' -f (ConvertTo-MarkdownCell $workloadName), $workloadMet, ($workload.Count - $workloadMet)
+        }
+    }
+    $slaGraph = (@('```SLA', '| Protected items within the SLA | Met | Missed |', '|---|---|---|') + $slaGraphRows + @('```')) -join "`r`n"
+}
+
 $jobSummaryLines = @($jobRows |
     Group-Object -Property { '{0}|{1}|{2}' -f $_.Client, $_.Application, $_.Item } |
     Sort-Object -Property Name |
@@ -1483,6 +1500,8 @@ $licenseText
 ## Protected Item Health and SLA
 
 $slaSummary
+
+$slaGraph
 
 An item meets the SLA when its last completed backup (with or without errors) is within the SLA period. The protected items combine the configured subclients from the Client/Subclient APIs with the items that ran jobs.
 

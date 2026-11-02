@@ -482,9 +482,20 @@ function Get-SampleMarkdown {
 
 ## Protected Item Health and SLA
 
+SLA period: 1 day. 23 of 25 protected items met the SLA, 2 missed.
+
+``````SLA
+| Protected items within the SLA | Met | Missed |
+|---|---|---|
+| All protected items | 23 | 2 |
+| File System | 9 | 2 |
+| Virtual Server | 14 | 0 |
+``````
+
 | Client | Workload | Protected item | SLA status | Last completed backup |
 |---|---|---|---|---|
 | sample-client | File System | default | Met | 2026-01-01 22:00 |
+| sample-client | File System | data | Missed (last backup 3.2 days ago) | 2025-12-29 22:00 |
 
 ## Job History
 
