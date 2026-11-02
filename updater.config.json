@@ -22,6 +22,7 @@
         "hypervreport.ps1",
         "VeeamReport.ps1",
         "VeeamRestReport.ps1",
+        "sqlmaintenance.ps1",
         "CommvaultCloud report.ps1"
     ],
     "Scripts": [

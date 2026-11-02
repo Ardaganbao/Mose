@@ -31,6 +31,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `VeeamReport.ps1` | Module: Veeam Backup & Replication, with the Veeam PowerShell module (on the Veeam server, or there over PowerShell remoting). |
 | `VeeamRestReport.ps1` | Module: Veeam Backup & Replication over its REST API. |
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
+| `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the last 16 days, from msdb). |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
 
 ## Install on a computer
@@ -83,6 +84,12 @@ Enter a Hyper-V host, or a failover cluster name to report every node of the clu
 ### Veeam and Hyper-V by IP address
 
 PowerShell remoting only connects to an IP address that is in this computer's TrustedHosts, and only with a login given explicitly. With the server's name in the domain, Kerberos needs neither and checks the server's identity, so prefer the name. For an IP address, the configuration asks for the login, and both the configuration and the report offer to add the address to TrustedHosts. Windows asks for administrator rights for that. The report also shows the server's name when DNS knows it. By hand, as administrator: `Set-Item WSMan:\localhost\Client\TrustedHosts -Value '<IP>' -Concatenate -Force`. Add an address only on a network you trust: Windows does not check the identity of a server in TrustedHosts.
+
+### SQL Server maintenance plans
+
+Enter the SQL Server: the cluster or host name, `HOST\INSTANCE` for a named instance, with `,port` if it is not the default one. The report reads the maintenance plan runs of the last 16 days from `msdb` (the Maintenance Plans log of the Management Studio log viewer): one row per plan and day, `Success` when every run of the plan that day succeeded, else one `error` row per failed subplan (`plan - subplan`). A subplan that runs every few hours adds no rows while it succeeds.
+
+It connects as the Windows account running the report, or with a SQL Server login, or as another Windows account (`DOMAIN\user`, the query then runs in a process of that account). The account needs to read `msdb`, for example through its `db_datareader` role.
 
 ### Veeam over the REST API
 

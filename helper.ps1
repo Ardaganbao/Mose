@@ -112,6 +112,7 @@ $MoseModules = [ordered]@{
     VeeamApi        = @{ Label = 'Veeam Backup & Replication'; Script = 'VeeamRestReport.ps1'; Uses = @('VeeamReport.ps1'); DropTitle = $true }
     CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
+    SqlMaint        = @{ Label = 'SQL Server maintenance plans'; Script = 'sqlmaintenance.ps1' }
 }
 
 function Open-MoseVault {
@@ -201,13 +202,14 @@ function Format-MoseHeading {
     return "**$Text**"
 }
 
-# Report layout of a client that has not changed it: three ## sections with their servers in ###.
-# A module missing here goes at the end of the report.
+# Report layout of a client that has not changed it: ## sections with their servers in ###; a
+# section without servers is not shown. A module missing here goes at the end of the report.
 $MoseDefaultLayout = [pscustomobject]@{
     Sections = @(
         [pscustomobject]@{ Title = 'Hardware'; Sections = @([pscustomobject]@{ Module = @('iLO', 'iDRAC', 'BMC') }) }
         [pscustomobject]@{ Title = 'Virtualization and storage'; Sections = @([pscustomobject]@{ Module = @('VMware', 'HyperV', 'StorMagic') }) }
         [pscustomobject]@{ Title = 'Backup'; Sections = @([pscustomobject]@{ Module = @('NAS', 'Veeam', 'VeeamApi', 'CommvaultCloud', 'CommvaultOnPrem') }) }
+        [pscustomobject]@{ Title = 'Databases'; Sections = @([pscustomobject]@{ Module = @('SqlMaint') }) }
     )
 }
 
@@ -415,6 +417,13 @@ function Invoke-MoseModule {
             finally {
                 Remove-Item -LiteralPath $veeamParameters.OutputPath -Force -ErrorAction SilentlyContinue
             }
+        }
+        'SqlMaint' {
+            $sqlParameters = @{ Server = $Target.Server }
+            if ($Credential) {
+                $sqlParameters.Credential = $Credential
+            }
+            & $scriptPath @sqlParameters
         }
         'VeeamApi' {
             $veeamApiParameters = @{ Server = $Target.Server; Credential = $Credential }

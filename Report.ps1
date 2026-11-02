@@ -155,7 +155,7 @@ function Start-TargetRun {
             # Kept by Open-MoseVault.
             $vaultPassword = Get-Variable -Name MoseVaultPassword -ValueOnly -ErrorAction SilentlyContinue
         }
-        elseif ($target.Module -notin 'Veeam', 'HyperV' -or (Get-MoseProperty $target 'Secret')) {
+        elseif ($target.Module -notin 'Veeam', 'HyperV', 'SqlMaint' -or (Get-MoseProperty $target 'Secret')) {
             $credential = Get-TargetCredential $target
         }
         # With -DebugLog, what the server answered goes next to the debug log, for the modules that can write it.
@@ -801,6 +801,18 @@ $sampleJobTable
 | Job ID | Client | Status | Reason |
 |---:|---|---|---|
 | All jobs in this period completed successfully. | | | |
+"@
+        }
+        'SqlMaint' {
+            $today = (Get-Date).ToString('dd/MM/yyyy')
+            $yesterday = (Get-Date).AddDays(-1).ToString('dd/MM/yyyy')
+            @"
+## Maintenance plan - 16 Days:
+| Date       | Severity | Plan Name |
+|------------|----------|-----------|
+| $today | Success :white_check_mark: | Daily maintenance (sample) |
+| $today | Success :white_check_mark: | Weekly maintenance (sample) |
+| $yesterday | error :x: | Daily maintenance (sample) - Reorganize Index 4hr |
 "@
         }
         default {

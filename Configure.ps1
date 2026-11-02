@@ -137,8 +137,15 @@ function Read-Target {
     if ($remotingByIP) {
         Write-Host "$server is an IP address: PowerShell remoting needs a login for it, and the address in this computer's TrustedHosts. With the server's name instead, it needs neither." -ForegroundColor Yellow
     }
-    if ($Module -notin 'Veeam', 'HyperV' -or $remotingByIP -or
-        ($server -notin @('localhost', '.') -and (Read-YesNo "Use another Windows account for PowerShell remoting to ${server}?" $false))) {
+    # SQL Server: the account running the report, a SQL Server login, or another Windows account.
+    $loginQuestion = if ($Module -eq 'SqlMaint') {
+        "Use a SQL Server login, or another Windows account (DOMAIN\user), for ${server}? Else the account running the report"
+    }
+    else {
+        "Use another Windows account for PowerShell remoting to ${server}?"
+    }
+    if ($Module -notin 'Veeam', 'HyperV', 'SqlMaint' -or $remotingByIP -or
+        ($server -notin @('localhost', '.') -and (Read-YesNo $loginQuestion $false))) {
         $target.Secret = Read-TargetCredential -Module $Module -Server $server
         if (-not $target.Secret) {
             Write-Host "Skipped: no credential was entered for $label $server." -ForegroundColor Yellow
