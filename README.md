@@ -101,7 +101,12 @@ It connects as the Windows account running the report, or with a SQL Server logi
 
 **Veeam Backup & Replication (REST API)** reads the same report from Veeam's REST API (Veeam 11 or later, HTTPS port 9419 of the Veeam server), with the repositories' free space too. It needs no Veeam console, no PowerShell remoting and no Windows administrator rights on the Veeam server: only port 9419 open from this computer, and a Veeam account with a role (Users and Roles in the Veeam console, e.g. Veeam Backup Viewer), entered as `DOMAIN\user`.
 
-Veeam 13's REST API gives no SureBackup jobs or runs. When the Veeam Backup & Replication Console of the same version is installed on this computer, the module reads SureBackup through its PowerShell module (`VeeamReport.ps1 -SureBackupOnly`, with the same Veeam account; no PowerShell remoting). Without it, the report says so.
+Veeam 13's REST API gives no SureBackup jobs or runs, so the module reads SureBackup through the Veeam PowerShell module (`VeeamReport.ps1 -SureBackupOnly`), with the same Veeam account:
+
+- When the Veeam Backup & Replication Console of the same version is installed on this computer, through it, with no PowerShell remoting.
+- Otherwise on the Veeam server, over PowerShell remoting: `VeeamReport.ps1` is copied to a temporary file there, runs there (in PowerShell 7 when the Veeam module needs it, as Veeam 13's does), and its result comes back; the file is removed after. The Veeam account must then be allowed to use PowerShell remoting on the Veeam server: an administrator of it, or a member of its **Remote Management Users** group. An IP address also needs this computer's TrustedHosts, which the report offers to set ([Veeam and Hyper-V by IP address](#veeam-and-hyper-v-by-ip-address)).
+
+When neither works, the SureBackup section says why, e.g. that the Veeam server refused the login.
 
 The REST API usually has Veeam's own certificate, which this computer doesn't trust. Give its SHA-1 thumbprint when adding the server, or leave it empty: the first report then shows the certificate's thumbprint and offers to trust it for this server, after you checked it on the Veeam server. When Veeam refuses the login, the report offers to enter another one. With `-DebugLog`, every API answer is written to `<Client>_Debug_<date>_VeeamApi_<server>.log`, to adapt the module to another Veeam version.
 

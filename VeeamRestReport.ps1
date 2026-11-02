@@ -23,7 +23,9 @@ param (
 # Veeam Backup & Replication report over its REST API (Veeam 11 or later, HTTPS port 9419). Unlike
 # VeeamReport.ps1, it needs no Veeam console, no PowerShell remoting and no administrator rights on
 # the Veeam server: only a Veeam account with a role. Same sections as VeeamReport.ps1, with the
-# repositories' free space added.
+# repositories' free space added. Only SureBackup, which Veeam 13's REST API does not give, is read
+# through VeeamReport.ps1: with the Veeam console of this computer, else on the Veeam server over
+# PowerShell remoting.
 
 $ErrorActionPreference = 'Stop'
 $progressActivity = "Veeam report: $Server"
@@ -856,22 +858,34 @@ try {
             }
             $sureBackupSessions = [object[]]$found.Sessions
             $consoleReport = Join-Path $PSScriptRoot 'VeeamReport.ps1'
-            if ($sureBackupSessions.Count -eq 0 -and (Test-VeeamConsoleHere) -and (Test-Path -LiteralPath $consoleReport -PathType Leaf)) {
+            if ($sureBackupSessions.Count -eq 0 -and (Test-Path -LiteralPath $consoleReport -PathType Leaf)) {
                 # Veeam 13 gives no SureBackup run through its REST API, even by type: they are read
-                # through the PowerShell module of the Veeam console installed on this computer.
-                Write-VeeamReportProgress -Status 'SureBackup through the Veeam console' -PercentComplete 92
+                # through the Veeam PowerShell module, of the Veeam console when it is installed on this
+                # computer, else on the Veeam server over PowerShell remoting, with the same login.
+                $consoleParameters = @{ Server = $Server; SureBackupOnly = $true; NoOpen = $true; OutputPath = '' }
+                if (Test-VeeamConsoleHere) {
+                    $consoleParameters.Credential = $Credential
+                    $where = 'the Veeam console on this computer'
+                }
+                else {
+                    $consoleParameters.RunOnVbrServer = $true
+                    $consoleParameters.RemotingCredential = $Credential
+                    $where = "PowerShell remoting on the Veeam server $Server"
+                }
+                Write-VeeamReportProgress -Status "SureBackup through $where" -PercentComplete 92
                 try {
-                    $lines = @(& $consoleReport -Server $Server -Credential $Credential -SureBackupOnly -NoOpen -OutputPath '' | Where-Object { $_ -is [string] })
+                    $lines = @(& $consoleReport @consoleParameters | Where-Object { $_ -is [string] })
                     $Body += (($lines -join "`n") -replace '^\s*### SureBackup verification\s*', '') + "`n"
                 }
                 catch {
-                    $Body += ":warning: SureBackup could not be read through the Veeam console on this computer: $($_.Exception.Message)`n"
+                    $Body += ":warning: Veeam's REST API gives no SureBackup run (Veeam 13), and SureBackup could not be read through $($where): $($_.Exception.Message)`n"
+                    Write-Warning "SureBackup could not be read through $($where): $($_.Exception.Message)"
                 }
             }
             elseif ($sureBackupSessions.Count -eq 0) {
-                $Body += ":warning: Veeam's REST API gave no SureBackup run (Veeam $(if ($version) { $version } else { 'version unknown' }); Veeam 13 gives none through it, even when they ran). To report them, install the Veeam Backup & Replication Console of the same version on this computer: the report then reads SureBackup through it. Until then, check SureBackup in the Veeam console.`n"
+                $Body += ":warning: Veeam's REST API gave no SureBackup run (Veeam $(if ($version) { $version } else { 'version unknown' }); Veeam 13 gives none through it, even when they ran), and VeeamReport.ps1, which reads them through the Veeam PowerShell module, is missing: run .\Start.ps1 -UpdateOnly.`n"
                 $sessionTypes = @(Get-RecentSessions | ForEach-Object { "$(Get-VeeamValue $_ 'sessionType')" } | Sort-Object -Unique) -join ', '
-                Write-Warning "No SureBackup session from the REST API, and no Veeam console on this computer (session types of the last 31 days: $sessionTypes)."
+                Write-Warning "No SureBackup session from the REST API, and VeeamReport.ps1 is missing (session types of the last 31 days: $sessionTypes)."
             }
         }
         foreach ($group in @($sureBackupSessions | Group-Object -Property { "$($_.name)" } | Sort-Object -Property Name)) {

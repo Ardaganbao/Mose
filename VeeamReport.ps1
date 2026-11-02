@@ -75,44 +75,63 @@ if ($RunOnVbrServer -or (-not (Test-VeeamModuleHere) -and $Server -notin @('loca
     }
 
     $scriptContent = [System.IO.File]::ReadAllText($PSCommandPath)
+    # This script is copied to a file on the Veeam server and runs there as a saved script, so it
+    # can start itself again in PowerShell 7 when the Veeam module needs it (Veeam 13); the file is
+    # removed after. What it writes comes back here: its report, the Veeam version, its messages.
     $remoteCommand = {
         param([string]$Source, [bool]$SureBackupOnly)
-        $reportScript = [scriptblock]::Create($Source)
-        & $reportScript -Server 'localhost' -OutputPath '' -NoOpen -SureBackupOnly:$SureBackupOnly
+        $path = Join-Path ([System.IO.Path]::GetTempPath()) ("MOSE-VeeamReport-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+        [System.IO.File]::WriteAllText($path, $Source, (New-Object System.Text.UTF8Encoding $true))
+        try {
+            # Unless a policy of the server forbids it, this file may run whatever the execution policy.
+            try {
+                Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
+            }
+            catch {
+            }
+            & $path -Server 'localhost' -OutputPath '' -NoOpen -SureBackupOnly:$SureBackupOnly
+        }
+        finally {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
     }
-    $invokeParameters = @{
-        ComputerName = $Server
-        ScriptBlock = $remoteCommand
-        ArgumentList = @($scriptContent, [bool]$SureBackupOnly)
-        ErrorAction = 'Stop'
-    }
+    $sessionParameters = @{ ComputerName = $Server; ErrorAction = 'Stop' }
     if ($null -ne $RemotingCredential) {
-        $invokeParameters.Credential = $RemotingCredential
+        $sessionParameters.Credential = $RemotingCredential
     }
 
     Write-VeeamReportProgress -Status "Connecting to '$Server' over PowerShell remoting" -PercentComplete 0
+    $session = $null
     try {
-        $remoteOutput = Invoke-Command @invokeParameters
-    }
-    catch {
-        $failure = $_.Exception
-        # WinRM reached the server, which refused the login. The error ID does not depend on the Windows language.
-        $accessDenied = $_.FullyQualifiedErrorId -like 'AccessDenied*' -or
-            ($failure.PSObject.Properties['ErrorCode'] -and $failure.ErrorCode -eq 5)
-        $hint = ''
-        $address = $null
-        if ($accessDenied) {
-            $hint = " The server refused the login: it needs an administrator of the Veeam server (or a member of its Remote Management Users group) with a Veeam role, written DOMAIN\user, or SERVER\user for an account of the server itself. A local account other than the built-in Administrator also needs LocalAccountTokenFilterPolicy = 1 on the server."
+        try {
+            $session = New-PSSession @sessionParameters
         }
-        elseif ([System.Net.IPAddress]::TryParse($Server, [ref]$address)) {
-            $hint = " An IP address must also be in this computer's TrustedHosts and needs a login (-RemotingCredential): Report.ps1 offers to set both, or use the server's name."
+        catch {
+            $failure = $_.Exception
+            # WinRM reached the server, which refused the login. The error ID does not depend on the Windows language.
+            $accessDenied = $_.FullyQualifiedErrorId -like 'AccessDenied*' -or
+                ($failure.PSObject.Properties['ErrorCode'] -and $failure.ErrorCode -eq 5)
+            $hint = ''
+            $address = $null
+            if ($accessDenied) {
+                $account = if ($RemotingCredential) { $RemotingCredential.UserName } else { "$env:USERDOMAIN\$env:USERNAME" }
+                $hint = " The server refused the login of $($account): on the Veeam server, it must be an administrator, or a member of its Remote Management Users group (Computer Management > Local Users and Groups > Groups), with a Veeam role; written DOMAIN\user, or SERVER\user for an account of the server itself. A local account other than the built-in Administrator also needs LocalAccountTokenFilterPolicy = 1 on the server."
+            }
+            elseif ([System.Net.IPAddress]::TryParse($Server, [ref]$address)) {
+                $hint = " An IP address must also be in this computer's TrustedHosts and needs a login (-RemotingCredential): Report.ps1 offers to set both, or use the server's name."
+            }
+            # Report.ps1 reads RemotingAccessDenied to offer another login.
+            $exception = [System.Exception]::new("Could not run the Veeam report remotely on '$Server'. Verify PowerShell Remoting/WinRM is enabled and your account can access the Veeam server.$hint $($failure.Message)", $failure)
+            $exception.Data['RemotingAccessDenied'] = [bool]$accessDenied
+            throw $exception
         }
-        # Report.ps1 reads RemotingAccessDenied to offer another login.
-        $exception = [System.Exception]::new("Could not run the Veeam report remotely on '$Server'. Verify PowerShell Remoting/WinRM is enabled and your account can access the Veeam server.$hint $($failure.Message)", $failure)
-        $exception.Data['RemotingAccessDenied'] = [bool]$accessDenied
-        throw $exception
+        Write-VeeamReportProgress -Status "Running the report on '$Server'" -PercentComplete 5
+        $remoteOutput = Invoke-Command -Session $session -ScriptBlock $remoteCommand -ArgumentList $scriptContent, ([bool]$SureBackupOnly) -ErrorAction Stop
     }
     finally {
+        if ($session) {
+            Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+        }
         Write-Progress -Id 10 -Activity $progressActivity -Completed
     }
 
@@ -123,13 +142,15 @@ if ($RunOnVbrServer -or (-not (Test-VeeamModuleHere) -and $Server -notin @('loca
     # The Veeam version, as the Veeam server wrote it.
     $remoteOutput | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties['MoseInventory'] }
 
-    $outputDirectory = Split-Path -Path $OutputPath -Parent
-    if (-not [string]::IsNullOrWhiteSpace($outputDirectory) -and -not (Test-Path -LiteralPath $outputDirectory)) {
-        New-Item -Path $outputDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-    }
-    $Body | Out-File -LiteralPath $OutputPath -Encoding UTF8 -ErrorAction Stop
-    if (-not $NoOpen) {
-        Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$OutputPath`"" -ErrorAction Stop
+    if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+        $outputDirectory = Split-Path -Path $OutputPath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($outputDirectory) -and -not (Test-Path -LiteralPath $outputDirectory)) {
+            New-Item -Path $outputDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $Body | Out-File -LiteralPath $OutputPath -Encoding UTF8 -ErrorAction Stop
+        if (-not $NoOpen) {
+            Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$OutputPath`"" -ErrorAction Stop
+        }
     }
     $Body
     return
@@ -208,6 +229,13 @@ if ($null -ne $requiredPowerShellVersion -and
     }
 
     $credentialFile = $null
+    # The report comes back in a file: what PowerShell 7 writes to its console (its messages and
+    # warnings) comes back as text, shown here rather than taken for the report.
+    $childOutputPath = $OutputPath
+    $ownOutputFile = [string]::IsNullOrWhiteSpace($OutputPath)
+    if ($ownOutputFile) {
+        $childOutputPath = Join-Path ([System.IO.Path]::GetTempPath()) ("VeeamReport_{0}.md" -f [guid]::NewGuid())
+    }
     try {
         $quotePowerShellLiteral = {
             param([string]$Value)
@@ -219,9 +247,9 @@ if ($null -ne $requiredPowerShellVersion -and
             '-Server'
             (& $quotePowerShellLiteral $Server)
             '-OutputPath'
-            (& $quotePowerShellLiteral $OutputPath)
+            (& $quotePowerShellLiteral $childOutputPath)
         )
-        if ($NoOpen) {
+        if ($NoOpen -or $ownOutputFile) {
             $commandParts += '-NoOpen'
         }
         if ($RunOnVbrServer) {
@@ -249,21 +277,51 @@ if ($null -ne $requiredPowerShellVersion -and
             }
         }
 
-        $childCommand = $commandParts -join ' '
+        # Its report is read from the file, so its output is dropped; its error, if any, is read from a
+        # file too (with -EncodedCommand, its error output is PowerShell's own XML).
+        $childErrorPath = "$childOutputPath.error"
+        $childCommand = 'try { ' + ($commandParts -join ' ') + ' | Out-Null } catch { Set-Content -LiteralPath ' +
+            (& $quotePowerShellLiteral $childErrorPath) + ' -Value $_.Exception.Message -Encoding UTF8; exit 1 }'
         if ($credentialFile) {
             $childCommand = '$veeamReportCredentials = Import-Clixml -LiteralPath ' +
                 (& $quotePowerShellLiteral $credentialFile) + '; ' + $childCommand
         }
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
-        & $compatiblePwshPath -NoProfile -EncodedCommand $encodedCommand
-        if ($LASTEXITCODE -ne 0) {
-            throw "PowerShell $requiredPowerShellVersion exited with code $LASTEXITCODE while running the Veeam report."
+        $childErrors = New-Object System.Collections.Generic.List[string]
+        # With Stop, Windows PowerShell would stop at the first line PowerShell 7 writes to its error output.
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $compatiblePwshPath -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    $childErrors.Add("$_")
+                }
+                else {
+                    Write-Host "$_"
+                }
+            }
+            $exitCode = $LASTEXITCODE
         }
+        finally {
+            $ErrorActionPreference = $previousPreference
+        }
+        if ($exitCode -ne 0) {
+            $message = if (Test-Path -LiteralPath $childErrorPath) { "$(Get-Content -LiteralPath $childErrorPath -Raw -Encoding UTF8)".Trim() } else { $childErrors -join ' ' }
+            throw "PowerShell $requiredPowerShellVersion exited with code $exitCode while running the Veeam report: $message"
+        }
+        if (-not (Test-Path -LiteralPath $childOutputPath -PathType Leaf)) {
+            throw "PowerShell $requiredPowerShellVersion ran the Veeam report but wrote no report."
+        }
+        Get-Content -LiteralPath $childOutputPath -Raw -Encoding UTF8
     }
     finally {
         if ($credentialFile -and (Test-Path -LiteralPath $credentialFile)) {
             Remove-Item -LiteralPath $credentialFile -Force -ErrorAction Stop
         }
+        if ($ownOutputFile) {
+            Remove-Item -LiteralPath $childOutputPath -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath "$childOutputPath.error" -Force -ErrorAction SilentlyContinue
     }
     return
 }

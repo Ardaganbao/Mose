@@ -1077,14 +1077,20 @@ function Write-ErrorDetail {
 }
 
 # Veeam and Hyper-V given by IP address: PowerShell remoting needs the address in TrustedHosts and
-# an explicit login. Offers to set what is missing before the server runs, instead of failing.
+# an explicit login. Offers to set what is missing before the server runs, instead of failing. The
+# Veeam REST API module uses remoting for SureBackup only, when the Veeam console is not on this computer.
 function Confirm-RemotingAccess {
     param(
         [object]$Target
     )
 
     $server = $Target.Server
-    if ($Target.Module -notin 'Veeam', 'HyperV' -or -not (Test-MoseIPAddress $server) -or -not [Environment]::UserInteractive) {
+    $remoting = $Target.Module -in 'Veeam', 'HyperV'
+    if ($Target.Module -eq 'VeeamApi') {
+        $remoting = -not (Get-Module -ListAvailable -Name 'Veeam.Backup.PowerShell' -ErrorAction SilentlyContinue) -and
+            -not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Veeam\Backup and Replication\Console\Veeam.Backup.PowerShell\Veeam.Backup.PowerShell.psd1'))
+    }
+    if (-not $remoting -or -not (Test-MoseIPAddress $server) -or -not [Environment]::UserInteractive) {
         return
     }
     $trusted = Test-MoseTrustedHost $server
@@ -1093,7 +1099,8 @@ function Confirm-RemotingAccess {
         return
     }
 
-    Write-Host "$server is an IP address: PowerShell remoting only connects to it when it is in this computer's TrustedHosts and a login is given." -ForegroundColor Yellow
+    $use = if ($Target.Module -eq 'VeeamApi') { 'PowerShell remoting, which reads SureBackup on the Veeam server,' } else { 'PowerShell remoting' }
+    Write-Host "$server is an IP address: $use only connects to it when it is in this computer's TrustedHosts and a login is given." -ForegroundColor Yellow
     try {
         $name = [System.Net.Dns]::GetHostEntry($server).HostName
     }
