@@ -338,6 +338,37 @@ if ($token) {
     $Headers["Authorization"] = "Bearer $token"
 }
 
+# A download error with its cause, e.g. "The underlying connection was closed: ... (An existing
+# connection was forcibly closed by the remote host)", which tells a blocked network from a TLS problem.
+function Get-WebErrorText {
+    param(
+        [System.Exception]$Exception
+    )
+
+    # Without its final period, which the messages around it add.
+    $text = $Exception.Message.Trim().TrimEnd('.')
+    $inner = $Exception
+    while ($inner.InnerException) {
+        $inner = $inner.InnerException
+    }
+    if ($inner -ne $Exception -and -not $text.Contains($inner.Message.Trim().TrimEnd('.'))) {
+        $text += " ($($inner.Message.Trim().TrimEnd('.')))"
+    }
+    return $text
+}
+
+# The HTTP status GitHub answered with, or $null when it did not answer at all.
+function Get-WebStatusCode {
+    param(
+        [System.Exception]$Exception
+    )
+
+    if ($Exception -is [System.Net.WebException] -and $Exception.Response) {
+        return [int]$Exception.Response.StatusCode
+    }
+    return $null
+}
+
 # Git's hash of a local file, the same value GitHub lists for each file in the repository.
 function Get-GitBlobHash {
     param(
@@ -422,7 +453,7 @@ if (-not $UpdatesApplied -and ($FirstRun -or -not $SkipUpdate)) {
         catch {
             # The API allows 60 requests an hour per network without a token; plain file
             # downloads have no such limit, so compare the files directly instead.
-            Write-Host "GitHub API unavailable ($($_.Exception.Message)), comparing files directly." -ForegroundColor DarkGray
+            Write-Host "GitHub API unavailable ($(Get-WebErrorText $_.Exception)), comparing files directly." -ForegroundColor DarkGray
             $commit = $null
             $RemoteHashes = $null
             $DownloadRef = $Branch
@@ -467,11 +498,19 @@ if (-not $UpdatesApplied -and ($FirstRun -or -not $SkipUpdate)) {
     catch {
         # Without the config there is no local version to fall back on.
         if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
-            throw "Could not download the scripts from GitHub: $($_.Exception.Message) Check the GitHub token (replace it with: .\Start.ps1 -SaveToken), then run Start.ps1 again."
+            throw "Could not download the scripts from GitHub: $(Get-WebErrorText $_.Exception). Check that this computer can reach GitHub and the GitHub token (replace it with: .\Start.ps1 -SaveToken), then run Start.ps1 again."
         }
-        Write-Warning "Update check failed, running the local version: $($_.Exception.Message)"
-        if (-not $token) {
-            Write-Warning "No GitHub token is saved on this computer. Save one with: .\Start.ps1 -SaveToken"
+        $statusCode = Get-WebStatusCode $_.Exception
+        if ($null -eq $statusCode -and $_.Exception -is [System.Net.WebException]) {
+            # No answer at all: a network without GitHub access (firewall, proxy), or TLS refused.
+            Write-Warning "GitHub can't be reached from this computer, so the local version ($versionLabel) runs: $(Get-WebErrorText $_.Exception). TLS protocols: $([Net.ServicePointManager]::SecurityProtocol). To skip this check: .\Start.ps1 -SkipUpdate"
+        }
+        else {
+            Write-Warning "Update check failed, running the local version: $(Get-WebErrorText $_.Exception)."
+            # GitHub answers 404 for a private repository asked without a token.
+            if (-not $token -and $statusCode -in 401, 403, 404) {
+                Write-Warning "No GitHub token is saved on this computer. Save one with: .\Start.ps1 -SaveToken"
+            }
         }
     }
 
