@@ -757,9 +757,22 @@ function Confirm-RemotingAccess {
     if ($secret -or -not (Read-YesNo "Enter a Windows login for $server now? It is saved for the next reports")) {
         return
     }
-    $credential = Get-Credential -Message "$($MoseModules[$Target.Module].Label) $server, PowerShell remoting"
+    [void](Save-RemotingLogin $Target)
+}
+
+# Asks for the Windows login of a Veeam or Hyper-V server and saves it with the client
+# configuration. Returns $true when one was entered.
+function Save-RemotingLogin {
+    param(
+        [object]$Target,
+        [string]$UserName = ''
+    )
+
+    $server = $Target.Server
+    $message = "$($MoseModules[$Target.Module].Label) $server, PowerShell remoting: DOMAIN\user, or $server\user for an account of the server itself"
+    $credential = if ($UserName) { Get-Credential -Message $message -UserName $UserName } else { Get-Credential -Message $message }
     if (-not $credential) {
-        return
+        return $false
     }
     $secretName = "MOSE:$($Target.Module):$server"
     Set-Secret -Vault $MoseVaultName -Name $secretName -Secret $credential
@@ -773,6 +786,51 @@ function Confirm-RemotingAccess {
         Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout')
         Write-Host "Saved the login for $server in the client configuration." -ForegroundColor Green
     }
+    return $true
+}
+
+# After a Veeam or Hyper-V server refused the login over PowerShell remoting: why, and the offer
+# to enter another one. Returns $true when one was entered, to try once more.
+function Request-RemotingLogin {
+    param(
+        [object]$Target
+    )
+
+    if ($Target.Module -notin 'Veeam', 'HyperV' -or -not [Environment]::UserInteractive) {
+        return $false
+    }
+    $server = $Target.Server
+    $account = "$env:USERDOMAIN\$env:USERNAME (this Windows session)"
+    $userName = ''
+    if (Get-MoseProperty $Target 'Secret') {
+        $userName = (Get-TargetCredential $Target).UserName
+        $account = $userName
+    }
+    Write-Host "$server refused the login $account over PowerShell remoting. Check:" -ForegroundColor Yellow
+    Write-Host "  - the user name with its domain: DOMAIN\user, or $server\user for an account of the server itself, and the password;" -ForegroundColor Yellow
+    Write-Host "  - the account is an administrator of $server, or a member of its Remote Management Users group;" -ForegroundColor Yellow
+    Write-Host "  - a local account other than the built-in Administrator also needs LocalAccountTokenFilterPolicy = 1 on $server." -ForegroundColor Yellow
+    if (-not (Read-YesNo "Enter another login for $server and try again?")) {
+        return $false
+    }
+    return (Save-RemotingLogin $Target -UserName $userName)
+}
+
+# The Markdown of one server. The module's warnings pass through here to reach the debug log too.
+function Get-TargetOutput {
+    param(
+        [object]$Target
+    )
+
+    @(Invoke-Target $Target 3>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.WarningRecord]) {
+                Write-Warning $_.Message
+                Write-DebugLog "  WARNING: $($_.Message)"
+            }
+            else {
+                $_
+            }
+        } | Where-Object { $_ -is [string] })
 }
 
 function Add-ReportSection {
@@ -816,16 +874,18 @@ function Add-ReportSection {
             @(Get-SampleMarkdown $Section.Target)
         }
         else {
-            # The module's warnings pass through here to reach the debug log too.
-            @(Invoke-Target $Section.Target 3>&1 | ForEach-Object {
-                    if ($_ -is [System.Management.Automation.WarningRecord]) {
-                        Write-Warning $_.Message
-                        Write-DebugLog "  WARNING: $($_.Message)"
-                    }
-                    else {
-                        $_
-                    }
-                } | Where-Object { $_ -is [string] })
+            try {
+                Get-TargetOutput $Section.Target
+            }
+            catch {
+                # Veeam and Hyper-V mark a login refused over PowerShell remoting.
+                if (-not ($_.Exception.Data['RemotingAccessDenied'] -and (Request-RemotingLogin $Section.Target))) {
+                    throw
+                }
+                Write-Host "Trying $($Section.Target.Server) again with the new login..." -ForegroundColor DarkGray
+                Write-DebugLog '  Refused login, trying again with a new one'
+                Get-TargetOutput $Section.Target
+            }
         }
         $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
             -DropTitle:([bool]$MoseModules[$Section.Target.Module]['DropTitle'])

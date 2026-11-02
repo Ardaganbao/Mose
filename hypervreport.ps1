@@ -334,13 +334,23 @@ try {
     $Body
 }
 catch {
-    $hint = if ($_.Exception.Message -match 'WinRM|TrustedHosts|Kerberos') {
+    $failure = $_.Exception
+    # The host refused the login. The error ID does not depend on the Windows language.
+    $accessDenied = $_.FullyQualifiedErrorId -like 'AccessDenied*' -or
+        ($failure.PSObject.Properties['ErrorCode'] -and $failure.ErrorCode -eq 5)
+    $hint = if ($accessDenied) {
+        ' The host refused the login: it needs an administrator of the host (or a member of its Remote Management Users and Hyper-V Administrators groups), written DOMAIN\user, or HOST\user for an account of the host itself. A local account other than the built-in Administrator also needs LocalAccountTokenFilterPolicy = 1 on the host.'
+    }
+    elseif ($failure.Message -match 'WinRM|TrustedHosts|Kerberos') {
         ' PowerShell remoting must be enabled on the host (Enable-PSRemoting), and an IP address or a computer outside the domain must be in this computer''s TrustedHosts.'
     }
     else {
         ''
     }
-    throw "Hyper-V report for $Server failed: $($_.Exception.Message)$hint"
+    # Report.ps1 reads RemotingAccessDenied to offer another login.
+    $exception = [System.Exception]::new("Hyper-V report for $Server failed: $($failure.Message)$hint", $failure)
+    $exception.Data['RemotingAccessDenied'] = [bool]$accessDenied
+    throw $exception
 }
 finally {
     Write-Progress -Id 10 -Activity $activity -Completed

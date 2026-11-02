@@ -18,6 +18,9 @@ param (
 
 $ErrorActionPreference = 'Stop'
 $veeamModuleName = 'Veeam.Backup.PowerShell'
+# Like the other modules' progress bars. Run remotely, the Veeam server's bar shows here too.
+$progressServer = if ($Server -in @('localhost', '.')) { $env:COMPUTERNAME } else { $Server }
+$progressActivity = "Veeam report: $progressServer"
 
 function Write-VeeamReportProgress {
     param(
@@ -28,12 +31,7 @@ function Write-VeeamReportProgress {
     )
 
     $percent = [math]::Max(0, [math]::Min(100, $PercentComplete))
-    $barWidth = 24
-    $filledWidth = [math]::Floor($barWidth * $percent / 100)
-    $bar = ('#' * $filledWidth) + ('-' * ($barWidth - $filledWidth))
-
-    Write-Progress -Activity 'Generating Veeam report' -Status $Status -PercentComplete $percent
-    Write-Host ("[{0}] {1,3}% - {2}" -f $bar, $percent, $Status)
+    Write-Progress -Id 10 -Activity $progressActivity -Status $Status -PercentComplete $percent
 }
 
 Write-VeeamReportProgress -Status 'Starting report' -PercentComplete 0
@@ -59,16 +57,30 @@ if ($RunOnVbrServer -or (-not (Get-Command Connect-VBRServer -ErrorAction Silent
         $invokeParameters.Credential = $RemotingCredential
     }
 
+    Write-VeeamReportProgress -Status "Connecting to '$Server' over PowerShell remoting" -PercentComplete 0
     try {
         $remoteOutput = Invoke-Command @invokeParameters
     }
     catch {
+        $failure = $_.Exception
+        # WinRM reached the server, which refused the login. The error ID does not depend on the Windows language.
+        $accessDenied = $_.FullyQualifiedErrorId -like 'AccessDenied*' -or
+            ($failure.PSObject.Properties['ErrorCode'] -and $failure.ErrorCode -eq 5)
         $hint = ''
         $address = $null
-        if ([System.Net.IPAddress]::TryParse($Server, [ref]$address)) {
+        if ($accessDenied) {
+            $hint = " The server refused the login: it needs an administrator of the Veeam server (or a member of its Remote Management Users group) with a Veeam role, written DOMAIN\user, or SERVER\user for an account of the server itself. A local account other than the built-in Administrator also needs LocalAccountTokenFilterPolicy = 1 on the server."
+        }
+        elseif ([System.Net.IPAddress]::TryParse($Server, [ref]$address)) {
             $hint = " An IP address must also be in this computer's TrustedHosts and needs a login (-RemotingCredential): Report.ps1 offers to set both, or use the server's name."
         }
-        throw "Could not run the Veeam report remotely on '$Server'. Verify PowerShell Remoting/WinRM is enabled and your account can access the Veeam server.$hint $($_.Exception.Message)"
+        # Report.ps1 reads RemotingAccessDenied to offer another login.
+        $exception = [System.Exception]::new("Could not run the Veeam report remotely on '$Server'. Verify PowerShell Remoting/WinRM is enabled and your account can access the Veeam server.$hint $($failure.Message)", $failure)
+        $exception.Data['RemotingAccessDenied'] = [bool]$accessDenied
+        throw $exception
+    }
+    finally {
+        Write-Progress -Id 10 -Activity $progressActivity -Completed
     }
 
     $Body = ($remoteOutput | Select-Object -Last 1)
@@ -795,7 +807,7 @@ if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
 $Body
 }
 finally {
-    Write-Progress -Activity 'Generating Veeam report' -Completed
+    Write-Progress -Id 10 -Activity $progressActivity -Completed
     if ($script:VbrConnected) {
         try {
             Disconnect-VBRServer -ErrorAction Stop | Out-Null
