@@ -466,7 +466,7 @@ function ConvertTo-SecureSecretValue {
 
 function Update-MetallicAccessToken {
     $secretName = $script:SecretObject.Name
-    $resetHint = "Generate a new access and refresh token in Commvault, run: Remove-Secret -Name '$secretName' -Vault '$($script:SecretObject.VaultName)', then run the report again to enter them."
+    $resetHint = "Create a new access and refresh token in Commvault, then run .\Start.ps1 -Configure, remove this Commvault Cloud (R) and add it again with the new tokens (answer n to reusing '$secretName')."
     if ([string]::IsNullOrWhiteSpace($script:SecretObject.RefreshToken)) {
         throw "The Commvault access token was rejected and secret '$secretName' has no RefreshToken. $resetHint"
     }
@@ -503,7 +503,28 @@ function Update-MetallicAccessToken {
             -ErrorAction Stop
     }
     catch {
-        throw "The Commvault access token expired and renewing it at '$renewUri' failed: $($_.Exception.Message) $resetHint"
+        # Windows PowerShell keeps Commvault's answer, which says why, in ErrorDetails.
+        $reason = ''
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $answer = [string]$_.ErrorDetails.Message
+            try {
+                $message = Get-FirstObjectValue -InputObject ($answer | ConvertFrom-Json) -Names @('errorMessage', 'errMessage', 'message', 'error_description', 'error')
+                if ($message) { $answer = [string]$message }
+            }
+            catch {
+                # Not JSON: the text as it came.
+            }
+            # Never show the tokens, should Commvault send them back.
+            foreach ($token in @($script:SecretObject.AccessToken, $script:SecretObject.RefreshToken) | Where-Object { $_ }) {
+                $answer = $answer -replace [regex]::Escape($token), '<token>'
+            }
+            $answer = ($answer -replace '\s+', ' ').Trim()
+            if ($answer.Length -gt 300) { $answer = $answer.Substring(0, 300) + '...' }
+            if ($answer) { $reason = " Commvault says: $answer." }
+        }
+        # Each refresh token works once: a copy of these tokens renewed elsewhere (another computer,
+        # an older script) leaves this one unusable.
+        throw "The Commvault access token expired and renewing it at '$renewUri' failed: $($_.Exception.Message)$reason This happens when the tokens were revoked, or renewed from another computer or script that has a copy of them. $resetHint"
     }
 
     $newAccessToken = Get-FirstObjectValue -InputObject $tokenResponse -Names @('accessToken', 'access_token', 'AccessToken')
