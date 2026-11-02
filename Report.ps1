@@ -136,6 +136,7 @@ function New-TargetRun {
         Output        = New-Object System.Collections.Generic.List[object]
         Log           = New-Object System.Collections.Generic.List[string]
         Lines         = @()
+        Inventory     = @()
         Error         = $null
         Status        = ''
         Elapsed       = ''
@@ -160,6 +161,7 @@ function Start-TargetRun {
     $Run.Output.Clear()
     $Run.Log.Clear()
     $Run.Lines = @()
+    $Run.Inventory = @()
     $Run.Error = $null
     Write-Host "Collecting $($Run.Title)..." -ForegroundColor DarkGray
 
@@ -216,7 +218,8 @@ function Start-TargetJob {
             if ($DebugDumpPath) {
                 $moduleParameters.DebugDumpPath = $DebugDumpPath
             }
-            Invoke-MoseModule @moduleParameters | Where-Object { $_ -is [string] }
+            # The Markdown lines, and what the module found for the inventory tables (MoseInventory objects).
+            Invoke-MoseModule @moduleParameters | Where-Object { $_ -is [string] -or ($null -ne $_ -and $_.PSObject.Properties['MoseInventory']) }
         }
         catch {
             ConvertTo-MoseFailure $_
@@ -339,6 +342,7 @@ function Complete-TargetRun {
                 throw $exception
             }
             $Run.Lines = @($Run.Output | Where-Object { $_ -is [string] })
+            $Run.Inventory = @($Run.Output | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties['MoseInventory'] })
         }
         catch {
             $Run.Error = $_
@@ -605,19 +609,6 @@ function Get-SampleMarkdown {
 | VM | Name | Created | Size GB |
 |----|------|---------|---------|
 | SAMPLE-VM-01 | before-update | 2026-01-01 | 4 |
-
-### Virtual System
-
-#### Acceptance (sample)
-| PC | Windows Version |
-|----|-----------------|
-| SAMPLE-VM-02_AC | Windows 2019 |
-
-#### Production (sample)
-| PC | Windows Version |
-|----|-----------------|
-| SAMPLE-VM-01 | Windows 2019 |
-| SAMPLE-VM-02 | CentOS 9 |
 "@
         }
         'HyperV' {
@@ -850,6 +841,31 @@ $sampleJobTable
     }
 }
 
+# Sample of what a module gives the inventory tables for -DryRun, as its modules write it.
+function Get-SampleInventory {
+    param(
+        [object]$Target
+    )
+
+    $server = Get-MoseTargetName $Target
+    switch ($Target.Module) {
+        'VMware' {
+            foreach ($vm in @(
+                    @('SAMPLE-VM-01', 'Production (sample)', 'Windows 2022'),
+                    @('SAMPLE-VM-02', 'Production (sample)', 'CentOS 9'),
+                    @('SAMPLE-VM-01_AC', 'Acceptance (sample)', 'Windows 2019'))) {
+                [pscustomobject]@{ MoseInventory = 'VM'; Name = $vm[0]; Folder = $vm[1]; Os = $vm[2]; Server = $server }
+            }
+        }
+        { $_ -in 'Veeam', 'VeeamApi' } {
+            [pscustomobject]@{ MoseInventory = 'Software'; Name = 'Veeam'; Version = '12.3'; Purpose = 'Backup and restore'; Server = $server }
+        }
+        'SqlMaint' {
+            [pscustomobject]@{ MoseInventory = 'Software'; Name = 'msSQL'; Version = '2019 CU20 (15.0.4298.1)'; Purpose = 'SQL database (with Always On)'; Server = $server }
+        }
+    }
+}
+
 # Moves the headings of a module under its server heading, however deep the server is in the
 # sections: the heading levels the module uses, in order, become $TopLevel, $TopLevel + 1...
 # whatever level each module starts at. With -DropTitle, a first line that is a heading only
@@ -977,7 +993,7 @@ function Add-MarkdownSpacing {
     return ($result -join [Environment]::NewLine).Trim()
 }
 
-# A group is shown when it has text, or when one of its sections is shown.
+# A group is shown when it has text or the inventory tables, or when one of its sections is shown.
 function Test-ReportSectionShown {
     param(
         [object]$Section
@@ -986,7 +1002,7 @@ function Test-ReportSectionShown {
     if ($Section.Hide) {
         return $false
     }
-    if ($Section.Target -or $Section.Text) {
+    if ($Section.Target -or $Section.Text -or ($Section.Inventory -and $inventoryMarkdown)) {
         return $true
     }
     return @($Section.Children | Where-Object { Test-ReportSectionShown $_ }).Count -gt 0
@@ -1079,7 +1095,7 @@ function Save-TargetLogin {
         $Target | Add-Member -NotePropertyName Secret -NotePropertyValue $secretName
     }
     if ($configFromVault) {
-        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout')
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ })
         Write-Host "Saved the login for $server in the client configuration." -ForegroundColor Green
     }
     return $true
@@ -1157,7 +1173,7 @@ function Request-CertificateTrust {
         $Target | Add-Member -NotePropertyName CertificateThumbprint -NotePropertyValue $Thumbprint
     }
     if ($configFromVault) {
-        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout')
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ })
         Write-Host "Saved the certificate of $server in the client configuration." -ForegroundColor Green
     }
     return $true
@@ -1188,6 +1204,70 @@ function Request-RunRetry {
     return $false
 }
 
+# Table cells must not contain a | or a line break.
+function Format-InventoryCell {
+    param($Value)
+    return ("$Value" -replace '\|', '/' -replace '\r?\n', ' ').Trim()
+}
+
+# The tables of the layout's Inventory group (Infrastructure detail), from what the modules found
+# ($Inventory): Virtual System, the VMs of the VMware modules in a table per VM folder, and
+# Software, Veeam and msSQL as their modules read them with the lines entered in the configuration
+# (Configure.ps1, I). A line with the name of one read gives its purpose, or a version to show
+# instead; the other lines are only in a full report, not in a partial one.
+function Get-InventoryMarkdown {
+    param(
+        [object[]]$Inventory,
+        [object[]]$SoftwareLines,
+        [switch]$Partial
+    )
+
+    $parts = New-Object System.Collections.Generic.List[string]
+
+    $vms = @($Inventory | Where-Object { $_.MoseInventory -eq 'VM' })
+    if ($vms.Count -gt 0) {
+        $text = '### Virtual System'
+        foreach ($folder in @($vms | Group-Object -Property Folder | Sort-Object -Property Name)) {
+            $text += "`n`n#### $(Format-InventoryCell $folder.Name)`n| PC | Windows Version |`n|----|-----------------|"
+            foreach ($vm in @($folder.Group | Sort-Object -Property Name)) {
+                $text += "`n| $(Format-InventoryCell $vm.Name) | $(Format-InventoryCell $vm.Os) |"
+            }
+        }
+        $parts.Add($text)
+    }
+
+    $read = @($Inventory | Where-Object { $_.MoseInventory -eq 'Software' })
+    # With the fields a configuration edited by hand may lack.
+    $lines = @($SoftwareLines | Where-Object { $_ } | ForEach-Object {
+            [pscustomobject]@{ Name = "$(Get-MoseProperty $_ 'Name')"; Version = "$(Get-MoseProperty $_ 'Version')"; Purpose = "$(Get-MoseProperty $_ 'Purpose')" }
+        } | Where-Object { $_.Name })
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $read) {
+        $line = $lines | Where-Object { $_.Name -eq "$($item.Name)" } | Select-Object -First 1
+        $version = if ($line -and $line.Version) { $line.Version } else { "$($item.Version)" }
+        $purpose = if ($line -and $line.Purpose) { $line.Purpose } else { "$($item.Purpose)" }
+        $rows.Add([pscustomobject]@{ Name = "$($item.Name)"; Version = $version; Purpose = $purpose })
+    }
+    if (-not $Partial) {
+        foreach ($line in $lines) {
+            if (@($read | Where-Object { "$($_.Name)" -eq $line.Name }).Count -eq 0) {
+                $rows.Add($line)
+            }
+        }
+    }
+    if ($rows.Count -gt 0) {
+        $text = "### Software`n| Name | Version | Purpose |`n|------|---------|---------|"
+        # Two Veeam servers of the same version: one line.
+        foreach ($group in @($rows | Group-Object -Property Name, Version)) {
+            $row = $group.Group[0]
+            $text += "`n| $(Format-InventoryCell $row.Name) | $(Format-InventoryCell $row.Version) | $(Format-InventoryCell $row.Purpose) |"
+        }
+        $parts.Add($text)
+    }
+
+    return $parts -join "`n`n"
+}
+
 function Add-ReportSection {
     param(
         [object]$Section,
@@ -1203,6 +1283,9 @@ function Add-ReportSection {
         # Written in the layout menu; its own headings, if any, go below the section's.
         $text = Format-MoseTitle $Section.Text @{ Client = $config.Client; Date = $reportDate }
         $report.Add((Set-MarkdownHeadingLevel -Markdown $text -TopLevel ($Level + 1)))
+    }
+    if ($Section.Inventory -and $inventoryMarkdown) {
+        $report.Add((Set-MarkdownHeadingLevel -Markdown $inventoryMarkdown -TopLevel ($Level + 1)))
     }
     foreach ($child in $Section.Children) {
         Add-ReportSection -Section $child -Level ($Level + 1)
@@ -1348,8 +1431,16 @@ try {
     if ($selection.Tag) {
         $report.Add("> Partial report: only $($selection.Label).")
     }
+    # What the modules found, for the tables of the Inventory group, made once they all ran.
+    $inventory = New-Object System.Collections.Generic.List[object]
+    $inventoryMarkdown = ''
     if ($DryRun) {
         $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
+        foreach ($section in @(Get-TargetSections -Sections $sections)) {
+            foreach ($item in @(Get-SampleInventory $section.Target)) {
+                $inventory.Add($item)
+            }
+        }
     }
     else {
         $runs = New-Object System.Collections.Generic.List[object]
@@ -1395,7 +1486,13 @@ try {
                 $debugSummary.Add(('{0,-6} {1,5}  {2}{3}' -f $run.Status, $run.Elapsed, $run.Title, $run.Where))
             }
         }
+        foreach ($run in $runs) {
+            foreach ($item in $run.Inventory) {
+                $inventory.Add($item)
+            }
+        }
     }
+    $inventoryMarkdown = Get-InventoryMarkdown -Inventory $inventory.ToArray() -SoftwareLines @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -Partial:([bool]$selection.Tag)
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2
     }

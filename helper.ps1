@@ -144,14 +144,16 @@ function Get-MoseConfig {
 }
 
 # $Layout: order, titles and groups of the report sections, $null for the default (see README, "Report layout").
+# $Software: the lines of the Software table entered by hand (Name, Version, Purpose).
 function Save-MoseConfig {
     param(
         [Parameter(Mandatory)] [string]$Client,
         [object[]]$Targets = @(),
-        [object]$Layout
+        [object]$Layout,
+        [object[]]$Software = @()
     )
 
-    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets); Layout = $Layout } | ConvertTo-Json -Depth 20
+    $json = [pscustomobject]@{ Client = $Client; Targets = @($Targets); Layout = $Layout; Software = @($Software) } | ConvertTo-Json -Depth 20
     Set-Secret -Vault $MoseVaultName -Name $MoseConfigSecretName -Secret $json
     Save-MoseModuleList -Targets $Targets
 }
@@ -187,6 +189,7 @@ function Format-MoseTitle {
 }
 
 $MoseDefaultReportTitle = '{Client} report {Date}'
+$MoseInventoryTitle = 'Infrastructure detail'
 
 # Markdown heading of a report line. Markdown stops at ######, so a deeper level becomes a bold line
 # instead of being merged with the level above.
@@ -204,8 +207,10 @@ function Format-MoseHeading {
 
 # Report layout of a client that has not changed it: ## sections with their servers in ###; a
 # section without servers is not shown. A module missing here goes at the end of the report.
+# Inventory: the group with the Physical System, Virtual System and Software tables.
 $MoseDefaultLayout = [pscustomobject]@{
     Sections = @(
+        [pscustomobject]@{ Title = $MoseInventoryTitle; Inventory = $true; Sections = @() }
         [pscustomobject]@{ Title = 'Hardware'; Sections = @([pscustomobject]@{ Module = @('iLO', 'iDRAC', 'BMC') }) }
         [pscustomobject]@{ Title = 'Virtualization and storage'; Sections = @([pscustomobject]@{ Module = @('VMware', 'HyperV', 'StorMagic') }) }
         [pscustomobject]@{ Title = 'Backup'; Sections = @([pscustomobject]@{ Module = @('NAS', 'Veeam', 'VeeamApi', 'CommvaultCloud', 'CommvaultOnPrem') }) }
@@ -239,9 +244,9 @@ function Get-MoseSectionTitle {
 }
 
 # Turns layout entries into report sections: a group (Title, Text written under its heading,
-# Children) or one server (Target), with its layout Title ('' for the default) and Hide. An entry
-# takes the servers it matches from $Remaining, so a server appears once, under the first entry
-# that matches it.
+# Inventory, Children) or one server (Target), with its layout Title ('' for the default) and Hide.
+# An entry takes the servers it matches from $Remaining, so a server appears once, under the first
+# entry that matches it.
 function New-MoseReportSections {
     param(
         [object[]]$Entries,
@@ -256,7 +261,9 @@ function New-MoseReportSections {
                 $children.Add($child)
             }
             if ($title) {
-                [pscustomobject]@{ Title = $title; Text = "$(Get-MoseProperty $entry 'Text')"; Target = $null; Children = $children; Hide = $false }
+                [pscustomobject]@{ Title = $title; Text = "$(Get-MoseProperty $entry 'Text')"; Target = $null; Children = $children; Hide = $false
+                    Inventory = [bool](Get-MoseProperty $entry 'Inventory')
+                }
             }
             else {
                 Write-Warning "Report layout: a group of sections has no Title, so its sections are listed without one."
@@ -283,11 +290,12 @@ function New-MoseReportSections {
                 foreach ($target in $targets) {
                     [void]$Remaining.Remove($target)
                     [pscustomobject]@{
-                        Title    = $title
-                        Text     = ''
-                        Target   = $target
-                        Children = New-Object System.Collections.Generic.List[object]
-                        Hide     = [bool](Get-MoseProperty $entry 'Hide')
+                        Title     = $title
+                        Text      = ''
+                        Target    = $target
+                        Children  = New-Object System.Collections.Generic.List[object]
+                        Hide      = [bool](Get-MoseProperty $entry 'Hide')
+                        Inventory = $false
                     }
                 }
             }
@@ -295,8 +303,23 @@ function New-MoseReportSections {
     }
 }
 
+# True when $Sections, or a group in them, is the Inventory group.
+function Test-MoseInventorySection {
+    param(
+        [object[]]$Sections
+    )
+
+    foreach ($section in $Sections) {
+        if ((Get-MoseProperty $section 'Inventory') -or (-not $section.Target -and (Test-MoseInventorySection -Sections $section.Children))) {
+            return $true
+        }
+    }
+    return $false
+}
+
 # Every configured server laid out by $Layout ($null for the default layout). The servers it does
-# not place go at the end, in module order, shown unless the layout says Unlisted = Hide.
+# not place go at the end, in module order, shown unless the layout says Unlisted = Hide. A layout
+# saved without the Inventory group gets it at the start.
 function Get-MoseReportSections {
     param(
         [object]$Layout,
@@ -321,6 +344,9 @@ function Get-MoseReportSections {
     $sections = New-Object System.Collections.Generic.List[object]
     foreach ($section in @(New-MoseReportSections -Entries $entries -Remaining $remaining)) {
         $sections.Add($section)
+    }
+    if (-not (Test-MoseInventorySection -Sections $sections.ToArray())) {
+        $sections.Insert(0, [pscustomobject]@{ Title = $MoseInventoryTitle; Text = ''; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false; Inventory = $true })
     }
     return , $sections
 }

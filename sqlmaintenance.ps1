@@ -20,10 +20,16 @@ $ErrorActionPreference = 'Stop'
 $progressActivity = "SQL Server maintenance plans: $Server"
 
 # Runs in a process of its own when another Windows account is used, so it takes everything it needs
-# as parameters.
+# as parameters. Writes the server's version first (ProductVersion), then the runs (PlanName).
 $readMaintenanceLog = {
     param([string]$ConnectionString, [int]$Days)
 
+    $versionQuery = @'
+SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)) AS ProductVersion,
+       CAST(SERVERPROPERTY('ProductLevel') AS nvarchar(128)) AS ProductLevel,
+       CAST(SERVERPROPERTY('ProductUpdateLevel') AS nvarchar(128)) AS ProductUpdateLevel,
+       CAST(SERVERPROPERTY('IsHadrEnabled') AS int) AS IsHadrEnabled;
+'@
     $query = @'
 SELECT ISNULL(p.name, N'') AS PlanName, ISNULL(sp.subplan_name, N'') AS SubPlanName,
        l.start_time AS StartTime, l.end_time AS EndTime, l.succeeded AS Succeeded
@@ -36,6 +42,19 @@ ORDER BY l.start_time DESC;
     $connection = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
     try {
         $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandText = $versionQuery
+        $reader = $command.ExecuteReader()
+        if ($reader.Read()) {
+            [pscustomobject]@{
+                ProductVersion     = [string]$reader['ProductVersion']
+                ProductLevel       = [string]$reader['ProductLevel']
+                ProductUpdateLevel = [string]$reader['ProductUpdateLevel']
+                AlwaysOn           = ($reader['IsHadrEnabled'] -isnot [System.DBNull]) -and [int]$reader['IsHadrEnabled'] -eq 1
+            }
+        }
+        $reader.Close()
+
         $command = $connection.CreateCommand()
         $command.CommandText = $query
         $command.CommandTimeout = 120
@@ -83,6 +102,33 @@ function ConvertTo-MaintenanceRows {
     }
 }
 
+# The version as people name it, e.g. "2019 CU20 (15.0.4298.1)".
+function Format-SqlVersion {
+    param(
+        [object]$Info
+    )
+
+    $years = @{ 10 = '2008'; 11 = '2012'; 12 = '2014'; 13 = '2016'; 14 = '2017'; 15 = '2019'; 16 = '2022'; 17 = '2025' }
+    $parts = @()
+    $number = $null
+    if ([version]::TryParse($Info.ProductVersion, [ref]$number)) {
+        if ($number.Major -eq 10 -and $number.Minor -eq 50) {
+            $parts += '2008 R2'
+        }
+        elseif ($years.ContainsKey($number.Major)) {
+            $parts += $years[$number.Major]
+        }
+    }
+    if ($Info.ProductLevel -and $Info.ProductLevel -ne 'RTM') {
+        $parts += $Info.ProductLevel
+    }
+    if ($Info.ProductUpdateLevel) {
+        $parts += $Info.ProductUpdateLevel
+    }
+    $parts += "($($Info.ProductVersion))"
+    return $parts -join ' '
+}
+
 # Table cells must not contain a | or a line break.
 function Format-Cell {
     param($Value)
@@ -101,7 +147,7 @@ try {
         # A SQL Server login.
         $builder['User ID'] = $Credential.UserName
         $builder['Password'] = $Credential.GetNetworkCredential().Password
-        $runs = @(& $readMaintenanceLog $builder.ConnectionString $Days)
+        $results = @(& $readMaintenanceLog $builder.ConnectionString $Days)
     }
     elseif ($Credential) {
         # SQL Server only knows the Windows account of the process connecting: the query runs in a
@@ -109,9 +155,7 @@ try {
         $builder['Integrated Security'] = $true
         $job = Start-Job -Credential $Credential -ScriptBlock $readMaintenanceLog -ArgumentList $builder.ConnectionString, $Days
         try {
-            $runs = @(Receive-Job -Job $job -Wait -ErrorAction Stop | ForEach-Object {
-                    [pscustomobject]@{ PlanName = $_.PlanName; SubPlanName = $_.SubPlanName; StartTime = [datetime]$_.StartTime; Finished = [bool]$_.Finished; Succeeded = [bool]$_.Succeeded }
-                })
+            $results = @(Receive-Job -Job $job -Wait -ErrorAction Stop)
             if ($job.State -eq 'Failed') {
                 throw $job.ChildJobs[0].JobStateInfo.Reason
             }
@@ -122,7 +166,18 @@ try {
     }
     else {
         $builder['Integrated Security'] = $true
-        $runs = @(& $readMaintenanceLog $builder.ConnectionString $Days)
+        $results = @(& $readMaintenanceLog $builder.ConnectionString $Days)
+    }
+    # Typed again: from the process of another account they come back deserialized.
+    $runs = @($results | Where-Object { $_.PSObject.Properties['PlanName'] } | ForEach-Object {
+            [pscustomobject]@{ PlanName = $_.PlanName; SubPlanName = $_.SubPlanName; StartTime = [datetime]$_.StartTime; Finished = [bool]$_.Finished; Succeeded = [bool]$_.Succeeded }
+        })
+
+    # For the report's Software table (Report.ps1).
+    $info = $results | Where-Object { $_.PSObject.Properties['ProductVersion'] } | Select-Object -First 1
+    if ($info) {
+        $purpose = if ($info.AlwaysOn) { 'SQL database (with Always On)' } else { 'SQL database' }
+        [pscustomobject]@{ MoseInventory = 'Software'; Name = 'msSQL'; Version = Format-SqlVersion $info; Purpose = $purpose; Server = $Server }
     }
 
     Write-Progress -Id 10 -Activity $progressActivity -Status 'Building the report' -PercentComplete 80

@@ -19,7 +19,11 @@ param (
     [System.Management.Automation.PSCredential]$Credential,
 
     [Parameter(HelpMessage = 'Only the SureBackup verification section (used by VeeamRestReport.ps1, whose REST API does not give SureBackup).')]
-    [switch]$SureBackupOnly
+    [switch]$SureBackupOnly,
+
+    # Set for the PowerShell 7 relaunch, whose output comes back as text: the first process writes the version for Report.ps1.
+    [Parameter(DontShow)]
+    [switch]$NoInventory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +55,14 @@ function Write-VeeamReportProgress {
 
     $percent = [math]::Max(0, [math]::Min(100, $PercentComplete))
     Write-Progress -Id 10 -Activity $progressActivity -Status $Status -PercentComplete $percent
+}
+
+# For the report's Software table (Report.ps1). Not with -SureBackupOnly: its caller
+# writes the version itself.
+function Write-VeeamInventory {
+    if (-not $SureBackupOnly -and -not $NoInventory) {
+        [pscustomobject]@{ MoseInventory = 'Software'; Name = 'Veeam'; Version = "$veeamVersion"; Purpose = 'Backup and restore'; Server = $progressServer }
+    }
 }
 
 Write-VeeamReportProgress -Status 'Starting report' -PercentComplete 0
@@ -104,10 +116,12 @@ if ($RunOnVbrServer -or (-not (Test-VeeamModuleHere) -and $Server -notin @('loca
         Write-Progress -Id 10 -Activity $progressActivity -Completed
     }
 
-    $Body = ($remoteOutput | Select-Object -Last 1)
+    $Body = ($remoteOutput | Where-Object { $_ -is [string] } | Select-Object -Last 1)
     if ([string]::IsNullOrWhiteSpace([string]$Body)) {
         throw "Remote execution on '$Server' did not return a report."
     }
+    # The Veeam version, as the Veeam server wrote it.
+    $remoteOutput | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties['MoseInventory'] }
 
     $outputDirectory = Split-Path -Path $OutputPath -Parent
     if (-not [string]::IsNullOrWhiteSpace($outputDirectory) -and -not (Test-Path -LiteralPath $outputDirectory)) {
@@ -216,6 +230,8 @@ if ($null -ne $requiredPowerShellVersion -and
         if ($SureBackupOnly) {
             $commandParts += '-SureBackupOnly'
         }
+        Write-VeeamInventory
+        $commandParts += '-NoInventory'
         # The logins go through a file only this Windows user can read (Export-Clixml), removed below.
         $credentials = @{}
         if ($null -ne $RemotingCredential) {
@@ -339,6 +355,7 @@ function Convert-Bytes {
     return $check
 }
 
+Write-VeeamInventory
 $Body = "## Check Backup Veeam VM's:`n"
 $Body += "- Veeam version: $(if ($veeamVersion) { $veeamVersion } else { 'Unknown' })`n"
 $Bodycopy = ""

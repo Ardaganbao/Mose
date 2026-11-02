@@ -71,6 +71,8 @@ The first report on a computer asks for the client. To change it later, run `.\S
 
 The vault password is asked first. Logins are saved as `MOSE:<module>:<server>` and the configuration as `MOSE:Config`, in the vault `SecretStore1`.
 
+`I` in the menu holds the lines of the report's [Software table](#infrastructure-detail) that no module reads, e.g. Microsoft Defender: a name, a version and a purpose. `A` adds a line; its number changes it (Enter keeps a value, `-` empties it) or removes it.
+
 `P` in the menu lists every login and token in the vault with the servers that use it. Pick one to edit it: the user name and password, or the Commvault tokens and ring or URL (Enter keeps each value). Or remove it: only a login or token no server uses can be removed, and it leaves the vault when you save with `S`.
 
 A computer only downloads the module scripts its client uses. Saving downloads the modules just added, and every run of `Start.ps1` checks them for updates. They are listed in `modules.local.json` (file names only), so `Start.ps1` knows them without opening the vault.
@@ -127,13 +129,15 @@ cd $HOME\Mose
 
 ## Report layout
 
-The report title is `#`. By default the report has three `##` sections, each with its servers in `###` (`<Module> <server>`):
+The report title is `#`. By default the report has these `##` sections, each with its servers in `###` (`<Module> <server>`):
 
 | Section | Servers |
 |---|---|
+| Infrastructure detail | The [inventory tables](#infrastructure-detail) |
 | Hardware | iLO, iDRAC, BMC |
 | Virtualization and storage | VMware vCenter, Hyper-V, StorMagic |
 | Backup | Synology NAS, Veeam, Commvault |
+| Databases | SQL Server maintenance plans |
 
 To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`). The menu shows the heading level of each line:
 
@@ -145,7 +149,7 @@ To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`). 
 | `T` | Change the title of a server or a section. It shows the current and default titles; Enter keeps the title, `-` goes back to the default (`<Module> <server>`). Placeholders: `{Label}`, `{Server}`, `{Site}`, `{Client}`, `{Date}`. |
 | `W` | Write the text of a section or subsection, shown under its title before its servers: type it here (a line with only `.` ends it) or edit it in Notepad. Markdown is allowed, with `{Client}` and `{Date}`. A section with text is shown even without servers, e.g. a Summary. |
 | `H` | Hide or show a server. A section whose servers are all hidden is left out. |
-| `X` | Remove a section, keeping its servers in its place. |
+| `X` | Remove a section, keeping its servers in its place. The section with the inventory tables can be moved or renamed, not removed. |
 | `R` | Report title. |
 | `J` | Edit the layout as JSON in Notepad, for wildcards or sections inside sections. |
 | `D` | Back to the default layout. |
@@ -174,11 +178,22 @@ The JSON (`J`) looks like this:
 
 - `Sections` lists the report sections in order. An entry with `Module` adds one `###` per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
 - A server goes under the first entry that matches it. `"Hide": true` leaves the servers it matches out of the report.
-- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested. `Text` adds Markdown under its heading.
+- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested. `Text` adds Markdown under its heading. `"Inventory": true` puts the [inventory tables](#infrastructure-detail) in it, after its text.
 - `Title` placeholders: `{Client}` and `{Date}` everywhere, and for a server `{Label}` (module name), `{Module}`, `{Server}` and `{Site}`.
 - `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up.
 
 Each module's own headings are moved one level below its server heading, whatever level the module uses and however deep the server is in subsections. The heading that only repeated the server title is removed (`DropTitle` in `$MoseModules`). Markdown stops at `######`, so a deeper heading becomes a bold line.
+
+### Infrastructure detail
+
+The section with the inventory tables, at the start of the report by default. They are made from what the modules read, once every server ran:
+
+| Table | What it holds |
+|---|---|
+| Virtual System | The VMs of the VMware vCenters, a table per VM folder (Production, Acceptance...), with their operating system as VMware Tools reports it, else as configured: `Windows 2019`, `Windows 11`, `CentOS 9`. vSphere's own cluster VMs (`vCLS`) are left out. |
+| Software | Veeam with its version (both Veeam modules), msSQL with the SQL Server version (`2019 CU20 (15.0.4298.1)`) and `(with Always On)` when it is on (SQL Server maintenance plans module), then the lines entered with `I` in the configuration. A line with the name of one read (`Veeam`, `msSQL`) gives its purpose, or a version to show instead. Servers with the same version share a line. |
+
+Its text (`W`) goes before the tables, e.g. a schema of the network. `L` moves it (`M`) or renames it (`T`) like any other section; a layout saved without it gets it at the start. A partial report has only the tables of its servers, without the lines entered by hand. With nothing to show (no text, no table, no server of its own), the section is left out.
 
 ## Commvault Cloud token renewal
 

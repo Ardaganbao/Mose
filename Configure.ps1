@@ -180,6 +180,9 @@ function ConvertTo-LayoutEntry {
         if ($Section.Text) {
             $group.Text = $Section.Text
         }
+        if (Get-MoseProperty $Section 'Inventory') {
+            $group.Inventory = $true
+        }
         $group.Sections = @($Section.Children | ForEach-Object { ConvertTo-LayoutEntry $_ })
         return [pscustomobject]$group
     }
@@ -381,6 +384,9 @@ function Edit-ReportLayout {
             $color = 'Gray'
             if (-not $section.Target) {
                 $color = 'Cyan'
+                if (Get-MoseProperty $section 'Inventory') {
+                    $text += '  (Physical System, Virtual System and Software tables)'
+                }
                 if ($section.Text) {
                     # The start of its text, to recognise it.
                     $firstLine = (($section.Text -split '\r?\n' | Where-Object { $_.Trim() }) | Select-Object -First 1).Trim()
@@ -389,7 +395,7 @@ function Edit-ReportLayout {
                     }
                     $text += "  (text: $firstLine)"
                 }
-                elseif ($section.Children.Count -eq 0) {
+                elseif ($section.Children.Count -eq 0 -and -not (Get-MoseProperty $section 'Inventory')) {
                     $text += '  (empty, left out of the report)'
                 }
             }
@@ -423,7 +429,7 @@ function Edit-ReportLayout {
                 Write-Host "Number $($rows.IndexOf($parent) + 1) is a server, not a section." -ForegroundColor Yellow
                 continue
             }
-            $newSection = [pscustomobject]@{ Title = $sectionTitle; Text = ''; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false }
+            $newSection = [pscustomobject]@{ Title = $sectionTitle; Text = ''; Target = $null; Children = New-Object System.Collections.Generic.List[object]; Hide = $false; Inventory = $false }
             if ($parent) {
                 $parent.Section.Children.Add($newSection)
             }
@@ -541,6 +547,10 @@ function Edit-ReportLayout {
                 Write-Host "Number $($rows.IndexOf($row) + 1) is a server, not a section. Use H to hide it." -ForegroundColor Yellow
                 continue
             }
+            if (Get-MoseProperty $row.Section 'Inventory') {
+                Write-Host "Number $($rows.IndexOf($row) + 1) holds the Physical System, Virtual System and Software tables: move it (M) or give it another title (T)." -ForegroundColor Yellow
+                continue
+            }
             $index = $row.Parent.IndexOf($row.Section)
             $row.Parent.RemoveAt($index)
             $row.Parent.InsertRange($index, $row.Section.Children)
@@ -566,7 +576,7 @@ function Edit-ReportLayout {
             continue
         }
         elseif ($choice -match '^[Dd]$') {
-            if (Read-YesNo 'Go back to the default layout: Hardware, Virtualization and storage, Backup?' $false) {
+            if (Read-YesNo "Go back to the default layout: $MoseInventoryTitle, Hardware, Virtualization and storage, Backup, Databases?" $false) {
                 $script:layout = $null
                 $sections = Get-MoseReportSections -Layout $null -Targets $targets.ToArray()
                 $title = ''
@@ -735,15 +745,70 @@ function Edit-SavedSecrets {
     }
 }
 
+# I in the menu: the lines of the Software table entered by hand (e.g. Microsoft Defender). The
+# report reads Veeam and msSQL itself; a line with the same name gives their purpose, or a version to
+# show instead.
+function Edit-Inventory {
+    while ($true) {
+        Write-Host ""
+        Write-Host "Lines of the Software table ($MoseInventoryTitle)" -ForegroundColor Cyan
+        Write-Host "The report reads Veeam and msSQL itself: a line with the same name gives their purpose." -ForegroundColor DarkGray
+        if ($software.Count -eq 0) {
+            Write-Host "  None."
+        }
+        for ($i = 0; $i -lt $software.Count; $i++) {
+            $line = $software[$i]
+            $version = if ($line.Version) { $line.Version } else { '-' }
+            Write-Host ("  {0,2}. {1,-24} {2,-16} {3}" -f ($i + 1), $line.Name, $version, $line.Purpose)
+        }
+        Write-Host ""
+
+        $answer = Read-Answer 'A to add a line, a number to change or remove it, Enter to go back'
+        $number = 0
+        if (-not $answer) {
+            return
+        }
+        if ($answer -match '^[Aa]$') {
+            $name = Read-Answer 'Name (e.g. Microsoft Defender)'
+            if ($name) {
+                $software.Add([pscustomobject]@{
+                        Name    = $name
+                        Version = Read-Answer 'Version (Enter for none, or for the one the report reads)'
+                        Purpose = Read-Answer 'Purpose (e.g. security and antivirus)'
+                    })
+            }
+        }
+        elseif ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $software.Count) {
+            $line = $software[$number - 1]
+            $action = Read-Answer "$($line.Name): E to change it, D to remove it, Enter for neither"
+            if ($action -match '^[Ee]$') {
+                # Enter keeps a value, - empties it.
+                $values = foreach ($field in 'Name', 'Version', 'Purpose') {
+                    $value = Read-Answer "$field (Enter keeps it, - to empty it)" "$($line.$field)"
+                    if ($value -eq '-') { '' } else { $value }
+                }
+                $software[$number - 1] = [pscustomobject]@{ Name = $values[0]; Version = $values[1]; Purpose = $values[2] }
+            }
+            elseif ($action -match '^[Dd]$') {
+                $software.RemoveAt($number - 1)
+            }
+        }
+    }
+}
+
 $config = Get-MoseConfig
 $client = ''
 $targets = New-Object System.Collections.Generic.List[object]
+$software = New-Object System.Collections.Generic.List[object]
 $secretsToRemove = New-Object System.Collections.Generic.List[string]
 $layout = $null
 if ($config) {
     $client = $config.Client
     foreach ($target in @($config.Targets)) {
         $targets.Add($target)
+    }
+    foreach ($line in @(Get-MoseProperty $config 'Software' | Where-Object { $_ })) {
+        $software.Add($line)
     }
     $layout = Get-MoseProperty $config 'Layout'
 }
@@ -770,11 +835,12 @@ while ($true) {
     }
     $layoutText = if ($layout) { 'custom' } else { 'default' }
     Write-Host "   P. Saved logins and tokens: edit or remove them, and the servers that use each"
+    Write-Host "   I. Inventory: the lines of the Software table ($($software.Count))"
     Write-Host "   L. Report layout ($layoutText): the report sections and the servers in each"
     Write-Host "   C. Client name: $client"
     Write-Host ""
 
-    $choice = Read-Answer 'Module number to add servers, R to remove one, P for the saved logins, L for the report layout, C for the client name, S to save, Q to quit without saving'
+    $choice = Read-Answer 'Module number to add servers, R to remove one, P for the saved logins, I for the inventory, L for the report layout, C for the client name, S to save, Q to quit without saving'
     $number = 0
 
     if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $moduleKeys.Count) {
@@ -813,6 +879,9 @@ while ($true) {
     elseif ($choice -match '^[Pp]$') {
         Edit-SavedSecrets
     }
+    elseif ($choice -match '^[Ii]$') {
+        Edit-Inventory
+    }
     elseif ($choice -match '^[Ll]$') {
         Edit-ReportLayout
     }
@@ -820,7 +889,7 @@ while ($true) {
         $client = Read-Answer 'Client name (report title and file name)' $client
     }
     elseif ($choice -match '^[Ss]$') {
-        Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout
+        Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout -Software $software.ToArray()
         Write-Host "Saved the configuration of $client ($($targets.Count) servers)." -ForegroundColor Green
         foreach ($name in $secretsToRemove) {
             # A server added since may have reused it.

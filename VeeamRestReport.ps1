@@ -777,6 +777,8 @@ try {
 
     $serverInfo = Invoke-VeeamApi -Path '/api/v1/serverInfo'
     $version = Get-VeeamValue $serverInfo 'buildVersion', 'version'
+    # For the report's Software table (Report.ps1).
+    [pscustomobject]@{ MoseInventory = 'Software'; Name = 'Veeam'; Version = "$version"; Purpose = 'Backup and restore'; Server = $Server }
     $Body = "## Check Backup Veeam VM's:`n"
     $Body += "- Veeam version: $(if ($version) { $version } else { 'Unknown' }) (REST API $script:ApiVersion)`n"
 

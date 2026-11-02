@@ -221,7 +221,7 @@ $vPartitionListMD += "|------------|-------------|---------------------|------|`
 $VolbarstackedL1 = "|Disk (%) | "
 $VolbarstackedL2 = "|--------|"
 $VolbarstackedL3 = "| $(Get-Date -format 'dd/MM/yyyy'   )  |"
-# The Virtual System section: every VM with its folder and operating system.
+# For the report's Virtual System table (Report.ps1): every VM with its folder and operating system.
 $virtualSystems = New-Object System.Collections.Generic.List[object]
 $vmIndex = 0
 foreach ($vInfo in $vInfoList) {
@@ -248,7 +248,7 @@ foreach ($vInfo in $vInfoList) {
   if ($vInfo.Name -notlike 'vCLS*') {
     $osName = if ($extra.OSFullName) { $extra.OSFullName } else { $vInfo.ExtensionData.Config.GuestFullName }
     $folderName = if ($vInfo.Folder -and $vInfo.Folder.Name -ne 'vm') { $vInfo.Folder.Name } elseif ($vInfo.Folder) { 'No folder' } else { 'vApp' }
-    $virtualSystems.Add([pscustomobject]@{ Name = $vInfo.Name; Folder = $folderName; Os = Get-ShortOsName $osName })
+    $virtualSystems.Add([pscustomobject]@{ MoseInventory = 'VM'; Name = $vInfo.Name; Folder = $folderName; Os = Get-ShortOsName $osName; Server = $server })
   }
 
 
@@ -309,21 +309,9 @@ $vSnapshotListMD += "|------------|-------------|---------------------|------|`n
 $Body += "`n"
 $Body += $vSnapshotListMD
 
-# Virtual System: a table per VM folder (Production, Acceptance...), with the VMs' operating system.
-$Body += "`n### Virtual System`n"
-if ($virtualSystems.Count -eq 0) {
-  $Body += "No virtual machine.`n"
-}
-foreach ($folder in @($virtualSystems | Group-Object -Property Folder | Sort-Object -Property Name)) {
-  $Body += "`n#### $($folder.Name)`n"
-  $Body += "| PC | Windows Version |`n"
-  $Body += "|----|-----------------|`n"
-  foreach ($vm in @($folder.Group | Sort-Object -Property Name)) {
-    $Body += "| $($vm.Name) | $($vm.Os) |`n"
-  }
-}
-
 $outfile = "$root\$file.md"
+# The VMs go to the report's Virtual System, a table per VM folder (Production, Acceptance...).
+$virtualSystems
 $Body
 Write-Progress -Id 10 -Activity "VMware report: $Site" -Status 'Report complete' -PercentComplete 100
 }
