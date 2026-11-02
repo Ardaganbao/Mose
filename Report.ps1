@@ -1030,7 +1030,8 @@ function Add-MarkdownSpacing {
     return ($result -join [Environment]::NewLine).Trim()
 }
 
-# A group is shown when it has text or the inventory tables, or when one of its sections is shown.
+# A group is shown when it has text, or when one of its sections is shown; a table when it has
+# something to show.
 function Test-ReportSectionShown {
     param(
         [object]$Section
@@ -1039,7 +1040,10 @@ function Test-ReportSectionShown {
     if ($Section.Hide) {
         return $false
     }
-    if ($Section.Target -or $Section.Text -or ($Section.Inventory -and $inventoryMarkdown)) {
+    if ($Section.Table) {
+        return [bool]$inventoryTables[$Section.Table]
+    }
+    if ($Section.Target -or $Section.Text) {
         return $true
     }
     return @($Section.Children | Where-Object { Test-ReportSectionShown $_ }).Count -gt 0
@@ -1565,7 +1569,7 @@ function Get-PhysicalSystemMarkdown {
 
     $redfish = 'iLO', 'iDRAC', 'BMC'
     $hostSources = 'VMware', 'HyperV', 'NAS'
-    $text = "### Physical System`n| System name | Brand | Model | Serial number | Product ID | BIOS version | Services | Services version | Warranty expiration date |`n|---|---|---|---|---|---|---|---|---|"
+    $text = "| System name | Brand | Model | Serial number | Product ID | BIOS version | Services | Services version | Warranty expiration date |`n|---|---|---|---|---|---|---|---|---|"
     foreach ($row in $rows) {
         $line = $row.Line
         $hardware = @($row.Sources | Where-Object { $_.Source -in $redfish }) + @($row.Sources | Where-Object { $_.Source -notin $redfish }) + @($line | Where-Object { $_ })
@@ -1623,13 +1627,13 @@ function Get-PhysicalSystemMarkdown {
     return $text
 }
 
-# The tables of the layout's Inventory group (Infrastructure detail), from what the modules found
-# ($Inventory): Physical System (Get-PhysicalSystemMarkdown), Virtual System, the VMs of the VMware
-# modules in a table per VM folder, and Software, Veeam and msSQL as their modules read them with
-# the lines entered in the configuration (Configure.ps1, I). A line with the name of one read gives
-# its purpose, or a version to show instead; the other lines are only in a full report, not in a
-# partial one.
-function Get-InventoryMarkdown {
+# The inventory tables ($MoseInventoryTables), each placed in the report by its layout entry, from
+# what the modules found ($Inventory): Physical System (Get-PhysicalSystemMarkdown), Virtual System,
+# the VMs of the VMware modules in a table per VM folder, and Software, Veeam and msSQL as their
+# modules read them with the lines entered in the configuration (Configure.ps1, I). A line with
+# the name of one read gives its purpose, or a version to show instead; the other lines are only in
+# a full report, not in a partial one. A table with nothing to show is ''.
+function Get-InventoryTables {
     param(
         [object[]]$Inventory,
         [object[]]$SoftwareLines,
@@ -1638,23 +1642,19 @@ function Get-InventoryMarkdown {
         [switch]$Partial
     )
 
-    $parts = New-Object System.Collections.Generic.List[string]
-
-    $physical = Get-PhysicalSystemMarkdown -Inventory $Inventory -MachineLines $MachineLines -Latest $Latest -Partial:$Partial
-    if ($physical) {
-        $parts.Add($physical)
-    }
+    $tables = @{ PhysicalSystem = ''; VirtualSystem = ''; Software = '' }
+    $tables.PhysicalSystem = Get-PhysicalSystemMarkdown -Inventory $Inventory -MachineLines $MachineLines -Latest $Latest -Partial:$Partial
 
     $vms = @($Inventory | Where-Object { $_.MoseInventory -eq 'VM' })
     if ($vms.Count -gt 0) {
-        $text = '### Virtual System'
-        foreach ($folder in @($vms | Group-Object -Property Folder | Sort-Object -Property Name)) {
-            $text += "`n`n#### $(Format-InventoryCell $folder.Name)`n| PC | Windows Version |`n|----|-----------------|"
+        $folders = foreach ($folder in @($vms | Group-Object -Property Folder | Sort-Object -Property Name)) {
+            $text = "#### $(Format-InventoryCell $folder.Name)`n| PC | Windows Version |`n|----|-----------------|"
             foreach ($vm in @($folder.Group | Sort-Object -Property Name)) {
                 $text += "`n| $(Format-InventoryCell $vm.Name) | $(Format-InventoryCell $vm.Os) |"
             }
+            $text
         }
-        $parts.Add($text)
+        $tables.VirtualSystem = @($folders) -join "`n`n"
     }
 
     $read = @($Inventory | Where-Object { $_.MoseInventory -eq 'Software' })
@@ -1677,16 +1677,16 @@ function Get-InventoryMarkdown {
         }
     }
     if ($rows.Count -gt 0) {
-        $text = "### Software`n| Name | Version | Purpose |`n|------|---------|---------|"
+        $text = "| Name | Version | Purpose |`n|------|---------|---------|"
         # Two Veeam servers of the same version: one line.
         foreach ($group in @($rows | Group-Object -Property Name, Version)) {
             $row = $group.Group[0]
             $text += "`n| $(Format-InventoryCell $row.Name) | $(Format-InventoryCell $row.Version) | $(Format-InventoryCell $row.Purpose) |"
         }
-        $parts.Add($text)
+        $tables.Software = $text
     }
 
-    return $parts -join "`n`n"
+    return $tables
 }
 
 function Add-ReportSection {
@@ -1705,8 +1705,10 @@ function Add-ReportSection {
         $text = Format-MoseTitle $Section.Text @{ Client = $config.Client; Date = $reportDate }
         $report.Add((Set-MarkdownHeadingLevel -Markdown $text -TopLevel ($Level + 1)))
     }
-    if ($Section.Inventory -and $inventoryMarkdown) {
-        $report.Add((Set-MarkdownHeadingLevel -Markdown $inventoryMarkdown -TopLevel ($Level + 1)))
+    if ($Section.Table) {
+        # Made once every server ran (Get-InventoryTables).
+        $report.Add((Set-MarkdownHeadingLevel -Markdown $inventoryTables[$Section.Table] -TopLevel ($Level + 1)))
+        return
     }
     foreach ($child in $Section.Children) {
         Add-ReportSection -Section $child -Level ($Level + 1)
@@ -1852,9 +1854,9 @@ try {
     if ($selection.Tag) {
         $report.Add("> Partial report: only $($selection.Label).")
     }
-    # What the modules found, for the tables of the Inventory group, made once they all ran.
+    # What the modules found, for the inventory tables, made once they all ran.
     $inventory = New-Object System.Collections.Generic.List[object]
-    $inventoryMarkdown = ''
+    $inventoryTables = @{}
     if ($DryRun) {
         $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
         foreach ($section in @(Get-TargetSections -Sections $sections)) {
@@ -1916,7 +1918,7 @@ try {
     # The latest ESXi builds are looked up online only for a real report with ESXi hosts.
     $esxiHosts = @($inventory | Where-Object { (Get-MoseProperty $_ 'Product') -eq 'ESXi' }).Count
     $latest = Get-LatestVersions -Online:(-not $DryRun -and $esxiHosts -gt 0)
-    $inventoryMarkdown = Get-InventoryMarkdown -Inventory $inventory.ToArray() -Latest $latest -Partial:([bool]$selection.Tag) `
+    $inventoryTables = Get-InventoryTables -Inventory $inventory.ToArray() -Latest $latest -Partial:([bool]$selection.Tag) `
         -SoftwareLines @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -MachineLines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2

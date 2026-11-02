@@ -23,7 +23,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
 | `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`) and reports shown in the Script Manager (`Scripts`). |
 | `helper.ps1` | SecretStore helpers, the client configuration and the list of modules. |
-| `latest-versions.json` | The latest ESXi, StorMagic and DSM versions, for the [Physical System](#infrastructure-detail) check marks when they can't be read online. |
+| `latest-versions.json` | The latest ESXi, StorMagic and DSM versions, for the [Physical System](#inventory-tables) check marks when they can't be read online. |
 | `iloreport.ps1`, `IDRAC.ps1`, `BMCreport.ps1` | Modules: HPE iLO, Dell iDRAC, Lenovo BMC. |
 | `nas2.ps1` | Module: Synology NAS. |
 | `stormagicHealth.ps1` | Module: StorMagic SvSAN. |
@@ -72,7 +72,7 @@ The first report on a computer asks for the client. To change it later, run `.\S
 
 The vault password is asked first. Logins are saved as `MOSE:<module>:<server>` and the configuration as `MOSE:Config`, in the vault `SecretStore1`.
 
-`I` in the menu holds what the report's [inventory tables](#infrastructure-detail) cannot read. `A` adds a line; its number changes it (Enter keeps a value, `-` empties it) or removes it.
+`I` in the menu holds what the report's [inventory tables](#inventory-tables) cannot read. `A` adds a line; its number changes it (Enter keeps a value, `-` empties it) or removes it.
 
 - `S`, Software: the lines no module reads, e.g. Microsoft Defender, with a version and a purpose.
 - `M`, Physical System: a machine by the name the report shows (e.g. `esxi01`) or its serial number, with its warranty end date (`yyyy-MM-dd`) and a note, the service to show (e.g. `NAS store for Veeam backup`), and for a machine no module reads (e.g. the StorMagic witness) its brand, model, Product ID and BIOS.
@@ -133,11 +133,11 @@ cd $HOME\Mose
 
 ## Report layout
 
-The report title is `#`. By default the report has these `##` sections, each with its servers in `###` (`<Module> <server>`):
+The report title is `#`. By default the report has these `##` sections, each with its servers or tables in `###` (`<Module> <server>`):
 
 | Section | Servers |
 |---|---|
-| Infrastructure detail | The [inventory tables](#infrastructure-detail) |
+| Infrastructure detail | The [inventory tables](#inventory-tables): Physical System, Virtual System, Software |
 | Hardware | iLO, iDRAC, BMC |
 | Virtualization and storage | VMware vCenter, Hyper-V, StorMagic |
 | Backup | Synology NAS, Veeam, Commvault |
@@ -147,13 +147,13 @@ To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`). 
 
 | Key | What it does |
 |---|---|
-| `N` | New section, or a subsection inside a section, with the servers you put in it (`2,3,4` or `2-4`). |
-| `A` | Attach servers or subsections to a section. |
-| `M` | Move a section or a server before another one, or to the end of the report. |
-| `T` | Change the title of a server or a section. It shows the current and default titles; Enter keeps the title, `-` goes back to the default (`<Module> <server>`). Placeholders: `{Label}`, `{Server}`, `{Site}`, `{Client}`, `{Date}`. |
+| `N` | New section, or a subsection inside a section, with the servers and tables you put in it (`2,3,4` or `2-4`). |
+| `A` | Attach servers, tables or subsections to a section. |
+| `M` | Move a section, a server or a table before another one, or to the end of the report. |
+| `T` | Change the title of a server, a table or a section. It shows the current and default titles; Enter keeps the title, `-` goes back to the default (`<Module> <server>`, the table's name). Placeholders: `{Label}`, `{Server}`, `{Site}` (servers), `{Client}`, `{Date}`. |
 | `W` | Write the text of a section or subsection, shown under its title before its servers: type it here (a line with only `.` ends it) or edit it in Notepad. Markdown is allowed, with `{Client}` and `{Date}`. A section with text is shown even without servers, e.g. a Summary. |
-| `H` | Hide or show a server. A section whose servers are all hidden is left out. |
-| `X` | Remove a section, keeping its servers in its place. The section with the inventory tables can be moved or renamed, not removed. |
+| `H` | Hide or show a server or a table. A section whose servers and tables are all hidden is left out. |
+| `X` | Remove a section, keeping its servers and tables in its place. |
 | `R` | Report title. |
 | `J` | Edit the layout as JSON in Notepad, for wildcards or sections inside sections. |
 | `D` | Back to the default layout. |
@@ -166,6 +166,11 @@ The JSON (`J`) looks like this:
 {
     "Title": "{Client} monthly report {Date}",
     "Sections": [
+        { "Title": "Infrastructure detail", "Text": "### Schema\n![schema](https://example.com/schema.png)", "Sections": [
+            { "Table": "PhysicalSystem" },
+            { "Table": "Software", "Title": "Software and purpose" }
+        ] },
+        { "Table": "VirtualSystem" },
         { "Title": "Backup", "Sections": [
             { "Module": "Veeam" },
             { "Module": "Commvault*", "Title": "{Label}" }
@@ -181,16 +186,17 @@ The JSON (`J`) looks like this:
 ```
 
 - `Sections` lists the report sections in order. An entry with `Module` adds one `###` per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
-- A server goes under the first entry that matches it. `"Hide": true` leaves the servers it matches out of the report.
-- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested. `Text` adds Markdown under its heading. `"Inventory": true` puts the [inventory tables](#infrastructure-detail) in it, after its text.
+- An entry with `Table` adds one of the [inventory tables](#inventory-tables): `PhysicalSystem`, `VirtualSystem` or `Software`, with its name as title unless it has a `Title`.
+- A server goes under the first entry that matches it, and so does a table. `"Hide": true` leaves the servers or the table it matches out of the report.
+- An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested. `Text` adds Markdown under its heading.
 - `Title` placeholders: `{Client}` and `{Date}` everywhere, and for a server `{Label}` (module name), `{Module}`, `{Server}` and `{Site}`.
-- `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up.
+- `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up. Tables that no entry places (a layout saved before there were tables) go at the start, in a section `Infrastructure detail`.
 
 Each module's own headings are moved one level below its server heading, whatever level the module uses and however deep the server is in subsections. The heading that only repeated the server title is removed (`DropTitle` in `$MoseModules`). Markdown stops at `######`, so a deeper heading becomes a bold line.
 
-### Infrastructure detail
+### Inventory tables
 
-The section with the inventory tables, at the start of the report by default. They are made from what the modules read, once every server ran:
+Three tables made from what the modules read, once every server ran. By default they are in the section `Infrastructure detail`, at the start of the report; in the layout each one is a line of its own, placed, renamed or hidden like a server:
 
 | Table | What it holds |
 |---|---|
@@ -208,7 +214,7 @@ A version gets :white_check_mark: when it is the latest of its product, else :wa
 
 `latest-versions.json` comes with MOSE (and its updates); `Updated` says when it was written. A warranty or support end gets :white_check_mark: more than 60 days before it, :warning: in the last 60 days, :x: once past.
 
-Its text (`W`) goes before the tables, e.g. a schema of the network. `L` moves it (`M`) or renames it (`T`) like any other section; a layout saved without it gets it at the start. A partial report has only the tables of its servers, without the lines entered by hand for other machines or software. With nothing to show (no text, no table, no server of its own), the section is left out.
+The text of their section (`W`) goes before them, e.g. a schema of the network. A table with nothing to show is left out: a partial report has only the tables of its servers, without the lines entered by hand for other machines or software.
 
 ## Commvault Cloud token renewal
 
