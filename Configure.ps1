@@ -31,20 +31,6 @@ function Read-Answer {
     return $Default
 }
 
-function Read-YesNo {
-    param(
-        [string]$Prompt,
-        [bool]$Default = $true
-    )
-
-    $hint = if ($Default) { 'Y/n' } else { 'y/N' }
-    $answer = "$(Read-Host -Prompt "$Prompt [$hint]")".Trim()
-    if (-not $answer) {
-        return $Default
-    }
-    return $answer -match '^(y|yes|o|oui)$'
-}
-
 # Returns the name of the secret holding the login for one server, or $null when cancelled.
 function Read-TargetCredential {
     param(
@@ -145,14 +131,22 @@ function Read-Target {
 
     $target = [pscustomobject]@{ Module = $Module; Server = $server; Secret = '' }
 
-    # Veeam and Hyper-V run as the current Windows user unless another account is given for PowerShell remoting.
-    if ($Module -notin 'Veeam', 'HyperV' -or
+    # Veeam and Hyper-V run as the current Windows user unless another account is given for PowerShell remoting,
+    # which an IP address needs, as well as being in TrustedHosts.
+    $remotingByIP = $Module -in 'Veeam', 'HyperV' -and (Test-MoseIPAddress $server)
+    if ($remotingByIP) {
+        Write-Host "$server is an IP address: PowerShell remoting needs a login for it, and the address in this computer's TrustedHosts. With the server's name instead, it needs neither." -ForegroundColor Yellow
+    }
+    if ($Module -notin 'Veeam', 'HyperV' -or $remotingByIP -or
         ($server -notin @('localhost', '.') -and (Read-YesNo "Use another Windows account for PowerShell remoting to ${server}?" $false))) {
         $target.Secret = Read-TargetCredential -Module $Module -Server $server
         if (-not $target.Secret) {
             Write-Host "Skipped: no credential was entered for $label $server." -ForegroundColor Yellow
             return $null
         }
+    }
+    if ($remotingByIP) {
+        [void](Confirm-MoseTrustedHost $server)
     }
 
     if ($Module -eq 'NAS') {

@@ -363,3 +363,126 @@ function Get-CommvaultSecretNames {
         }
     }
 }
+
+function Read-YesNo {
+    param(
+        [string]$Prompt,
+        [bool]$Default = $true
+    )
+
+    $hint = if ($Default) { 'Y/n' } else { 'y/N' }
+    $answer = "$(Read-Host -Prompt "$Prompt [$hint]")".Trim()
+    if (-not $answer) {
+        return $Default
+    }
+    return $answer -match '^(y|yes|o|oui)$'
+}
+
+# PowerShell remoting (Veeam, Hyper-V) only sends a login to an IP address that is in this
+# computer's TrustedHosts, and only a login given explicitly. With the server's name in the
+# domain, Kerberos needs neither.
+function Test-MoseIPAddress {
+    param(
+        [string]$Server
+    )
+
+    $address = $null
+    return [System.Net.IPAddress]::TryParse($Server, [ref]$address)
+}
+
+# Read with WSMan:\ when the WinRM service runs, else from the registry, where WinRM keeps it
+# (the service is often stopped on a workstation). A list set by group policy replaces the local one.
+function Get-MoseTrustedHosts {
+    $policyList = Get-MoseProperty (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WinRM\Client' -ErrorAction SilentlyContinue) 'TrustedHostsList'
+    try {
+        $list = (Get-Item -Path WSMan:\localhost\Client\TrustedHosts -ErrorAction Stop).Value
+    }
+    catch {
+        $list = $policyList
+        if (-not $list) {
+            $list = Get-MoseProperty (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client' -ErrorAction SilentlyContinue) 'trusted_hosts'
+        }
+    }
+    return [pscustomobject]@{
+        Hosts    = @("$list" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        ByPolicy = [bool]$policyList
+    }
+}
+
+function Test-MoseTrustedHost {
+    param(
+        [string]$Server
+    )
+
+    return @((Get-MoseTrustedHosts).Hosts | Where-Object { $Server -like $_ }).Count -gt 0
+}
+
+# Adds $Server to TrustedHosts in a PowerShell window run as administrator (Windows asks first),
+# starting the WinRM service for the change when it is stopped. Returns $true when it was added.
+function Add-MoseTrustedHost {
+    param(
+        [string]$Server
+    )
+
+    if (-not (Test-MoseIPAddress $Server) -and $Server -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
+        throw "'$Server' is not an IP address or a host name."
+    }
+    $command = @"
+`$code = 0
+`$stopped = (Get-Service -Name WinRM).Status -ne 'Running'
+try {
+    if (`$stopped) { Start-Service -Name WinRM -ErrorAction Stop }
+    Set-Item -Path WSMan:\localhost\Client\TrustedHosts -Value '$Server' -Concatenate -Force -ErrorAction Stop
+}
+catch {
+    Write-Host "Could not add $Server to TrustedHosts: `$(`$_.Exception.Message)" -ForegroundColor Red
+    Read-Host 'Press Enter to close'
+    `$code = 1
+}
+finally {
+    if (`$stopped) { Stop-Service -Name WinRM -ErrorAction SilentlyContinue }
+}
+exit `$code
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    try {
+        $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -Wait -PassThru `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
+    }
+    catch {
+        # Cancelled at the administrator prompt.
+        Write-Host "TrustedHosts was not changed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+    if ($process.ExitCode -ne 0) {
+        return $false
+    }
+    Write-Host "Added $Server to this computer's TrustedHosts." -ForegroundColor Green
+    return $true
+}
+
+# Offers to add $Server to TrustedHosts when it is not there; returns $true when it is there.
+function Confirm-MoseTrustedHost {
+    param(
+        [string]$Server
+    )
+
+    if (Test-MoseTrustedHost $Server) {
+        return $true
+    }
+    $manual = "As administrator: Set-Item WSMan:\localhost\Client\TrustedHosts -Value '$Server' -Concatenate -Force"
+    if ((Get-MoseTrustedHosts).ByPolicy) {
+        Write-Host "$Server is not in TrustedHosts, which a group policy sets on this computer: ask its administrator to add it." -ForegroundColor Yellow
+        return $false
+    }
+    # Windows does not check the identity of a server in TrustedHosts.
+    if (-not (Read-YesNo "Add $Server to this computer's TrustedHosts now? Windows asks for administrator rights. Only on a network you trust, as Windows then doesn't check the server's identity")) {
+        Write-Host "Not added. $manual" -ForegroundColor Yellow
+        return $false
+    }
+    if (-not (Add-MoseTrustedHost $Server)) {
+        Write-Host $manual -ForegroundColor Yellow
+        return $false
+    }
+    return $true
+}

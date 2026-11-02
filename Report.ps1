@@ -22,9 +22,9 @@ param(
 # with the section order, titles and groups of the client's report layout.
 # -DryRun writes <Client>_Report_<yyyy-MM-dd>_sample.md with sample data instead, to see the
 # layout quickly: no server, API or saved login is used.
-# -DebugLog also writes <Client>_Debug_<yyyy-MM-dd_HHmmss>.log: everything shown while the report
-# runs and, for each server that failed, the error, the script line where it stopped and the call
-# stack. It contains the client's server names and addresses, so git ignores it like the report.
+# -DebugLog also writes <Client>_Debug_<yyyy-MM-dd_HHmmss>.log: for each server how long it took and
+# its warnings and, when it failed, the error, the script line where it stopped and the call stack,
+# then a summary. It contains the client's server names and addresses, so git ignores it like the report.
 
 $ErrorActionPreference = 'Stop'
 # Start.ps1 hides progress bars to download faster; the modules show theirs.
@@ -689,6 +689,18 @@ function Get-ErrorLocation {
     return "$(Split-Path -Leaf $info.ScriptName) line $($info.ScriptLineNumber)"
 }
 
+# Lines of the -DebugLog file. Written here rather than by a transcript, which a module
+# (PowerCLI) can stop.
+function Write-DebugLog {
+    param(
+        [string[]]$Line
+    )
+
+    if ($debugLogPath) {
+        Add-Content -LiteralPath $debugLogPath -Value $Line -Encoding UTF8
+    }
+}
+
 # For -DebugLog: the error, the statement that failed and the calls that led to it.
 function Write-ErrorDetail {
     param(
@@ -696,17 +708,70 @@ function Write-ErrorDetail {
     )
 
     $exception = $ErrorRecord.Exception
-    Write-Host "  Error: $($exception.GetType().FullName): $($exception.Message)" -ForegroundColor Yellow
+    $lines = @("  Error: $($exception.GetType().FullName): $($exception.Message)")
     for ($inner = $exception.InnerException; $inner; $inner = $inner.InnerException) {
-        Write-Host "  Because: $($inner.GetType().FullName): $($inner.Message)" -ForegroundColor Yellow
+        $lines += "  Because: $($inner.GetType().FullName): $($inner.Message)"
     }
     if ($ErrorRecord.InvocationInfo) {
         # The script, line and statement, with ~~~ under the part that failed.
-        Write-Host ($ErrorRecord.InvocationInfo.PositionMessage -replace '(?m)^', '  ') -ForegroundColor Yellow
+        $lines += @($ErrorRecord.InvocationInfo.PositionMessage -split '\r?\n' | ForEach-Object { "  $_" })
     }
     if ($ErrorRecord.ScriptStackTrace) {
-        Write-Host '  Call stack:' -ForegroundColor Yellow
-        Write-Host ($ErrorRecord.ScriptStackTrace -replace '(?m)^', '    ') -ForegroundColor Yellow
+        $lines += '  Call stack:'
+        $lines += @($ErrorRecord.ScriptStackTrace -split '\r?\n' | ForEach-Object { "    $_" })
+    }
+    $lines | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
+    Write-DebugLog $lines
+}
+
+# Veeam and Hyper-V given by IP address: PowerShell remoting needs the address in TrustedHosts and
+# an explicit login. Offers to set what is missing before the server runs, instead of failing.
+function Confirm-RemotingAccess {
+    param(
+        [object]$Target
+    )
+
+    $server = $Target.Server
+    if ($Target.Module -notin 'Veeam', 'HyperV' -or -not (Test-MoseIPAddress $server) -or -not [Environment]::UserInteractive) {
+        return
+    }
+    $trusted = Test-MoseTrustedHost $server
+    $secret = Get-MoseProperty $Target 'Secret'
+    if ($trusted -and $secret) {
+        return
+    }
+
+    Write-Host "$server is an IP address: PowerShell remoting only connects to it when it is in this computer's TrustedHosts and a login is given." -ForegroundColor Yellow
+    try {
+        $name = [System.Net.Dns]::GetHostEntry($server).HostName
+    }
+    catch {
+        $name = ''
+    }
+    if ($name -and $name -ne $server) {
+        Write-Host "Its name is $($name). Configured by that name instead (.\Start.ps1 -Configure), Kerberos needs neither and checks the server's identity." -ForegroundColor Yellow
+    }
+    if (-not $trusted) {
+        [void](Confirm-MoseTrustedHost $server)
+    }
+    if ($secret -or -not (Read-YesNo "Enter a Windows login for $server now? It is saved for the next reports")) {
+        return
+    }
+    $credential = Get-Credential -Message "$($MoseModules[$Target.Module].Label) $server, PowerShell remoting"
+    if (-not $credential) {
+        return
+    }
+    $secretName = "MOSE:$($Target.Module):$server"
+    Set-Secret -Vault $MoseVaultName -Name $secretName -Secret $credential
+    if ($Target.PSObject.Properties['Secret']) {
+        $Target.Secret = $secretName
+    }
+    else {
+        $Target | Add-Member -NotePropertyName Secret -NotePropertyValue $secretName
+    }
+    if ($configFromVault) {
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout')
+        Write-Host "Saved the login for $server in the client configuration." -ForegroundColor Green
     }
 }
 
@@ -735,10 +800,33 @@ function Add-ReportSection {
 
     if (-not $DryRun) {
         Write-Host "Collecting $title..." -ForegroundColor DarkGray
+        Write-DebugLog "[$(Get-Date -Format 'HH:mm:ss')] $title"
+        try {
+            Confirm-RemotingAccess $Section.Target
+        }
+        catch {
+            Write-Warning "Could not check PowerShell remoting to $($Section.Target.Server): $($_.Exception.Message)"
+        }
     }
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $status = 'OK'
+    $where = ''
     try {
-        $output = if ($DryRun) { @(Get-SampleMarkdown $Section.Target) } else { @(Invoke-Target $Section.Target | Where-Object { $_ -is [string] }) }
+        $output = if ($DryRun) {
+            @(Get-SampleMarkdown $Section.Target)
+        }
+        else {
+            # The module's warnings pass through here to reach the debug log too.
+            @(Invoke-Target $Section.Target 3>&1 | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.WarningRecord]) {
+                        Write-Warning $_.Message
+                        Write-DebugLog "  WARNING: $($_.Message)"
+                    }
+                    else {
+                        $_
+                    }
+                } | Where-Object { $_ -is [string] })
+        }
         $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
             -DropTitle:([bool]$MoseModules[$Section.Target.Module]['DropTitle'])
         if ($content) {
@@ -754,7 +842,9 @@ function Add-ReportSection {
         $where = if ($location) { " ($location)" } else { '' }
         Write-Warning "$title collection failed: $($_.Exception.Message)$where"
         $script:failedCount++
+        $status = 'FAILED'
         if ($DebugLog) {
+            Write-DebugLog "  FAILED: $($_.Exception.Message)$where"
             Write-ErrorDetail $_
         }
     }
@@ -762,22 +852,39 @@ function Add-ReportSection {
         # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
         [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
         if ($DebugLog) {
-            Write-Host "  $title took $($timer.Elapsed.ToString('m\:ss'))." -ForegroundColor DarkGray
+            $elapsed = $timer.Elapsed.ToString('m\:ss')
+            Write-Host "  $title took $elapsed." -ForegroundColor DarkGray
+            Write-DebugLog "  $status in $elapsed"
+            $debugSummary.Add(('{0,-6} {1,5}  {2}{3}' -f $status, $elapsed, $title, $where))
         }
     }
 }
 
+# A configuration passed by Configure.ps1 is not saved yet, so this script never saves it.
+$configFromVault = -not $Config
 $originalLocation = Get-Location
 $clientFileName = $config.Client -replace '[\\/:*?"<>|\s]', '_'
 $debugLogPath = ''
+$debugSummary = New-Object System.Collections.Generic.List[string]
 if ($DebugLog) {
     $path = Join-Path $PSScriptRoot "$($clientFileName)_Debug_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').log"
+    $version = 'unknown'
+    $versionPath = Join-Path $PSScriptRoot 'installed-version.txt'
+    if (Test-Path -LiteralPath $versionPath) {
+        $commit = "$(Get-Content -LiteralPath $versionPath -Raw)".Trim()
+        $version = $commit.Substring(0, [math]::Min(7, $commit.Length))
+    }
+    $header = @(
+        "MOSE debug log of the $($config.Client) report, started $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        "MOSE version $version, Windows PowerShell $($PSVersionTable.PSVersion) on $env:COMPUTERNAME (Windows $([Environment]::OSVersion.Version)), user $env:USERDOMAIN\$env:USERNAME"
+        ''
+    )
     try {
-        Start-Transcript -LiteralPath $path | Out-Null
+        Set-Content -LiteralPath $path -Value $header -Encoding UTF8 -ErrorAction Stop
         $debugLogPath = $path
     }
     catch {
-        Write-Warning "The debug log could not be started, the details are only shown here: $($_.Exception.Message)"
+        Write-Warning "The debug log could not be written, the details are only shown here: $($_.Exception.Message)"
     }
 }
 $failedCount = 0
@@ -823,8 +930,12 @@ try {
 }
 finally {
     Set-Location -LiteralPath $originalLocation
+    if ($debugSummary.Count -gt 0) {
+        $summary = @('', "Summary: $($debugSummary.Count) server(s), $failedCount failed") + @($debugSummary | ForEach-Object { "  $_" })
+        $summary | ForEach-Object { Write-Host $_ }
+        Write-DebugLog $summary
+    }
     if ($debugLogPath) {
-        Stop-Transcript | Out-Null
         Write-Host "Debug log written to $debugLogPath (it contains the client's server names and addresses)." -ForegroundColor Green
     }
 }

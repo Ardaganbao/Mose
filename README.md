@@ -77,6 +77,10 @@ Commvault tokens already in the vault (for example saved by an older report scri
 
 Enter a Hyper-V host, or a failover cluster name to report every node of the cluster. The report connects over PowerShell remoting (WinRM) as the current Windows user, or as another account when asked. On the hosts, PowerShell remoting must be enabled (`Enable-PSRemoting`), and an IP address or a host outside the domain must be in this computer's TrustedHosts. Hyper-V cannot see the free space inside a VM, so the VM disks show how full each virtual disk file is.
 
+### Veeam and Hyper-V by IP address
+
+PowerShell remoting only connects to an IP address that is in this computer's TrustedHosts, and only with a login given explicitly. With the server's name in the domain, Kerberos needs neither and checks the server's identity, so prefer the name. For an IP address, the configuration asks for the login, and both the configuration and the report offer to add the address to TrustedHosts. Windows asks for administrator rights for that. The report also shows the server's name when DNS knows it. By hand, as administrator: `Set-Item WSMan:\localhost\Client\TrustedHosts -Value '<IP>' -Concatenate -Force`. Add an address only on a network you trust: Windows does not check the identity of a server in TrustedHosts.
+
 ## Run the report
 
 ```powershell
@@ -96,7 +100,7 @@ cd $HOME\Mose
 - From the Script Manager, the report and the configuration open in their own window to ask for it. The output also appears at the bottom of the Script Manager.
 - The report is saved next to the scripts as `<Client>_Report_<yyyy-MM-dd>.md` and opened in Notepad.
 - `-DryRun` (or **Sample report (dry run)** in the Script Manager, or `P` in the report layout menu) writes `<Client>_Report_<yyyy-MM-dd>_sample.md` with sample data, to check the sections, titles and heading levels in a few seconds. No server, API or saved login is used. Without any server configured, it shows one sample server per module.
-- When a server fails, the report says `Collection failed: <error>` and the console shows the script and line where it stopped. `-DebugLog` (or **Report with debug log** in the Script Manager) runs the report and writes `<Client>_Debug_<yyyy-MM-dd_HHmmss>.log` next to the scripts: everything shown while it runs and, for each failed server, the error, the statement that failed and the call stack. Add `-SkipUpdate` where GitHub can't be reached. The log contains the client's server names and addresses, so git ignores it like the report.
+- When a server fails, the report says `Collection failed: <error>` and the console shows the script and line where it stopped. `-DebugLog` (or **Report with debug log** in the Script Manager) runs the report and writes `<Client>_Debug_<yyyy-MM-dd_HHmmss>.log` next to the scripts: for each server how long it took and its warnings and, when it failed, the error, the statement that failed and the call stack, then a summary. Add `-SkipUpdate` where GitHub can't be reached. The log contains the client's server names and addresses, so git ignores it like the report.
 - If GitHub can't be reached, the local scripts run and a warning is shown. On the first run in a folder there are no local scripts yet, so it stops instead.
 
 ## Report layout

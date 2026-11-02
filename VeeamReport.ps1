@@ -63,7 +63,12 @@ if ($RunOnVbrServer -or (-not (Get-Command Connect-VBRServer -ErrorAction Silent
         $remoteOutput = Invoke-Command @invokeParameters
     }
     catch {
-        throw "Could not run the Veeam report remotely on '$Server'. Verify PowerShell Remoting/WinRM is enabled and your account can access the Veeam server. $($_.Exception.Message)"
+        $hint = ''
+        $address = $null
+        if ([System.Net.IPAddress]::TryParse($Server, [ref]$address)) {
+            $hint = " An IP address must also be in this computer's TrustedHosts and needs a login (-RemotingCredential): Report.ps1 offers to set both, or use the server's name."
+        }
+        throw "Could not run the Veeam report remotely on '$Server'. Verify PowerShell Remoting/WinRM is enabled and your account can access the Veeam server.$hint $($_.Exception.Message)"
     }
 
     $Body = ($remoteOutput | Select-Object -Last 1)
