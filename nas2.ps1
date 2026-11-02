@@ -307,7 +307,7 @@ $Body += "|$($disk.name)|$($disk.status)|$($disk.model)|$(Convert-Bytes ($disk.s
  }
 }
 if($status-eq "normal" ){
-   $Body += "`n- :heavy_check_mark: All disk normal!`n"
+   $Body += "`n- :white_check_mark: All disk normal!`n"
 } else {
    $Body += "`n- :warning: Check the disk !`n"
 }

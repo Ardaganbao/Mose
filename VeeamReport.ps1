@@ -322,7 +322,7 @@ if ($null -ne $veeamLicInfo -and [datetime]::TryParse([string]$veeamLicInfo.Expi
     $expirationDescription = if ($veeamLicInfo.Type -eq 'Subscription') { 'License expires' } else { 'Support expires' }
 
     if ($daysleft -gt $warn) {
-        $licenseStatus = ':heavy_check_mark:'
+        $licenseStatus = ':white_check_mark:'
     }
     elseif ($daysleft -gt $crit) {
         $licenseStatus = ':warning:'
@@ -620,7 +620,7 @@ foreach ($BJob in $backupCopyJobs) {
             continue
         }
         if ($vm.HealthStatus -eq "Ok") {
-            $VmStatusCopy = ":heavy_check_mark: OK"
+            $VmStatusCopy = ":white_check_mark: OK"
         }
         else {
             $VmStatusCopy = ":x: $($vm.HealthStatus)"
@@ -631,7 +631,7 @@ foreach ($BJob in $backupCopyJobs) {
     $Bodycopy += "`n"
     $Bodycopy += "#### " + $bJob.Name + "`n"
     if ($bJob.LastState -eq "Stopped" -and $null -ne $Session) {
-        if ($Session.Result -eq "Success") { $status = ":heavy_check_mark:" }else { $status = ":x:" }
+        if ($Session.Result -eq "Success") { $status = ":white_check_mark:" }else { $status = ":x:" }
         $Bodycopy += "| Result |  |`n"
         $Bodycopy += "|----|----|`n"
         $Bodycopy += "| Status |  $($Session.Result) $status |`n"

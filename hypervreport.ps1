@@ -321,7 +321,7 @@ try {
         $Body += "|----|------|-------|--------|----------------|------------------|`n"
         foreach ($replication in $replications) {
             $health = switch ($replication.Health) {
-                'Normal' { ':heavy_check_mark: Normal' }
+                'Normal' { ':white_check_mark: Normal' }
                 'Warning' { ':warning: Warning' }
                 'Critical' { ':x: Critical' }
                 default { $replication.Health }

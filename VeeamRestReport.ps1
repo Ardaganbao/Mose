@@ -587,7 +587,7 @@ function Format-BackupCopyJob {
     # The worst result of the workers is the job's.
     $results = @($sessions | ForEach-Object { Get-VeeamResult $_ })
     $result = if ($results -match '(?i)fail|error') { 'Failed' } elseif ($results -match '(?i)warning') { 'Warning' } elseif ($results -match '(?i)success') { 'Success' } else { $results[0] }
-    $status = if ($result -match '(?i)success') { ':heavy_check_mark:' } else { ':x:' }
+    $status = if ($result -match '(?i)success') { ':white_check_mark:' } else { ':x:' }
     $starts = @($sessions | ForEach-Object { ConvertTo-LocalTime (Get-VeeamValue $_ 'creationTime') } | Where-Object { $_ } | Sort-Object)
     $ends = @($sessions | ForEach-Object { ConvertTo-LocalTime (Get-VeeamValue $_ 'endTime') } | Where-Object { $_ } | Sort-Object)
     $start = if ($starts.Count -gt 0) { $starts[0] } else { $null }
@@ -654,7 +654,7 @@ function Format-BackupCopyJob {
     $text += "|------|---------|---------|---------|`n"
     foreach ($task in $tasks) {
         $taskResult = Get-VeeamResult $task
-        $health = if ($taskResult -match '(?i)success') { ':heavy_check_mark: OK' } else { ":x: $taskResult" }
+        $health = if ($taskResult -match '(?i)success') { ':white_check_mark: OK' } else { ":x: $taskResult" }
         $count = if ($restorePoints.ContainsKey("$($task.name)")) { $restorePoints["$($task.name)"] } else { 'n/a' }
         $text += "| $($task.name) | $(Format-Time (Get-VeeamValue $task 'endTime', 'creationTime') 'yyyy-MM-dd HH:mm:ss') | $health | $count |`n"
     }
@@ -740,7 +740,7 @@ function Format-Repositories {
         $freeText = 'n/a'
         if ($capacity -and [double]$capacity -gt 0 -and $null -ne $free) {
             $percent = [math]::Round(100 * [double]$free / [double]$capacity)
-            $mark = if ($percent -lt 10) { ':x:' } elseif ($percent -lt 20) { ':warning:' } else { ':heavy_check_mark:' }
+            $mark = if ($percent -lt 10) { ':x:' } elseif ($percent -lt 20) { ':warning:' } else { ':white_check_mark:' }
             $freeText = "$percent % $mark"
         }
         $sizes = foreach ($value in $capacity, $free, $used) {
@@ -775,7 +775,7 @@ try {
         $expirationDate = ConvertTo-LocalTime $expires
         if ($expirationDate) {
             $daysLeft = ($expirationDate.Date - (Get-Date).Date).Days
-            $mark = if ($daysLeft -gt 45) { ':heavy_check_mark:' } elseif ($daysLeft -gt 15) { ':warning:' } else { ':no_entry:' }
+            $mark = if ($daysLeft -gt 45) { ':white_check_mark:' } elseif ($daysLeft -gt 15) { ':warning:' } else { ':no_entry:' }
             $Body += "- $mark Veeam $what in $daysLeft days ($($expirationDate.ToString('yyyy-MM-dd')))`n"
         }
         else {

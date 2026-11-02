@@ -504,7 +504,7 @@ function Get-SampleMarkdown {
 | Drive 1 | normal | ST4000VN006 | 4 TB | normal |
 | Drive 2 | normal | ST4000VN006 | 4 TB | normal |
 
-- :heavy_check_mark: All disk normal!
+- :white_check_mark: All disk normal!
 - NAS version : DSM 7.2.2
 
 | volume | status | Available | Used |
@@ -669,14 +669,14 @@ function Get-SampleMarkdown {
 ### Replica
 | VM | Mode | State | Health | Replica server | Last replication |
 |----|------|-------|--------|----------------|------------------|
-| SAMPLE-VM-01 | Primary | Replicating | :heavy_check_mark: Normal | hv-dr-01.sample.local | $((Get-Date).AddMinutes(-5)) |
+| SAMPLE-VM-01 | Primary | Replicating | :white_check_mark: Normal | hv-dr-01.sample.local | $((Get-Date).AddMinutes(-5)) |
 "@
         }
         { $_ -in 'Veeam', 'VeeamApi' } {
             @"
 ## Check Backup Veeam VM's:
 - Veeam version: 12.3
-- :heavy_check_mark: Veeam license expires in 200 days (2027-05-20)
+- :white_check_mark: Veeam license expires in 200 days (2027-05-20)
 
 ### Backup jobs
 
@@ -698,14 +698,14 @@ function Get-SampleMarkdown {
 #### Offsite copy (sample)
 | Result |  |
 |----|----|
-| Status |  Success :heavy_check_mark: |
+| Status |  Success :white_check_mark: |
 | Start | $(Get-Date -Format 'dd/MM/yyyy') 23:00:00 |
 | Duration |  00:12:30 |
 
 ##### Details
 | Name | Last Copy   | copy health | Number of RP |
 |------|-------------|-------------|--------------|
-| SAMPLE-VM-01 | $(Get-Date -Format 'dd/MM/yyyy') 23:12:30 | :heavy_check_mark: Ok | 7 |
+| SAMPLE-VM-01 | $(Get-Date -Format 'dd/MM/yyyy') 23:12:30 | :white_check_mark: Ok | 7 |
 
 ### SureBackup verification
 
@@ -727,7 +727,7 @@ function Get-SampleMarkdown {
 ### Repositories
 | Name | Type | Host | Path | Capacity | Free | Used | Free space |
 |------|------|------|------|----------|------|------|------------|
-| Default Backup Repository | WinLocal | veeam-01.sample.local | D:\Backup | 4,00 TB | 1,60 TB | 2,40 TB | 40 % :heavy_check_mark: |
+| Default Backup Repository | WinLocal | veeam-01.sample.local | D:\Backup | 4,00 TB | 1,60 TB | 2,40 TB | 40 % :white_check_mark: |
 "@
             }
         }
