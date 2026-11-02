@@ -255,7 +255,10 @@ function Invoke-VeeamApi {
                 throw (New-VeeamApiException -Message (Get-NoAnswerText $_.Exception) -InnerException $_.Exception)
             }
             $answer = if ($_.ErrorDetails) { "$($_.ErrorDetails.Message)" } else { '' }
-            throw "The Veeam REST API answered HTTP $status to $($uri.Substring($apiBase.Length)): $answer"
+            Write-ApiDump -Label "GET $($uri.Substring($apiBase.Length)) -> HTTP $status" -Data $answer
+            $exception = [System.Exception]::new("The Veeam REST API answered HTTP $status to $($uri.Substring($apiBase.Length)): $answer", $_.Exception)
+            $exception.Data['HttpStatus'] = $status
+            throw $exception
         }
     }
 }
@@ -264,7 +267,8 @@ function Invoke-VeeamApi {
 function Get-VeeamApiItems {
     param(
         [string]$Path,
-        [hashtable]$Query = @{}
+        [hashtable]$Query = @{},
+        [int]$MaxItems = 0
     )
 
     $limit = 200
@@ -280,7 +284,8 @@ function Get-VeeamApiItems {
         $skip += $items.Count
         # The server may return fewer items than asked per page: its total says when all came.
         $total = Get-VeeamValue (Get-VeeamValue $page 'pagination') 'total'
-        if ($items.Count -eq 0 -or ($null -ne $total -and $skip -ge [int]$total) -or ($null -eq $total -and $items.Count -lt $limit)) {
+        if ($items.Count -eq 0 -or ($null -ne $total -and $skip -ge [int]$total) -or ($null -eq $total -and $items.Count -lt $limit) -or
+            ($MaxItems -gt 0 -and $skip -ge $MaxItems)) {
             break
         }
     }
@@ -382,7 +387,34 @@ function Get-VeeamResult {
     return "$(Get-VeeamValue $Item 'state')"
 }
 
-# The last session of a job: by its ID in the job state, else the newest with the job's name.
+# The job sessions of the last 31 days, read once. They give the last session of a job when the
+# API doesn't give it by its ID (a backup copy job), and the SureBackup sessions, whose jobs some
+# Veeam versions don't list.
+$script:RecentSessions = $null
+function Get-RecentSessions {
+    if ($null -eq $script:RecentSessions) {
+        $since = (Get-Date).ToUniversalTime().AddDays(-31).ToString('yyyy-MM-ddTHH:mm:ssZ')
+        try {
+            $script:RecentSessions = @(Get-VeeamApiItems -Path '/api/v1/sessions' -Query @{ createdAfterFilter = $since } -MaxItems 5000)
+        }
+        catch {
+            Write-Warning "The Veeam sessions of the last 31 days are not available: $($_.Exception.Message)"
+            $script:RecentSessions = @()
+        }
+    }
+    $script:RecentSessions
+}
+
+function Get-NewestSession {
+    param(
+        [object[]]$Sessions
+    )
+
+    @($Sessions | Sort-Object -Property { ConvertTo-LocalTime (Get-VeeamValue $_ 'creationTime') } -Descending) | Select-Object -First 1
+}
+
+# The last session of a job: by its ID in the job state, else the newest of the job among the
+# recent sessions, else the newest with the job's name.
 function Get-LastJobSession {
     param(
         $JobState
@@ -390,24 +422,46 @@ function Get-LastJobSession {
 
     $sessionId = Get-VeeamValue $JobState 'sessionId', 'lastSessionId'
     if ($sessionId) {
-        return Invoke-VeeamApi -Path "/api/v1/sessions/$sessionId"
+        try {
+            return Invoke-VeeamApi -Path "/api/v1/sessions/$sessionId"
+        }
+        catch {
+            # Not given by its ID (seen for a backup copy job): looked for below.
+            if ($_.Exception.Data['HttpStatus'] -ne 404) {
+                throw
+            }
+        }
     }
     $jobId = Get-VeeamValue $JobState 'id'
-    $sessions = @(Get-VeeamData (Invoke-VeeamApi -Path '/api/v1/sessions' -Query @{ nameFilter = $JobState.name; limit = 50 }) |
-        Where-Object { -not $jobId -or (Get-VeeamValue $_ 'jobId') -eq $jobId } |
-        Sort-Object -Property { ConvertTo-LocalTime (Get-VeeamValue $_ 'creationTime') } -Descending)
-    if ($sessions.Count -gt 0) {
-        return $sessions[0]
+    $name = "$($JobState.name)"
+    $sessions = @(Get-RecentSessions | Where-Object { $jobId -and (Get-VeeamValue $_ 'jobId') -eq $jobId })
+    if ($sessions.Count -eq 0) {
+        $sessions = @(Get-RecentSessions | Where-Object { "$($_.name)" -eq $name })
     }
-    return $null
+    if ($sessions.Count -eq 0) {
+        $sessions = @(Get-VeeamData (Invoke-VeeamApi -Path '/api/v1/sessions' -Query @{ nameFilter = "*$name*"; limit = 50 }) | Where-Object {
+                $sessionJobId = Get-VeeamValue $_ 'jobId'
+                ($jobId -and $sessionJobId -eq $jobId) -or (-not $sessionJobId -and "$($_.name)" -eq $name)
+            })
+    }
+    return (Get-NewestSession $sessions)
 }
 
+# The VMs of a session; none when the API doesn't give them for this session.
 function Get-TaskSessions {
     param(
         $Session
     )
 
-    @(Get-VeeamApiItems -Path "/api/v1/sessions/$($Session.id)/taskSessions" | Sort-Object -Property name)
+    try {
+        @(Get-VeeamApiItems -Path "/api/v1/sessions/$($Session.id)/taskSessions" | Sort-Object -Property name)
+    }
+    catch {
+        if ($_.Exception.Data['HttpStatus'] -ne 404) {
+            throw
+        }
+        Write-Warning "The VMs of the Veeam session '$($Session.name)' are not available (HTTP 404)."
+    }
 }
 
 function Get-TaskSize {
@@ -470,6 +524,9 @@ function Format-BackupJob {
     $text += "|Warning|$warnings| End time   |$(Format-Time $end)| Data read  |$(Convert-Bytes (Get-TaskSizeSum $tasks $readSizeNames)) |Next run |$nextRunText|`n"
     $text += "|Error|$failed| Duration     |$(Format-Duration $null $start $end)| Transferred  |$(Convert-Bytes (Get-TaskSizeSum $tasks $transferredSizeNames)) |Job status |$(Get-VeeamValue $JobState 'status')|`n"
     $text += "`n##### Details`n"
+    if ($tasks.Count -eq 0) {
+        return $text + "No VM details were returned for this session.`n"
+    }
     $text += "| Name | Status | Start time | End time | Size | Read | Transferred | Duration |`n"
     $text += "|------|--------|------------|----------|------|------|-------------|----------|`n"
     foreach ($task in $tasks) {
@@ -533,6 +590,9 @@ function Format-BackupCopyJob {
     }
 
     $text += "`n##### Details`n"
+    if ($tasks.Count -eq 0) {
+        return $text + "No VM details were returned for this session.`n"
+    }
     $text += "| Name | Last Copy   | copy health | Number of RP |`n"
     $text += "|------|---------|---------|---------|`n"
     foreach ($task in $tasks) {
@@ -544,13 +604,17 @@ function Format-BackupCopyJob {
     return $text
 }
 
-function Format-SureBackupJob {
+# A SureBackup job: its last session and the verification of each VM. Without the job (not listed
+# by every Veeam version), only its session.
+function Format-SureBackupSession {
     param(
+        [string]$Name,
+        $Session,
         $JobState
     )
 
-    $text = "`n#### $($JobState.name)`n"
-    $session = Get-LastJobSession $JobState
+    $text = "`n#### $Name`n"
+    $session = $Session
     if ($null -eq $session) {
         return $text + "No SureBackup session found. Last result: $(Get-VeeamValue $JobState 'lastResult') ($(Get-VeeamValue $JobState 'status')).`n"
     }
@@ -570,6 +634,14 @@ function Format-SureBackupJob {
         $text += "| $($task.name) | $(Get-VeeamResult $task) |`n"
     }
     return $text
+}
+
+function Format-SureBackupJob {
+    param(
+        $JobState
+    )
+
+    Format-SureBackupSession -Name $JobState.name -Session (Get-LastJobSession $JobState) -JobState $JobState
 }
 
 function Format-Repositories {
@@ -673,7 +745,23 @@ try {
 
     $Body += "`n### SureBackup verification`n"
     if ($sureBackupJobs.Count -eq 0) {
-        $Body += "No SureBackup jobs are listed by the Veeam REST API.`n"
+        # Not listed with the jobs by every Veeam version: the newest SureBackup session of each job
+        # in the last 31 days.
+        $sureBackupSessions = @(Get-RecentSessions | Where-Object { "$(Get-VeeamValue $_ 'sessionType')" -match '(?i)sure' })
+        if ($sureBackupSessions.Count -eq 0) {
+            $Body += "No SureBackup job is listed, and no SureBackup session ran in the last 31 days.`n"
+            $sessionTypes = @(Get-RecentSessions | ForEach-Object { "$(Get-VeeamValue $_ 'sessionType')" } | Sort-Object -Unique) -join ', '
+            Write-Warning "No SureBackup session among the Veeam sessions of the last 31 days (their types: $sessionTypes)."
+        }
+        foreach ($group in @($sureBackupSessions | Group-Object -Property { "$($_.name)" } | Sort-Object -Property Name)) {
+            Write-VeeamReportProgress -Status "SureBackup sessions: $($group.Name)" -PercentComplete 90
+            try {
+                $Body += Format-SureBackupSession -Name $group.Name -Session (Get-NewestSession $group.Group)
+            }
+            catch {
+                $Body += "`n#### $($group.Name)`nCollection failed for this SureBackup job: $($_.Exception.Message)`n"
+            }
+        }
     }
     foreach ($job in $sureBackupJobs) {
         $done++
