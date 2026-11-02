@@ -821,18 +821,30 @@ function Get-ControllerInfo {
             }
             5 {
                 Write-Debug "ILO version 5"
-                $driveCollectionUri = $Storage.Drives.'@odata.id'
-                if ([string]::IsNullOrWhiteSpace([string]$driveCollectionUri)) {
-                    $driveCollectionUri = $Storage.Links.DiskDrives.'@odata.id'
+                # Standard Redfish lists the drives themselves (an array of links);
+                # HPE SmartStorage links to a collection of them.
+                if ($Storage.Drives -is [array]) {
+                    $driveUris = @($Storage.Drives | ForEach-Object { $_.'@odata.id' } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                    Write-StorageDebugSnapshot -Label "Drive URIs for storage '$($Storage.Id)'" -Data $driveUris
+                    $drives = @()
+                    if ($driveUris.Count -gt 0) {
+                        $drives = @(Get-RedfishData -server $server -endpoints $driveUris -session $session)
+                    }
                 }
-                if ([string]::IsNullOrWhiteSpace([string]$driveCollectionUri)) {
-                    $driveCollectionUri = $Storage.Links.PhysicalDrives.'@odata.id'
+                else {
+                    $driveCollectionUri = $Storage.Drives.'@odata.id'
+                    if ([string]::IsNullOrWhiteSpace([string]$driveCollectionUri)) {
+                        $driveCollectionUri = $Storage.Links.DiskDrives.'@odata.id'
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$driveCollectionUri)) {
+                        $driveCollectionUri = $Storage.Links.PhysicalDrives.'@odata.id'
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$driveCollectionUri)) {
+                        $driveCollectionUri = $Storage.links.PhysicalDrives.href
+                    }
+                    Write-StorageDebugSnapshot -Label "Drive collection URI for storage '$($Storage.Id)'" -Data $driveCollectionUri
+                    $drives = @(Get-RedfishCollectionResources -Server $server -CollectionUri $driveCollectionUri -Session $session)
                 }
-                if ([string]::IsNullOrWhiteSpace([string]$driveCollectionUri)) {
-                    $driveCollectionUri = $Storage.links.PhysicalDrives.href
-                }
-                Write-StorageDebugSnapshot -Label "Drive collection URI for storage '$($Storage.Id)'" -Data $driveCollectionUri
-                $drives = @(Get-RedfishCollectionResources -Server $server -CollectionUri $driveCollectionUri -Session $session)
                 Write-StorageDebugSnapshot -Label "Drive resources for storage '$($Storage.Id)'" -Data $drives
 
                 $volumeCollectionUri = $Storage.Volumes.'@odata.id'
@@ -847,13 +859,11 @@ function Get-ControllerInfo {
                 Write-StorageDebugSnapshot -Label "Volume resources for storage '$($Storage.Id)'" -Data $Volumes
 
                 $controllerCollectionUri = $Storage.Controllers.'@odata.id'
-                if ([string]::IsNullOrWhiteSpace([string]$controllerCollectionUri)) {
-                    $controllerCollectionUri = $Storage.StorageControllers.'@odata.id'
-                }
                 if (-not [string]::IsNullOrWhiteSpace([string]$controllerCollectionUri)) {
                     $Controllers = @(Get-RedfishCollectionResources -Server $server -CollectionUri $controllerCollectionUri -Session $session)
                 }
                 elseif ($null -ne $Storage.StorageControllers) {
+                    # Embedded in the storage resource: their links point back into it (Storage/DE00A000#/StorageControllers/0).
                     $Controllers = @($Storage.StorageControllers)
                 }
                 else {
@@ -904,6 +914,10 @@ function Get-ControllerInfo {
             $controllerId = $Controller.Id
             if ($null -eq $controllerId) {
                 $controllerId = $Controller.Index
+            }
+            if ($null -eq $controllerId) {
+                # Controllers embedded in a storage resource only have a MemberId.
+                $controllerId = $Controller.MemberId
             }
             $controllerModel = $Controller.Model
             if ([string]::IsNullOrWhiteSpace([string]$controllerModel)) {
