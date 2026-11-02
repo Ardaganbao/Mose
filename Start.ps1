@@ -46,6 +46,14 @@ param(
     [Parameter()]
     [switch]$DebugLog,
 
+    # A partial report: only the servers whose module or name contains one of these words, e.g. -Only veeam,sql.
+    [Parameter()]
+    [string[]]$Only,
+
+    # A partial report: pick its servers from the list of configured servers.
+    [Parameter()]
+    [switch]$Choose,
+
     # Set internally when the script restarts after all updates were downloaded.
     [Parameter(DontShow)]
     [switch]$UpdatesApplied,
@@ -291,6 +299,8 @@ elseif (-not $Quiet) {
     Write-Host "  .\Start.ps1 -Configure   Enter or change the client, its servers and credentials" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -DryRun      Preview the report with sample data, without contacting any server" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -DebugLog    Run the report and log where each failed server stopped" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Only veeam,sql  Run only the servers whose module or name contains these words" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Choose      Pick the servers of the report from a list" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -542,18 +552,32 @@ if ($Configure) {
     return
 }
 
+# A partial report: only some servers (-Only, -Choose).
+$reportParameters = @{}
+if ($Only) {
+    $reportParameters.Only = $Only
+}
+if ($Choose) {
+    $reportParameters.Choose = $true
+}
+
 if ($DryRun) {
-    & (Join-Path $PSScriptRoot "Report.ps1") -DryRun | Out-Null
+    & (Join-Path $PSScriptRoot "Report.ps1") -DryRun @reportParameters | Out-Null
     return
 }
 
 if ($DebugLog) {
-    & (Join-Path $PSScriptRoot "Report.ps1") -DebugLog | Out-Null
+    & (Join-Path $PSScriptRoot "Report.ps1") -DebugLog @reportParameters | Out-Null
     return
 }
 
 if ($Gui) {
     & (Join-Path $PSScriptRoot "Manager.ps1")
+    return
+}
+
+if ($reportParameters.Count -gt 0) {
+    & (Join-Path $PSScriptRoot "Report.ps1") @reportParameters
     return
 }
 

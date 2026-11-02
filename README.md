@@ -107,6 +107,8 @@ cd $HOME\Mose
 .\Start.ps1 -Configure   # update, then change the client configuration
 .\Start.ps1 -DryRun      # update, then preview the report with sample data
 .\Start.ps1 -DebugLog    # update, then run the report with a debug log
+.\Start.ps1 -Only veeam,sql  # update, then a partial report: only these servers
+.\Start.ps1 -Choose      # update, then a partial report of servers picked from a list
 .\Start.ps1 -Gui         # update, then open the Script Manager
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only
@@ -119,6 +121,7 @@ cd $HOME\Mose
 - The report is saved next to the scripts as `<Client>_Report_<yyyy-MM-dd>.md` and opened in Notepad.
 - Each server's module runs in a PowerShell process of its own, so what one changes for its process (such as accepting any certificate of its server, or the TLS versions) can't affect the others. Up to 4 servers run at once; `.\Report.ps1 -ThrottleLimit 8` runs more, `-ThrottleLimit 1` one after the other. Their messages and warnings appear in the report window with the server's name in front, and each server has its own progress bar. Questions (TrustedHosts, a login) come before the servers start, and the offer of a new login after a refused one once they all ended. The report keeps the layout order.
 - `-DryRun` (or **Sample report (dry run)** in the Script Manager, or `P` in the report layout menu) writes `<Client>_Report_<yyyy-MM-dd>_sample.md` with sample data, to check the sections, titles and heading levels in a few seconds. No server, API or saved login is used. Without any server configured, it shows one sample server per module.
+- A partial report runs only some servers: `-Only veeam,sql` takes those whose module, module name or server name contains one of the words (`veeam` for both Veeam modules, `sql`, an IP address; `*` and `?` also work), and `-Choose` (or **Report of some servers** in the Script Manager) lists the servers to pick them by number (`2,3` or `2-4`) or by words. It is written to `<Client>_Report_<yyyy-MM-dd>_part-veeam-sql.md` (or `_part.md`), with a line saying which servers it has, so the full report of the day stays as it was. It works with `-DebugLog` and `-DryRun` too.
 - When a server fails, the report says `Collection failed: <error>` and the console shows the script and line where it stopped. `-DebugLog` (or **Report with debug log** in the Script Manager) runs the report and writes `<Client>_Debug_<yyyy-MM-dd_HHmmss>.log` next to the scripts: for each server how long it took and its warnings and, when it failed, the error, the statement that failed and the call stack, then a summary. Add `-SkipUpdate` where GitHub can't be reached. The log contains the client's server names and addresses, so git ignores it like the report.
 - If GitHub can't be reached, the local scripts run and a warning is shown. On the first run in a folder there are no local scripts yet, so it stops instead.
 

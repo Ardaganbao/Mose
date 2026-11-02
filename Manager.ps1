@@ -252,6 +252,11 @@ Add-Button "Sample report (dry run)" {
 }
 
 # The report, with a debug log of where each failed server stopped and the call stack.
+# A partial report: the servers are picked in the report's window.
+Add-Button "Report of some servers" {
+    Add-Job -Label "Report of some servers" -Path (Join-Path $PSScriptRoot "Report.ps1") -Arguments "-Choose"
+}
+
 Add-Button "Report with debug log" {
     Add-Job -Label "Report with debug log" -Path (Join-Path $PSScriptRoot "Report.ps1") -Arguments "-DebugLog"
 }

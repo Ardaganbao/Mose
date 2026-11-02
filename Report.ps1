@@ -14,6 +14,12 @@ param(
     [ValidateRange(1, 16)]
     [int]$ThrottleLimit = 4,
 
+    [Parameter(HelpMessage = 'Only the servers whose module, module name or server name contains one of these words, e.g. veeam,sql or an IP address (* and ? also work).')]
+    [string[]]$Only,
+
+    [Parameter(HelpMessage = 'Pick the servers of the report from the list of configured servers.')]
+    [switch]$Choose,
+
     # Set by Configure.ps1 to preview a configuration it has not saved yet.
     [Parameter(DontShow)]
     [object]$Config,
@@ -27,6 +33,8 @@ param(
 # runs in a PowerShell process of its own, up to -ThrottleLimit (4) at once.
 # -DryRun writes <Client>_Report_<yyyy-MM-dd>_sample.md with sample data instead, to see the
 # layout quickly: no server, API or saved login is used.
+# -Only veeam,sql or -Choose make a partial report of some servers, written to
+# <Client>_Report_<yyyy-MM-dd>_part-veeam-sql.md (or _part.md) so the full report stays as it was.
 # -DebugLog also writes <Client>_Debug_<yyyy-MM-dd_HHmmss>.log: for each server how long it took and
 # its warnings and, when it failed, the error, the script line where it stopped and the call stack,
 # then a summary. It contains the client's server names and addresses, so git ignores it like the report.
@@ -1210,6 +1218,63 @@ function Add-ReportSection {
     }
 }
 
+# For -Only: a server matches a word by its module, its module's name or its own name. A plain word
+# matches anywhere in them (veeam, sql); * and ? work as in -like.
+function Test-TargetMatch {
+    param(
+        [object]$Target,
+        [string[]]$Words
+    )
+
+    $label = if ($MoseModules.Contains($Target.Module)) { $MoseModules[$Target.Module].Label } else { '' }
+    $names = @($Target.Module, $label, (Get-MoseTargetName $Target))
+    foreach ($word in $Words) {
+        $pattern = if ($word -match '[*?]') { $word } else { "*$word*" }
+        if (@($names | Where-Object { "$_" -like $pattern }).Count -gt 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# The servers of the report: all of them, those -Only names, or those picked from the list
+# (-Choose). Label says which in the report, Tag in its file name.
+function Select-ReportTargets {
+    param(
+        [object[]]$Targets
+    )
+
+    $words = @($Only | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($Choose) {
+        Write-Host ''
+        Write-Host "Servers of $($config.Client)" -ForegroundColor Cyan
+        for ($i = 0; $i -lt $Targets.Count; $i++) {
+            Write-Host ('  {0,2}. {1} {2}' -f ($i + 1), $MoseModules[$Targets[$i].Module].Label, (Get-MoseTargetName $Targets[$i]))
+        }
+        $answer = "$(Read-Host -Prompt 'Numbers (2,3 or 2-4) or words (veeam, sql), Enter for all')".Trim()
+        if ($answer -match '^[\d\s,-]+$') {
+            $numbers = foreach ($part in $answer -split ',') {
+                if ($part -match '^\s*(\d+)\s*-\s*(\d+)\s*$') {
+                    [int]$Matches[1]..[int]$Matches[2]
+                }
+                elseif ($part -match '^\s*(\d+)\s*$') {
+                    [int]$Matches[1]
+                }
+            }
+            $picked = @($numbers | Where-Object { $_ -ge 1 -and $_ -le $Targets.Count } | Sort-Object -Unique | ForEach-Object { $Targets[$_ - 1] })
+            $names = @($picked | ForEach-Object { "$($MoseModules[$_.Module].Label) $(Get-MoseTargetName $_)" })
+            return [pscustomobject]@{ Targets = $picked; Label = $names -join ', '; Tag = 'part' }
+        }
+        $words = @($answer -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    if ($words.Count -eq 0) {
+        return [pscustomobject]@{ Targets = $Targets; Label = ''; Tag = '' }
+    }
+    $picked = @($Targets | Where-Object { Test-TargetMatch $_ $words })
+    $tag = 'part-' + (@($words | ForEach-Object { $_.ToLowerInvariant() -replace '[^a-z0-9.]+', '' } | Where-Object { $_ }) -join '-')
+    return [pscustomobject]@{ Targets = $picked; Label = $words -join ', '; Tag = $tag }
+}
+
 # A configuration passed by Configure.ps1 is not saved yet, so this script never saves it.
 $configFromVault = -not $Config
 $originalLocation = Get-Location
@@ -1244,7 +1309,14 @@ try {
 
     $reportDate = Get-Date -Format 'yyyy-MM-dd'
     $layout = Get-MoseProperty $config 'Layout'
-    $sections = Get-MoseReportSections -Layout $layout -Targets @($config.Targets)
+    # A partial report (-Only, -Choose): only its servers are laid out, the configuration stays whole.
+    $selection = Select-ReportTargets -Targets @($config.Targets)
+    $reportTargets = [object[]]$selection.Targets
+    if ($reportTargets.Count -eq 0) {
+        $configured = @($config.Targets | ForEach-Object { "$($MoseModules[$_.Module].Label) $(Get-MoseTargetName $_)" }) -join ', '
+        throw "No configured server matches '$($selection.Label)'. The servers: $configured."
+    }
+    $sections = Get-MoseReportSections -Layout $layout -Targets $reportTargets
 
     $title = Get-MoseProperty $layout 'Title'
     if (-not $title) {
@@ -1252,6 +1324,9 @@ try {
     }
     $report = New-Object System.Collections.Generic.List[string]
     $report.Add("# $(Format-MoseTitle $title @{ Client = $config.Client; Date = $reportDate })")
+    if ($selection.Tag) {
+        $report.Add("> Partial report: only $($selection.Label).")
+    }
     if ($DryRun) {
         $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
     }
@@ -1304,12 +1379,22 @@ try {
         Add-ReportSection -Section $section -Level 2
     }
 
-    $suffix = if ($DryRun) { '_sample' } else { '' }
+    # A partial report gets a name of its own, so the full report of the day stays as it was.
+    $suffix = ''
+    if ($selection.Tag) {
+        $suffix += "_$($selection.Tag)"
+    }
+    if ($DryRun) {
+        $suffix += '_sample'
+    }
     $fileName = "$($clientFileName)_Report_$(Get-Date -Format 'yyyy-MM-dd')$suffix.md"
     $outputPath = Join-Path $PSScriptRoot $fileName
     $reportText = $report -join ([Environment]::NewLine + [Environment]::NewLine)
     Set-Content -LiteralPath $outputPath -Value $reportText -Encoding UTF8
     $kind = if ($DryRun) { 'sample report (dry run)' } else { 'report' }
+    if ($selection.Tag) {
+        $kind = "partial $kind"
+    }
     Write-Host "$($config.Client) $kind written to $outputPath" -ForegroundColor Green
     if ($failedCount -gt 0 -and -not $DebugLog) {
         Write-Host "$failedCount server(s) failed. To see where, with the call stack: .\Start.ps1 -DebugLog" -ForegroundColor Yellow
