@@ -10,6 +10,10 @@ param(
     [Parameter(HelpMessage = 'Also write a debug log: the script line where each failed server stopped, with the call stack.')]
     [switch]$DebugLog,
 
+    [Parameter(HelpMessage = 'Number of servers collected at the same time, each in a PowerShell process of its own (1: one after the other).')]
+    [ValidateRange(1, 16)]
+    [int]$ThrottleLimit = 4,
+
     # Set by Configure.ps1 to preview a configuration it has not saved yet.
     [Parameter(DontShow)]
     [object]$Config,
@@ -19,7 +23,8 @@ param(
 
 # Builds the report of the client configured on this computer (see Configure.ps1):
 # runs every module on its servers and writes <Client>_Report_<yyyy-MM-dd>.md,
-# with the section order, titles and groups of the client's report layout.
+# with the section order, titles and groups of the client's report layout. Each server's module
+# runs in a PowerShell process of its own, up to -ThrottleLimit (4) at once.
 # -DryRun writes <Client>_Report_<yyyy-MM-dd>_sample.md with sample data instead, to see the
 # layout quickly: no server, API or saved login is used.
 # -DebugLog also writes <Client>_Debug_<yyyy-MM-dd_HHmmss>.log: for each server how long it took and
@@ -89,27 +94,85 @@ function Get-TargetCredential {
     return $credential
 }
 
-# Runs the module of one server in its own PowerShell process (a background job) and returns its
-# Markdown. What a module changes for its whole process, like the certificate check or the TLS
-# versions, then cannot break the next ones. Its Write-Host lines, warnings and progress bars are
-# shown here as they come, and the warnings also go to the debug log.
-function Invoke-TargetProcess {
+# Each server's module runs in a PowerShell process of its own (a background job): what a module
+# changes for its whole process, like the certificate check or the TLS versions, cannot break the
+# others, and several servers run at once (-ThrottleLimit). A run is one server: its job, how much
+# of what the job wrote was shown, and the result.
+function New-TargetRun {
     param(
-        [object]$Target
+        [object]$Section,
+        [string]$Title,
+        [int]$Index
     )
 
-    # Logins are read here, where the vault is open. Commvault reads and saves its tokens itself.
-    $credential = $null
-    $vaultPassword = $null
-    if ($Target.Module -like 'Commvault*') {
-        # Kept by Open-MoseVault.
-        $vaultPassword = Get-Variable -Name MoseVaultPassword -ValueOnly -ErrorAction SilentlyContinue
+    [pscustomobject]@{
+        Section       = $Section
+        Target        = $Section.Target
+        Title         = $Title
+        # Progress bar Ids of its own, so the bars of servers running at once don't mix.
+        ProgressBase  = 10000 * ($Index + 1)
+        Job           = $null
+        Timer         = $null
+        Started       = $null
+        LastBarUpdate = [datetime]::MinValue
+        Read          = @{ Output = 0; Warning = 0; Information = 0; Progress = 0; Error = 0 }
+        Activities    = @{}
+        Output        = New-Object System.Collections.Generic.List[object]
+        Log           = New-Object System.Collections.Generic.List[string]
+        Lines         = @()
+        Error         = $null
+        Status        = ''
+        Elapsed       = ''
+        Where         = ''
     }
-    elseif ($Target.Module -notin 'Veeam', 'HyperV' -or (Get-MoseProperty $Target 'Secret')) {
-        $credential = Get-TargetCredential $Target
-    }
+}
 
-    $job = Start-Job -ArgumentList $PSScriptRoot, $Target, $credential, $config.Client, $CommvaultJobLookbackDays, $vaultPassword -ScriptBlock {
+# Starts the module of one server in its own process. Logins are read here, where the vault is
+# open; Commvault reads and saves its tokens itself, with the vault password asked at the start.
+function Start-TargetRun {
+    param(
+        [object]$Run
+    )
+
+    $Run.Started = Get-Date
+    $Run.Timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $Run.LastBarUpdate = [datetime]::MinValue
+    foreach ($stream in @($Run.Read.Keys)) {
+        $Run.Read[$stream] = 0
+    }
+    $Run.Activities.Clear()
+    $Run.Output.Clear()
+    $Run.Log.Clear()
+    $Run.Lines = @()
+    $Run.Error = $null
+    Write-Host "Collecting $($Run.Title)..." -ForegroundColor DarkGray
+
+    $target = $Run.Target
+    try {
+        $credential = $null
+        $vaultPassword = $null
+        if ($target.Module -like 'Commvault*') {
+            # Kept by Open-MoseVault.
+            $vaultPassword = Get-Variable -Name MoseVaultPassword -ValueOnly -ErrorAction SilentlyContinue
+        }
+        elseif ($target.Module -notin 'Veeam', 'HyperV' -or (Get-MoseProperty $target 'Secret')) {
+            $credential = Get-TargetCredential $target
+        }
+        $Run.Job = Start-TargetJob -Target $target -Credential $credential -VaultPassword $vaultPassword
+    }
+    catch {
+        $Run.Error = $_
+    }
+}
+
+function Start-TargetJob {
+    param(
+        [object]$Target,
+        [pscredential]$Credential,
+        [securestring]$VaultPassword
+    )
+
+    Start-Job -ArgumentList $PSScriptRoot, $Target, $Credential, $config.Client, $CommvaultJobLookbackDays, $VaultPassword -ScriptBlock {
         param([string]$Folder, [object]$Target, [pscredential]$Credential, [string]$Client, [int]$CommvaultJobLookbackDays, [securestring]$VaultPassword)
 
         $ErrorActionPreference = 'Stop'
@@ -134,89 +197,228 @@ function Invoke-TargetProcess {
             ConvertTo-MoseFailure $_
         }
     }
+}
 
-    $child = $job.ChildJobs[0]
-    $output = New-Object System.Collections.Generic.List[object]
-    $activities = @{}
-    $outputRead = 0; $warningRead = 0; $informationRead = 0; $progressRead = 0; $errorRead = 0
+# Shows what the module of a running server wrote since the last look: its Write-Host lines,
+# warnings and errors with the server's name in front, and its progress bars under one bar for the
+# server. Its warnings and errors also wait in $Run.Log for the debug log.
+function Receive-TargetRun {
+    param(
+        [object]$Run
+    )
+
+    $child = $Run.Job.ChildJobs[0]
+    $prefix = "[$($Run.Title)]"
+    if (((Get-Date) - $Run.LastBarUpdate).TotalSeconds -ge 1) {
+        Write-Progress -Id $Run.ProgressBase -Activity $Run.Title -Status "Running for $($Run.Timer.Elapsed.ToString('m\:ss'))"
+        $Run.LastBarUpdate = Get-Date
+    }
+
+    for ($i = $Run.Read.Output; $i -lt $child.Output.Count; $i++) {
+        $Run.Output.Add($child.Output[$i])
+    }
+    $Run.Read.Output = $i
+
+    for ($i = $Run.Read.Warning; $i -lt $child.Warning.Count; $i++) {
+        $message = $child.Warning[$i].Message
+        Write-Warning "$prefix $message"
+        $Run.Log.Add("  WARNING: $message")
+    }
+    $Run.Read.Warning = $i
+
+    for ($i = $Run.Read.Information; $i -lt $child.Information.Count; $i++) {
+        # Write-Host lines, with their colours, each on a line of its own.
+        $data = $child.Information[$i].MessageData
+        $hostParameters = @{ Object = "$prefix $data" }
+        if ($null -ne $data -and $data.PSObject.Properties['Message'] -and $data.PSObject.Properties['NoNewLine']) {
+            $hostParameters.Object = "$prefix $($data.Message)"
+            if ("$($data.ForegroundColor)") {
+                $hostParameters.ForegroundColor = "$($data.ForegroundColor)"
+            }
+            if ("$($data.BackgroundColor)") {
+                $hostParameters.BackgroundColor = "$($data.BackgroundColor)"
+            }
+        }
+        Write-Host @hostParameters
+    }
+    $Run.Read.Information = $i
+
+    for ($i = $Run.Read.Progress; $i -lt $child.Progress.Count; $i++) {
+        $record = $child.Progress[$i]
+        $id = $Run.ProgressBase + 1 + $record.ActivityId
+        $parentId = $Run.ProgressBase
+        if ($record.ParentActivityId -ge 0) {
+            $parentId = $Run.ProgressBase + 1 + $record.ParentActivityId
+        }
+        if ("$($record.RecordType)" -eq 'Completed') {
+            $Run.Activities.Remove($id)
+            Write-Progress -Id $id -ParentId $parentId -Activity $record.Activity -Completed
+            continue
+        }
+        $Run.Activities[$id] = $record.Activity
+        $progressParameters = @{
+            Id              = $id
+            ParentId        = $parentId
+            Activity        = $record.Activity
+            Status          = if ($record.StatusDescription) { $record.StatusDescription } else { 'Processing' }
+            PercentComplete = $record.PercentComplete
+        }
+        if ($record.CurrentOperation) {
+            $progressParameters.CurrentOperation = $record.CurrentOperation
+        }
+        Write-Progress @progressParameters
+    }
+    $Run.Read.Progress = $i
+
+    for ($i = $Run.Read.Error; $i -lt $child.Error.Count; $i++) {
+        # Errors a module wrote without stopping.
+        $message = "$($child.Error[$i])"
+        Write-Host "$prefix ERROR: $message" -ForegroundColor Red
+        $Run.Log.Add("  ERROR: $message")
+    }
+    $Run.Read.Error = $i
+}
+
+# After the module of a server ended: what it wrote last, its result (the Markdown, or the error
+# with where it happened), the line saying how it went, and its block in the debug log.
+function Complete-TargetRun {
+    param(
+        [object]$Run
+    )
+
+    if ($Run.Job) {
+        Receive-TargetRun $Run
+        $state = $Run.Job.State
+        $reason = $Run.Job.ChildJobs[0].JobStateInfo.Reason
+        foreach ($id in @($Run.Activities.Keys)) {
+            Write-Progress -Id $id -Activity $Run.Activities[$id] -Completed
+        }
+        $Run.Activities.Clear()
+        Write-Progress -Id $Run.ProgressBase -Activity $Run.Title -Completed
+        Remove-Job -Job $Run.Job -Force
+        $Run.Job = $null
+
+        try {
+            if ($state -eq 'Failed') {
+                throw "The PowerShell process of the module failed: $($reason.Message)"
+            }
+            $failure = @($Run.Output | Where-Object { $_.PSObject.Properties['MoseFailure'] }) | Select-Object -First 1
+            if ($failure) {
+                $exception = [System.Exception]::new($failure.Message)
+                $exception.Data['MoseLocation'] = $failure.Location
+                $exception.Data['MoseDetail'] = @($failure.Detail)
+                $exception.Data['RemotingAccessDenied'] = [bool]$failure.RemotingAccessDenied
+                throw $exception
+            }
+            $Run.Lines = @($Run.Output | Where-Object { $_ -is [string] })
+        }
+        catch {
+            $Run.Error = $_
+        }
+    }
+
+    $Run.Elapsed = $Run.Timer.Elapsed.ToString('m\:ss')
+    $Run.Where = ''
+    if ($Run.Error) {
+        $Run.Status = 'FAILED'
+        $location = $Run.Error.Exception.Data['MoseLocation']
+        if (-not $location) {
+            $location = Get-MoseErrorLocation $Run.Error
+        }
+        if ($location) {
+            $Run.Where = " ($location)"
+        }
+        Write-Warning "$($Run.Title) collection failed: $($Run.Error.Exception.Message)$($Run.Where)"
+    }
+    else {
+        $Run.Status = 'OK'
+        Write-Host "$($Run.Title) done in $($Run.Elapsed)." -ForegroundColor DarkGray
+    }
+
+    if ($DebugLog) {
+        # One block per server, though several ran at once.
+        Write-DebugLog "[$($Run.Started.ToString('HH:mm:ss'))] $($Run.Title)"
+        if ($Run.Log.Count -gt 0) {
+            Write-DebugLog $Run.Log.ToArray()
+        }
+        if ($Run.Error) {
+            Write-DebugLog "  FAILED: $($Run.Error.Exception.Message)$($Run.Where)"
+            Write-ErrorDetail $Run.Error
+        }
+        Write-DebugLog "  $($Run.Status) in $($Run.Elapsed)"
+    }
+}
+
+# Runs the modules of the servers, at most $ThrottleLimit at once, starting them in report order.
+function Invoke-TargetRuns {
+    param(
+        [object[]]$Runs
+    )
+
+    $waiting = New-Object 'System.Collections.Generic.Queue[object]'
+    foreach ($run in $Runs) {
+        $waiting.Enqueue($run)
+    }
+    $running = New-Object System.Collections.Generic.List[object]
     try {
-        do {
-            $finished = $job.State -notin 'NotStarted', 'Running'
-            for (; $outputRead -lt $child.Output.Count; $outputRead++) {
-                $output.Add($child.Output[$outputRead])
-            }
-            for (; $warningRead -lt $child.Warning.Count; $warningRead++) {
-                $message = $child.Warning[$warningRead].Message
-                Write-Warning $message
-                Write-DebugLog "  WARNING: $message"
-            }
-            for (; $informationRead -lt $child.Information.Count; $informationRead++) {
-                # Write-Host lines, with their colours.
-                $data = $child.Information[$informationRead].MessageData
-                if ($null -ne $data -and $data.PSObject.Properties['Message'] -and $data.PSObject.Properties['NoNewLine']) {
-                    $hostParameters = @{ Object = $data.Message; NoNewline = [bool]$data.NoNewLine }
-                    if ("$($data.ForegroundColor)") {
-                        $hostParameters.ForegroundColor = "$($data.ForegroundColor)"
-                    }
-                    if ("$($data.BackgroundColor)") {
-                        $hostParameters.BackgroundColor = "$($data.BackgroundColor)"
-                    }
-                    Write-Host @hostParameters
+        while ($waiting.Count -gt 0 -or $running.Count -gt 0) {
+            while ($waiting.Count -gt 0 -and $running.Count -lt $ThrottleLimit) {
+                $run = $waiting.Dequeue()
+                Start-TargetRun $run
+                if ($run.Job) {
+                    $running.Add($run)
                 }
                 else {
-                    Write-Host "$data"
+                    Complete-TargetRun $run
                 }
             }
-            for (; $progressRead -lt $child.Progress.Count; $progressRead++) {
-                $record = $child.Progress[$progressRead]
-                $progressParameters = @{ Id = $record.ActivityId; Activity = $record.Activity }
-                if ($record.ParentActivityId -ge 0) {
-                    $progressParameters.ParentId = $record.ParentActivityId
+
+            $index = 0
+            while ($index -lt $running.Count) {
+                $run = $running[$index]
+                if ($run.Job.State -in 'NotStarted', 'Running') {
+                    Receive-TargetRun $run
+                    $index++
                 }
-                if ("$($record.RecordType)" -eq 'Completed') {
-                    $activities.Remove($record.ActivityId)
-                    Write-Progress @progressParameters -Completed
-                    continue
+                else {
+                    Complete-TargetRun $run
+                    $running.RemoveAt($index)
                 }
-                $activities[$record.ActivityId] = $record.Activity
-                $progressParameters.Status = if ($record.StatusDescription) { $record.StatusDescription } else { 'Processing' }
-                $progressParameters.PercentComplete = $record.PercentComplete
-                if ($record.CurrentOperation) {
-                    $progressParameters.CurrentOperation = $record.CurrentOperation
-                }
-                Write-Progress @progressParameters
             }
-            for (; $errorRead -lt $child.Error.Count; $errorRead++) {
-                # Errors a module wrote without stopping.
-                $message = "$($child.Error[$errorRead])"
-                Write-Host "ERROR: $message" -ForegroundColor Red
-                Write-DebugLog "  ERROR: $message"
-            }
-            if (-not $finished) {
+            if ($running.Count -gt 0) {
                 Start-Sleep -Milliseconds 200
             }
-        } while (-not $finished)
-
-        if ($job.State -eq 'Failed') {
-            throw "The PowerShell process of the module failed: $($child.JobStateInfo.Reason.Message)"
         }
     }
     finally {
-        foreach ($id in @($activities.Keys)) {
-            Write-Progress -Id $id -Activity $activities[$id] -Completed
+        # Stopped with Ctrl+C: no module keeps running in the background.
+        foreach ($run in $running) {
+            if ($run.Job) {
+                Remove-Job -Job $run.Job -Force -ErrorAction SilentlyContinue
+                Write-Progress -Id $run.ProgressBase -Activity $run.Title -Completed
+            }
         }
-        Remove-Job -Job $job -Force
     }
+}
 
-    $failure = @($output | Where-Object { $_.PSObject.Properties['MoseFailure'] }) | Select-Object -First 1
-    if ($failure) {
-        $exception = [System.Exception]::new($failure.Message)
-        $exception.Data['MoseLocation'] = $failure.Location
-        $exception.Data['MoseDetail'] = @($failure.Detail)
-        $exception.Data['RemotingAccessDenied'] = [bool]$failure.RemotingAccessDenied
-        throw $exception
+# The servers of the report, in its order and without the hidden sections, as Add-ReportSection
+# writes them.
+function Get-TargetSections {
+    param(
+        [object[]]$Sections
+    )
+
+    foreach ($section in $Sections) {
+        if (-not (Test-ReportSectionShown $section)) {
+            continue
+        }
+        if ($section.Children.Count -gt 0) {
+            Get-TargetSections -Sections $section.Children
+        }
+        if ($section.Target) {
+            $section
+        }
     }
-    return @($output | Where-Object { $_ -is [string] })
 }
 
 # Sample Markdown of a module for -DryRun, with the headings and tables the module writes,
@@ -869,36 +1071,17 @@ function Add-ReportSection {
         return
     }
 
-    if (-not $DryRun) {
-        Write-Host "Collecting $title..." -ForegroundColor DarkGray
-        Write-DebugLog "[$(Get-Date -Format 'HH:mm:ss')] $title"
-        try {
-            Confirm-RemotingAccess $Section.Target
-        }
-        catch {
-            Write-Warning "Could not check PowerShell remoting to $($Section.Target.Server): $($_.Exception.Message)"
-        }
-    }
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    $status = 'OK'
-    $where = ''
+    # The servers were collected first (Invoke-TargetRuns); a dry run uses sample data.
     try {
-        $output = if ($DryRun) {
-            @(Get-SampleMarkdown $Section.Target)
+        if ($DryRun) {
+            $output = @(Get-SampleMarkdown $Section.Target)
+        }
+        elseif ($Section.Run.Error) {
+            $report.Add("Collection failed: $($Section.Run.Error.Exception.Message)")
+            return
         }
         else {
-            try {
-                Invoke-TargetProcess $Section.Target
-            }
-            catch {
-                # Veeam and Hyper-V mark a login refused over PowerShell remoting.
-                if (-not ($_.Exception.Data['RemotingAccessDenied'] -and (Request-RemotingLogin $Section.Target))) {
-                    throw
-                }
-                Write-Host "Trying $($Section.Target.Server) again with the new login..." -ForegroundColor DarkGray
-                Write-DebugLog '  Refused login, trying again with a new one'
-                Invoke-TargetProcess $Section.Target
-            }
+            $output = $Section.Run.Lines
         }
         $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
             -DropTitle:([bool]$MoseModules[$Section.Target.Module]['DropTitle'])
@@ -911,26 +1094,8 @@ function Add-ReportSection {
     }
     catch {
         $report.Add("Collection failed: $($_.Exception.Message)")
-        $location = $_.Exception.Data['MoseLocation']
-        if (-not $location) {
-            $location = Get-MoseErrorLocation $_
-        }
-        $where = if ($location) { " ($location)" } else { '' }
-        Write-Warning "$title collection failed: $($_.Exception.Message)$where"
+        Write-Warning "$($title): $($_.Exception.Message)"
         $script:failedCount++
-        $status = 'FAILED'
-        if ($DebugLog) {
-            Write-DebugLog "  FAILED: $($_.Exception.Message)$where"
-            Write-ErrorDetail $_
-        }
-    }
-    finally {
-        if ($DebugLog) {
-            $elapsed = $timer.Elapsed.ToString('m\:ss')
-            Write-Host "  $title took $elapsed." -ForegroundColor DarkGray
-            Write-DebugLog "  $status in $elapsed"
-            $debugSummary.Add(('{0,-6} {1,5}  {2}{3}' -f $status, $elapsed, $title, $where))
-        }
     }
 }
 
@@ -978,6 +1143,57 @@ try {
     $report.Add("# $(Format-MoseTitle $title @{ Client = $config.Client; Date = $reportDate })")
     if ($DryRun) {
         $report.Add('> Dry run: sample data, no server was contacted. Only the sections, titles and heading levels are real.')
+    }
+    else {
+        $runs = New-Object System.Collections.Generic.List[object]
+        # The lists are passed as they are: @() around one returned by a function fails in Windows
+        # PowerShell 5.1 ("Argument types do not match").
+        foreach ($section in @(Get-TargetSections -Sections $sections)) {
+            $runTitle = Get-MoseSectionTitle -Section $section -Client $config.Client -Date $reportDate
+            $run = New-TargetRun -Section $section -Title $runTitle -Index $runs.Count
+            $section | Add-Member -NotePropertyName Run -NotePropertyValue $run -Force
+            $runs.Add($run)
+        }
+
+        # The questions first (TrustedHosts, a login), so none comes while servers are running.
+        foreach ($run in $runs) {
+            try {
+                Confirm-RemotingAccess $run.Target
+            }
+            catch {
+                Write-Warning "Could not check PowerShell remoting to $($run.Target.Server): $($_.Exception.Message)"
+            }
+        }
+
+        $parallel = if ($ThrottleLimit -gt 1) { ", up to $ThrottleLimit at once" } else { '' }
+        Write-Host "Collecting $($runs.Count) server(s)$parallel..." -ForegroundColor DarkGray
+        Invoke-TargetRuns -Runs $runs.ToArray()
+
+        # A login refused by Veeam or Hyper-V: asked once every server ended, then that server runs again.
+        foreach ($run in $runs) {
+            if (-not ($run.Error -and $run.Error.Exception.Data['RemotingAccessDenied'])) {
+                continue
+            }
+            try {
+                $retry = Request-RemotingLogin $run.Target
+            }
+            catch {
+                Write-Warning "Could not ask for another login for $($run.Target.Server): $($_.Exception.Message)"
+                $retry = $false
+            }
+            if ($retry) {
+                Write-Host "Trying $($run.Target.Server) again with the new login..." -ForegroundColor DarkGray
+                Write-DebugLog "  Refused login, $($run.Title) runs again with a new one"
+                Invoke-TargetRuns -Runs @($run)
+            }
+        }
+
+        $failedCount = @($runs | Where-Object { $_.Error }).Count
+        if ($DebugLog) {
+            foreach ($run in $runs) {
+                $debugSummary.Add(('{0,-6} {1,5}  {2}{3}' -f $run.Status, $run.Elapsed, $run.Title, $run.Where))
+            }
+        }
     }
     foreach ($section in $sections) {
         Add-ReportSection -Section $section -Level 2
