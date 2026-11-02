@@ -2,7 +2,7 @@
 
 Monthly infrastructure reports (MOSE), kept up to date from GitHub.
 
-Each computer installs this folder once. Every run downloads only the scripts that changed on GitHub, then builds the report of the client configured on that computer. No more zip files to copy by hand.
+Each computer installs this folder once. Every run downloads only the scripts that changed on GitHub, then builds the report of the client configured on that computer. No more zip files to copy by hand, except on a computer that can't reach GitHub ([below](#a-computer-without-github-access)).
 
 It is built on the [powershellRepo](https://github.com/Ardaganbao/powershellRepo) updater (`Start.ps1`, `Manager.ps1`, `Update-FromGitHub.ps1`).
 
@@ -30,9 +30,9 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `vmwarereport.ps1` | Module: VMware vCenter. |
 | `hypervreport.ps1` | Module: Microsoft Hyper-V host or failover cluster, over PowerShell remoting. |
 | `VeeamReport.ps1` | Module: Veeam Backup & Replication, with the Veeam PowerShell module (on the Veeam server, or there over PowerShell remoting). |
-| `VeeamRestReport.ps1` | Module: Veeam Backup & Replication over its REST API. |
+| `VeeamRestReport.ps1` | Module: Veeam Backup & Replication over its REST API; SureBackup through `VeeamReport.ps1`. |
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
-| `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the last 16 days, from msdb). |
+| `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the last 16 days, from msdb), and the SQL Server version. |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
 
 ## Install on a computer
@@ -60,6 +60,10 @@ GitHub then needs a token that can read it: a fine-grained token with **Reposito
 ```
 
 The token is saved to `github-token.xml`, encrypted so only this Windows user on this computer can read it. When it expires, save a new one with `.\Start.ps1 -SaveToken -UpdateOnly`.
+
+### A computer without GitHub access
+
+Each release (`v1.0.0-rc.14`...) has a zip, `Mose-<version>.zip`, with every script and `installed-version.txt` naming its commit. Unzip it and copy the content of its `Mose` folder over the install folder (e.g. `C:\script`): the configuration, the vault and the reports stay as they are. Then run `.\Start.ps1 -SkipUpdate`, so it doesn't wait for GitHub; without it, the local scripts run after a warning that GitHub can't be reached.
 
 ## Configure the client
 
@@ -99,14 +103,20 @@ It connects as the Windows account running the report, or with a SQL Server logi
 
 ### Veeam over the REST API
 
-**Veeam Backup & Replication (REST API)** reads the same report from Veeam's REST API (Veeam 11 or later, HTTPS port 9419 of the Veeam server), with the repositories' free space too. It needs no Veeam console, no PowerShell remoting and no Windows administrator rights on the Veeam server: only port 9419 open from this computer, and a Veeam account with a role (Users and Roles in the Veeam console, e.g. Veeam Backup Viewer), entered as `DOMAIN\user`.
+**Veeam Backup & Replication (REST API)** reads the same report from Veeam's REST API (Veeam 11 or later, HTTPS port 9419 of the Veeam server), with the repositories' free space too. Except for SureBackup (below), it needs no Veeam console, no PowerShell remoting and no Windows administrator rights on the Veeam server: only port 9419 open from this computer, and a Veeam account with a role (Users and Roles in the Veeam console, e.g. Veeam Backup Viewer), entered as `DOMAIN\user`, or `SERVER\user` for an account of the Veeam server itself, `SERVER` being its computer name (not its IP address).
 
 Veeam 13's REST API gives no SureBackup jobs or runs, so the module reads SureBackup through the Veeam PowerShell module (`VeeamReport.ps1 -SureBackupOnly`), with the same Veeam account:
 
 - When the Veeam Backup & Replication Console of the same version is installed on this computer, through it, with no PowerShell remoting.
 - Otherwise on the Veeam server, over PowerShell remoting: `VeeamReport.ps1` is copied to a temporary file there, runs there (in PowerShell 7 when the Veeam module needs it, as Veeam 13's does), and its result comes back; the file is removed after. The Veeam account must then be allowed to use PowerShell remoting on the Veeam server: an administrator of it, or a member of its **Remote Management Users** group. An IP address also needs this computer's TrustedHosts, which the report offers to set ([Veeam and Hyper-V by IP address](#veeam-and-hyper-v-by-ip-address)).
 
-When neither works, the SureBackup section says why, e.g. that the Veeam server refused the login.
+A local account of the Veeam server, even in its Administrators group, is refused over remoting ("Access is denied"): Windows removes the administrator rights of local accounts that connect over the network, except the built-in Administrator. Either use a domain account in the server's Administrators group (better), or set `LocalAccountTokenFilterPolicy` to 1 on the Veeam server, which gives every local administrator account its rights over the network. As administrator on the Veeam server:
+
+```powershell
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'LocalAccountTokenFilterPolicy' -Value 1 -PropertyType DWord -Force
+```
+
+To check it from this computer, with the Veeam login of the report: `Enter-PSSession <Veeam server> -Credential SERVER\user`. When that opens a prompt on the Veeam server, the report reads SureBackup too. When neither way works, the SureBackup section says why, e.g. that the Veeam server refused the login.
 
 The REST API usually has Veeam's own certificate, which this computer doesn't trust. Give its SHA-1 thumbprint when adding the server, or leave it empty: the first report then shows the certificate's thumbprint and offers to trust it for this server, after you checked it on the Veeam server. When Veeam refuses the login, the report offers to enter another one. With `-DebugLog`, every API answer is written to `<Client>_Debug_<date>_VeeamApi_<server>.log`, to adapt the module to another Veeam version.
 
@@ -140,7 +150,7 @@ cd $HOME\Mose
 
 The report title is `#`. By default the report has these `##` sections, each with its servers or tables in `###` (`<Module> <server>`):
 
-| Section | Servers |
+| Section | Servers and tables |
 |---|---|
 | Infrastructure detail | The [inventory tables](#inventory-tables): Physical System, Virtual System, Software |
 | Hardware | iLO, iDRAC, BMC |
@@ -234,9 +244,11 @@ It renews every Commvault Cloud token saved in the vault.
 ## Add a module
 
 1. Add the script to `Modules` in `updater.config.json`.
-2. Add it to `$MoseModules` in `helper.ps1`, with `DropTitle = $true` if its Markdown starts with a heading that only names the module or server.
+2. Add it to `$MoseModules` in `helper.ps1`, with `DropTitle = $true` if its Markdown starts with a heading that only names the module or server, and `Uses` for the other scripts it runs.
 3. In `Configure.ps1` (`Read-Target`), ask for anything it needs besides the server and login.
-4. In `Report.ps1` (`Invoke-Target`), call it with those values.
+4. In `helper.ps1` (`Invoke-MoseModule`), call it with those values. It runs in a process of its own and returns its Markdown as strings.
+5. For the [inventory tables](#inventory-tables), it can also return objects with a `MoseInventory` property: `Machine` (Name, Brand, Model, Serial, ProductId, Bios, Source), `Service` (Machine or MachineSerial, Name, Version, and Product for the version check), `VM` (Name, Folder, Os, Host) or `Software` (Name, Version, Purpose). See `vmwarereport.ps1`.
+6. In `Report.ps1`, give it sample Markdown for `-DryRun` (`Get-SampleMarkdown`, and `Get-SampleInventory` for its objects), and add its word to the `-Only` completion in `Report.ps1` and `Start.ps1`.
 
 Commit and push to `main`: every computer picks up the change on its next run. Keep the flat folder layout: `Report.ps1` finds the modules next to it.
 
