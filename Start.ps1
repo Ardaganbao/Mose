@@ -47,7 +47,15 @@ param(
     [switch]$DebugLog,
 
     # A partial report: only the servers whose module or name contains one of these words, e.g. -Only veeam,sql.
+    # The modules: iLO, iDRAC, BMC, NAS, StorMagic, VMware, HyperV, Veeam (both Veeam modules), VeeamApi,
+    # Commvault (Cloud and on-premises), CommvaultCloud, CommvaultOnPrem, SQL; or a server name or IP address.
+    # Tab completes them (the list is the same in Report.ps1).
     [Parameter()]
+    [ArgumentCompleter({
+            param($commandName, $parameterName, $wordToComplete)
+            'iLO', 'iDRAC', 'BMC', 'NAS', 'StorMagic', 'VMware', 'HyperV', 'Veeam', 'VeeamApi', 'Commvault', 'CommvaultCloud', 'CommvaultOnPrem', 'SQL' |
+                Where-Object { $_ -like "$wordToComplete*" }
+        })]
     [string[]]$Only,
 
     # A partial report: pick its servers from the list of configured servers.
@@ -299,7 +307,9 @@ elseif (-not $Quiet) {
     Write-Host "  .\Start.ps1 -Configure   Enter or change the client, its servers and credentials" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -DryRun      Preview the report with sample data, without contacting any server" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -DebugLog    Run the report and log where each failed server stopped" -ForegroundColor DarkGray
-    Write-Host "  .\Start.ps1 -Only veeam,sql  Run only the servers whose module or name contains these words" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Only veeam,sql  Run only the servers whose module or name contains these words:" -ForegroundColor DarkGray
+    Write-Host "                           iLO, iDRAC, BMC, NAS, StorMagic, VMware, HyperV, Veeam, VeeamApi," -ForegroundColor DarkGray
+    Write-Host "                           Commvault, CommvaultCloud, CommvaultOnPrem, SQL, or a server name (Tab completes)" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Choose      Pick the servers of the report from a list" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray

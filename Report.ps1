@@ -14,7 +14,15 @@ param(
     [ValidateRange(1, 16)]
     [int]$ThrottleLimit = 4,
 
-    [Parameter(HelpMessage = 'Only the servers whose module, module name or server name contains one of these words, e.g. veeam,sql or an IP address (* and ? also work).')]
+    # The modules: iLO, iDRAC, BMC, NAS, StorMagic, VMware, HyperV, Veeam (both Veeam modules), VeeamApi,
+    # Commvault (Cloud and on-premises), CommvaultCloud, CommvaultOnPrem, SQL; or a server name or IP
+    # address. Tab completes them (the list is the same in Start.ps1).
+    [Parameter(HelpMessage = 'Only the servers whose module, module name or server name contains one of these words: iLO, iDRAC, BMC, NAS, StorMagic, VMware, HyperV, Veeam, VeeamApi, Commvault, CommvaultCloud, CommvaultOnPrem, SQL, or a server name or IP address (* and ? also work).')]
+    [ArgumentCompleter({
+            param($commandName, $parameterName, $wordToComplete)
+            'iLO', 'iDRAC', 'BMC', 'NAS', 'StorMagic', 'VMware', 'HyperV', 'Veeam', 'VeeamApi', 'Commvault', 'CommvaultCloud', 'CommvaultOnPrem', 'SQL' |
+                Where-Object { $_ -like "$wordToComplete*" }
+        })]
     [string[]]$Only,
 
     [Parameter(HelpMessage = 'Pick the servers of the report from the list of configured servers.')]
