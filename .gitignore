@@ -17,3 +17,6 @@ Renew-CommvaultToken.log
 # Reports contain client data and stay on the computer that made them.
 *_Report_*.md
 CommvaultReport_*.md
+
+# Debug logs of Report.ps1 -DebugLog and iloreport.ps1 -StorageDebugPath name the client's servers too.
+*_Debug_*.log

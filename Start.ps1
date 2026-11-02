@@ -42,6 +42,10 @@ param(
     [Parameter()]
     [switch]$DryRun,
 
+    # Run the report and also write a debug log: where each failed server stopped, with the call stack.
+    [Parameter()]
+    [switch]$DebugLog,
+
     # Set internally when the script restarts after all updates were downloaded.
     [Parameter(DontShow)]
     [switch]$UpdatesApplied,
@@ -276,6 +280,7 @@ elseif (-not $Quiet) {
     Write-Host ""
     Write-Host "  .\Start.ps1 -Configure   Enter or change the client, its servers and credentials" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -DryRun      Preview the report with sample data, without contacting any server" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -DebugLog    Run the report and log where each failed server stopped" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -490,6 +495,11 @@ if ($Configure) {
 
 if ($DryRun) {
     & (Join-Path $PSScriptRoot "Report.ps1") -DryRun | Out-Null
+    return
+}
+
+if ($DebugLog) {
+    & (Join-Path $PSScriptRoot "Report.ps1") -DebugLog | Out-Null
     return
 }
 

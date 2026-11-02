@@ -251,6 +251,11 @@ Add-Button "Sample report (dry run)" {
     Add-Job -Label "Sample report (dry run)" -Path (Join-Path $PSScriptRoot "Report.ps1") -Arguments "-DryRun"
 }
 
+# The report, with a debug log of where each failed server stopped and the call stack.
+Add-Button "Report with debug log" {
+    Add-Job -Label "Report with debug log" -Path (Join-Path $PSScriptRoot "Report.ps1") -Arguments "-DebugLog"
+}
+
 Add-Button "Check for updates" {
     Add-Job -Label "Check for updates" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-UpdateOnly" -ReloadList -Hidden
 }

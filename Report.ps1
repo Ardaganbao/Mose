@@ -7,6 +7,9 @@ param(
     [Parameter(HelpMessage = 'Preview the report with sample data, without contacting any server.')]
     [switch]$DryRun,
 
+    [Parameter(HelpMessage = 'Also write a debug log: the script line where each failed server stopped, with the call stack.')]
+    [switch]$DebugLog,
+
     # Set by Configure.ps1 to preview a configuration it has not saved yet.
     [Parameter(DontShow)]
     [object]$Config,
@@ -19,6 +22,9 @@ param(
 # with the section order, titles and groups of the client's report layout.
 # -DryRun writes <Client>_Report_<yyyy-MM-dd>_sample.md with sample data instead, to see the
 # layout quickly: no server, API or saved login is used.
+# -DebugLog also writes <Client>_Debug_<yyyy-MM-dd_HHmmss>.log: everything shown while the report
+# runs and, for each server that failed, the error, the script line where it stopped and the call
+# stack. It contains the client's server names and addresses, so git ignores it like the report.
 
 $ErrorActionPreference = 'Stop'
 # Start.ps1 hides progress bars to download faster; the modules show theirs.
@@ -670,6 +676,40 @@ function Test-ReportSectionShown {
     return @($Section.Children | Where-Object { Test-ReportSectionShown $_ }).Count -gt 0
 }
 
+# Where an error stopped a module, e.g. "iloreport.ps1 line 835".
+function Get-ErrorLocation {
+    param(
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $info = $ErrorRecord.InvocationInfo
+    if (-not $info -or -not $info.ScriptName) {
+        return ''
+    }
+    return "$(Split-Path -Leaf $info.ScriptName) line $($info.ScriptLineNumber)"
+}
+
+# For -DebugLog: the error, the statement that failed and the calls that led to it.
+function Write-ErrorDetail {
+    param(
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $exception = $ErrorRecord.Exception
+    Write-Host "  Error: $($exception.GetType().FullName): $($exception.Message)" -ForegroundColor Yellow
+    for ($inner = $exception.InnerException; $inner; $inner = $inner.InnerException) {
+        Write-Host "  Because: $($inner.GetType().FullName): $($inner.Message)" -ForegroundColor Yellow
+    }
+    if ($ErrorRecord.InvocationInfo) {
+        # The script, line and statement, with ~~~ under the part that failed.
+        Write-Host ($ErrorRecord.InvocationInfo.PositionMessage -replace '(?m)^', '  ') -ForegroundColor Yellow
+    }
+    if ($ErrorRecord.ScriptStackTrace) {
+        Write-Host '  Call stack:' -ForegroundColor Yellow
+        Write-Host ($ErrorRecord.ScriptStackTrace -replace '(?m)^', '    ') -ForegroundColor Yellow
+    }
+}
+
 function Add-ReportSection {
     param(
         [object]$Section,
@@ -696,6 +736,7 @@ function Add-ReportSection {
     if (-not $DryRun) {
         Write-Host "Collecting $title..." -ForegroundColor DarkGray
     }
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $output = if ($DryRun) { @(Get-SampleMarkdown $Section.Target) } else { @(Invoke-Target $Section.Target | Where-Object { $_ -is [string] }) }
         $content = Set-MarkdownHeadingLevel -Markdown ($output -join [Environment]::NewLine) -TopLevel ($Level + 1) `
@@ -709,15 +750,37 @@ function Add-ReportSection {
     }
     catch {
         $report.Add("Collection failed: $($_.Exception.Message)")
-        Write-Warning "$title collection failed: $($_.Exception.Message)"
+        $location = Get-ErrorLocation $_
+        $where = if ($location) { " ($location)" } else { '' }
+        Write-Warning "$title collection failed: $($_.Exception.Message)$where"
+        $script:failedCount++
+        if ($DebugLog) {
+            Write-ErrorDetail $_
+        }
     }
     finally {
         # Some modules allow only TLS 1.2, which would stop the next ones from using TLS 1.3.
         [Net.ServicePointManager]::SecurityProtocol = $securityProtocol
+        if ($DebugLog) {
+            Write-Host "  $title took $($timer.Elapsed.ToString('m\:ss'))." -ForegroundColor DarkGray
+        }
     }
 }
 
 $originalLocation = Get-Location
+$clientFileName = $config.Client -replace '[\\/:*?"<>|\s]', '_'
+$debugLogPath = ''
+if ($DebugLog) {
+    $path = Join-Path $PSScriptRoot "$($clientFileName)_Debug_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').log"
+    try {
+        Start-Transcript -LiteralPath $path | Out-Null
+        $debugLogPath = $path
+    }
+    catch {
+        Write-Warning "The debug log could not be started, the details are only shown here: $($_.Exception.Message)"
+    }
+}
+$failedCount = 0
 try {
     # The module scripts expect to run from their own folder.
     Set-Location -LiteralPath $PSScriptRoot
@@ -742,12 +805,15 @@ try {
     }
 
     $suffix = if ($DryRun) { '_sample' } else { '' }
-    $fileName = "$($config.Client -replace '[\\/:*?"<>|\s]', '_')_Report_$(Get-Date -Format 'yyyy-MM-dd')$suffix.md"
+    $fileName = "$($clientFileName)_Report_$(Get-Date -Format 'yyyy-MM-dd')$suffix.md"
     $outputPath = Join-Path $PSScriptRoot $fileName
     $reportText = $report -join ([Environment]::NewLine + [Environment]::NewLine)
     Set-Content -LiteralPath $outputPath -Value $reportText -Encoding UTF8
     $kind = if ($DryRun) { 'sample report (dry run)' } else { 'report' }
     Write-Host "$($config.Client) $kind written to $outputPath" -ForegroundColor Green
+    if ($failedCount -gt 0 -and -not $DebugLog) {
+        Write-Host "$failedCount server(s) failed. To see where, with the call stack: .\Start.ps1 -DebugLog" -ForegroundColor Yellow
+    }
 
     if (-not $NoOpen) {
         Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$outputPath`""
@@ -757,4 +823,8 @@ try {
 }
 finally {
     Set-Location -LiteralPath $originalLocation
+    if ($debugLogPath) {
+        Stop-Transcript | Out-Null
+        Write-Host "Debug log written to $debugLogPath (it contains the client's server names and addresses)." -ForegroundColor Green
+    }
 }

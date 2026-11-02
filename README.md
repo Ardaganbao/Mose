@@ -84,6 +84,7 @@ cd $HOME\Mose
 .\Start.ps1              # update, then run the report
 .\Start.ps1 -Configure   # update, then change the client configuration
 .\Start.ps1 -DryRun      # update, then preview the report with sample data
+.\Start.ps1 -DebugLog    # update, then run the report with a debug log
 .\Start.ps1 -Gui         # update, then open the Script Manager
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only
@@ -95,6 +96,7 @@ cd $HOME\Mose
 - From the Script Manager, the report and the configuration open in their own window to ask for it. The output also appears at the bottom of the Script Manager.
 - The report is saved next to the scripts as `<Client>_Report_<yyyy-MM-dd>.md` and opened in Notepad.
 - `-DryRun` (or **Sample report (dry run)** in the Script Manager, or `P` in the report layout menu) writes `<Client>_Report_<yyyy-MM-dd>_sample.md` with sample data, to check the sections, titles and heading levels in a few seconds. No server, API or saved login is used. Without any server configured, it shows one sample server per module.
+- When a server fails, the report says `Collection failed: <error>` and the console shows the script and line where it stopped. `-DebugLog` (or **Report with debug log** in the Script Manager) runs the report and writes `<Client>_Debug_<yyyy-MM-dd_HHmmss>.log` next to the scripts: everything shown while it runs and, for each failed server, the error, the statement that failed and the call stack. Add `-SkipUpdate` where GitHub can't be reached. The log contains the client's server names and addresses, so git ignores it like the report.
 - If GitHub can't be reached, the local scripts run and a warning is shown. On the first run in a folder there are no local scripts yet, so it stops instead.
 
 ## Report layout
