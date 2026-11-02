@@ -583,9 +583,154 @@ function Edit-ReportLayout {
     }
 }
 
+# Every login and token in the vault but the configuration, with the servers of this configuration
+# that use it.
+function Get-SavedSecretList {
+    foreach ($info in @(Get-SecretInfo -Vault $MoseVaultName | Where-Object { $_.Name -ne $MoseConfigSecretName } | Sort-Object -Property Name)) {
+        $name = $info.Name
+        $usedBy = @($targets | Where-Object { (Get-MoseProperty $_ 'Secret') -eq $name } |
+            ForEach-Object { "$($MoseModules[$_.Module].Label) $(Get-MoseTargetName $_)" })
+        [pscustomobject]@{ Name = $name; Type = "$($info.Type)"; UsedBy = $usedBy }
+    }
+}
+
+# What a secret holds, without its password or tokens.
+function Get-SavedSecretText {
+    param(
+        [object]$Secret
+    )
+
+    switch ($Secret.Type) {
+        'PSCredential' {
+            return "login $((Get-Secret -Vault $MoseVaultName -Name $Secret.Name).UserName)"
+        }
+        'Hashtable' {
+            $value = Get-Secret -Vault $MoseVaultName -Name $Secret.Name -AsPlainText
+            if ($value['Type'] -eq 'Cloud') {
+                return "Commvault Cloud tokens, ring $($value['Ring'])"
+            }
+            if ($value['Type'] -eq 'OnPrem') {
+                return "Commvault on-premises token, $($value['Server'])"
+            }
+            return 'table of values'
+        }
+        default {
+            return $Secret.Type
+        }
+    }
+}
+
+# Asks for the new values of a login or of Commvault tokens; Enter keeps each current value.
+function Edit-SavedSecret {
+    param(
+        [object]$Secret
+    )
+
+    if ($Secret.Type -eq 'PSCredential') {
+        $current = Get-Secret -Vault $MoseVaultName -Name $Secret.Name
+        $userName = Read-Answer 'User name (DOMAIN\user for a Windows account)' $current.UserName
+        $password = Read-Host -Prompt 'Password (Enter keeps the current one)' -AsSecureString
+        if ($password.Length -eq 0) {
+            $password = $current.Password
+        }
+        Set-Secret -Vault $MoseVaultName -Name $Secret.Name -Secret ([pscredential]::new($userName, $password))
+        Write-Host "Saved the login $userName in $($Secret.Name)." -ForegroundColor Green
+        return
+    }
+
+    $value = $null
+    if ($Secret.Type -eq 'Hashtable') {
+        $value = @{}
+        $stored = Get-Secret -Vault $MoseVaultName -Name $Secret.Name
+        foreach ($key in @($stored.Keys)) {
+            $value[$key] = $stored[$key]
+        }
+    }
+    if (-not $value -or $value['Type'] -notin 'Cloud', 'OnPrem') {
+        Write-Host "Only logins and Commvault tokens can be edited here; $($Secret.Name) can be removed." -ForegroundColor Yellow
+        return
+    }
+
+    $mode = if ($value['Type'] -eq 'Cloud') { 'Cloud' } else { 'on-premises' }
+    $accessToken = Read-Host -Prompt "Commvault $mode ACCESS token (Enter keeps the current one)" -AsSecureString
+    if ($accessToken.Length -gt 0) {
+        $value['AccessToken'] = $accessToken
+    }
+    if ($value['Type'] -eq 'Cloud') {
+        # A new pair of tokens starts a new chain; the old refresh token stops working.
+        $refreshToken = Read-Host -Prompt 'Commvault Cloud REFRESH token (Enter keeps the current one)' -AsSecureString
+        if ($refreshToken.Length -gt 0) {
+            $value['RefreshToken'] = $refreshToken
+        }
+        $value['Ring'] = Read-Answer 'Commvault Cloud ring ID (e.g. m108)' "$($value['Ring'])"
+    }
+    else {
+        $value['Server'] = Read-Answer 'Commvault Command Center URL (e.g. https://commvault.example.com)' "$($value['Server'])"
+    }
+    Set-Secret -Vault $MoseVaultName -Name $Secret.Name -Secret $value
+    Write-Host "Saved the Commvault $mode tokens in $($Secret.Name)." -ForegroundColor Green
+}
+
+# P in the menu: the saved logins and tokens, the servers that use each, and E to edit or D to
+# remove one. Removing waits for S, like the other changes, so Q keeps everything.
+function Edit-SavedSecrets {
+    while ($true) {
+        $secrets = @(Get-SavedSecretList)
+        Write-Host ""
+        Write-Host "Saved logins and tokens (vault $MoseVaultName)" -ForegroundColor Cyan
+        if ($secrets.Count -eq 0) {
+            Write-Host "  None."
+            return
+        }
+        for ($i = 0; $i -lt $secrets.Count; $i++) {
+            $secret = $secrets[$i]
+            Write-Host ("  {0,2}. {1,-32} {2}" -f ($i + 1), $secret.Name, (Get-SavedSecretText $secret))
+            if ($secretsToRemove -contains $secret.Name) {
+                Write-Host '      removed when you save (S)' -ForegroundColor Yellow
+            }
+            elseif ($secret.UsedBy.Count -gt 0) {
+                Write-Host "      used by $($secret.UsedBy -join ', ')" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host '      not used by any server' -ForegroundColor Yellow
+            }
+        }
+        Write-Host ""
+
+        $number = 0
+        if (-not [int]::TryParse((Read-Answer 'Number to edit or remove (Enter to go back)'), [ref]$number) -or
+            $number -lt 1 -or $number -gt $secrets.Count) {
+            return
+        }
+        $secret = $secrets[$number - 1]
+        $action = Read-Answer "$($secret.Name): E to edit, D to remove (or keep, if marked), Enter for neither"
+        if ($action -match '^[Ee]$') {
+            Edit-SavedSecret $secret
+        }
+        elseif ($action -match '^[Dd]$') {
+            if ($secretsToRemove -contains $secret.Name) {
+                [void]$secretsToRemove.Remove($secret.Name)
+                Write-Host "$($secret.Name) is kept." -ForegroundColor Green
+            }
+            elseif ($secret.UsedBy.Count -gt 0) {
+                Write-Host "$($secret.Name) is used by $($secret.UsedBy -join ', '). Remove those servers first (R), or edit the login (E)." -ForegroundColor Yellow
+            }
+            else {
+                if ($secret.Name -notlike 'MOSE:*') {
+                    Write-Host "$($secret.Name) was not saved by MOSE: another script on this computer may still use it." -ForegroundColor Yellow
+                }
+                if (Read-YesNo "Remove $($secret.Name) from the vault when you save?" $false) {
+                    $secretsToRemove.Add($secret.Name)
+                }
+            }
+        }
+    }
+}
+
 $config = Get-MoseConfig
 $client = ''
 $targets = New-Object System.Collections.Generic.List[object]
+$secretsToRemove = New-Object System.Collections.Generic.List[string]
 $layout = $null
 if ($config) {
     $client = $config.Client
@@ -616,11 +761,12 @@ while ($true) {
         Write-Host ("  {0,2}. {1,-28} {2}" -f ($i + 1), $MoseModules[$moduleKeys[$i]].Label, $configured)
     }
     $layoutText = if ($layout) { 'custom' } else { 'default' }
+    Write-Host "   P. Saved logins and tokens: edit or remove them, and the servers that use each"
     Write-Host "   L. Report layout ($layoutText): the report sections and the servers in each"
     Write-Host "   C. Client name: $client"
     Write-Host ""
 
-    $choice = Read-Answer 'Module number to add servers, R to remove one, L for the report layout, C for the client name, S to save, Q to quit without saving'
+    $choice = Read-Answer 'Module number to add servers, R to remove one, P for the saved logins, L for the report layout, C for the client name, S to save, Q to quit without saving'
     $number = 0
 
     if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $moduleKeys.Count) {
@@ -656,6 +802,9 @@ while ($true) {
             Write-Host "Removed $($MoseModules[$removed.Module].Label) $(Get-MoseTargetName $removed)" -ForegroundColor Green
         }
     }
+    elseif ($choice -match '^[Pp]$') {
+        Edit-SavedSecrets
+    }
     elseif ($choice -match '^[Ll]$') {
         Edit-ReportLayout
     }
@@ -665,6 +814,13 @@ while ($true) {
     elseif ($choice -match '^[Ss]$') {
         Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout
         Write-Host "Saved the configuration of $client ($($targets.Count) servers)." -ForegroundColor Green
+        foreach ($name in $secretsToRemove) {
+            # A server added since may have reused it.
+            if (@($targets | Where-Object { (Get-MoseProperty $_ 'Secret') -eq $name }).Count -eq 0) {
+                Remove-Secret -Vault $MoseVaultName -Name $name
+                Write-Host "Removed $name from the vault." -ForegroundColor Green
+            }
+        }
         return
     }
     elseif ($choice -match '^[Qq]$') {
