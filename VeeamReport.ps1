@@ -234,20 +234,19 @@ if (-not (Get-Command Connect-VBRServer -ErrorAction SilentlyContinue)) {
         Import-Module $availableModule.Path -ErrorAction Stop
     }
 }
-if (-not (Get-Command Connect-VBRServer -ErrorAction SilentlyContinue)) {
+# Veeam 9 and 10 have a snap-in instead of a module; PowerShell 7 has no snap-ins at all.
+if (-not (Get-Command Connect-VBRServer -ErrorAction SilentlyContinue) -and (Get-Command Get-PSSnapin -ErrorAction SilentlyContinue)) {
     $registeredSnapin = Get-PSSnapin -Registered -Name 'VeeamPSSnapin' -ErrorAction SilentlyContinue
     if ($registeredSnapin) {
         Add-PSSnapin VeeamPSSnapin -ErrorAction Stop
     }
 }
-        if (Get-Command Connect-VBRServer -ErrorAction SilentlyContinue) {
-                Write-Verbose "Connect-VBRServer is available"
-        }
-        else {
-            If ((Get-PSSnapin "*Veeam*" -ErrorAction SilentlyContinue) -eq $null) {
-                throw 'Unable to load Veeam PowerShell commands. Run this on a Veeam backup server with the Veeam console installed.'
-            }
-        }
+if (Get-Command Connect-VBRServer -ErrorAction SilentlyContinue) {
+    Write-Verbose "Connect-VBRServer is available"
+}
+else {
+    throw "The Veeam PowerShell commands are not on $env:COMPUTERNAME. Run this on the Veeam backup server, or give the Veeam server with -Server to run the report there over PowerShell remoting, or install the Veeam Backup & Replication Console here."
+}
 $ErrorActionPreference = 'Stop'
  
 
