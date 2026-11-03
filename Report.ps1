@@ -1517,18 +1517,25 @@ function Get-MachineSerial {
 }
 
 # The row of the Physical System table for a machine, by its serial number, else its name: a new
-# one when there is none yet (unless -NoNew).
+# one when there is none yet (unless -NoNew). A serial number also finds the machine that has it as
+# Product ID, and a Product ID the machine that has it as serial number: Dell's iDRAC gives the
+# board's serial number, with the service tag as Product ID, and VMware gives either as the serial
+# number. A Product ID never finds another one: HPE's is the part number of the model.
 function Get-MachineRow {
     param(
         [System.Collections.Generic.List[object]]$Rows,
         [string]$Name,
         [string]$Serial,
+        [string]$ProductId,
         [switch]$NoNew
     )
 
     $found = $null
     if ($Serial) {
-        $found = $Rows | Where-Object { $_.Serials -contains $Serial } | Select-Object -First 1
+        $found = $Rows | Where-Object { $_.Serials -contains $Serial -or $_.ProductIds -contains $Serial } | Select-Object -First 1
+    }
+    if (-not $found -and $ProductId) {
+        $found = $Rows | Where-Object { $_.Serials -contains $ProductId } | Select-Object -First 1
     }
     if (-not $found -and $Name) {
         $found = $Rows | Where-Object { $_.Names -contains $Name } | Select-Object -First 1
@@ -1538,11 +1545,12 @@ function Get-MachineRow {
             return $null
         }
         $found = [pscustomobject]@{
-            Names    = New-Object System.Collections.Generic.List[string]
-            Serials  = New-Object System.Collections.Generic.List[string]
-            Sources  = New-Object System.Collections.Generic.List[object]
-            Services = New-Object System.Collections.Generic.List[object]
-            Line     = $null
+            Names      = New-Object System.Collections.Generic.List[string]
+            Serials    = New-Object System.Collections.Generic.List[string]
+            ProductIds = New-Object System.Collections.Generic.List[string]
+            Sources    = New-Object System.Collections.Generic.List[object]
+            Services   = New-Object System.Collections.Generic.List[object]
+            Line       = $null
         }
         $Rows.Add($found)
     }
@@ -1551,6 +1559,9 @@ function Get-MachineRow {
     }
     if ($Serial -and $found.Serials -notcontains $Serial) {
         $found.Serials.Add($Serial)
+    }
+    if ($ProductId -and $found.ProductIds -notcontains $ProductId) {
+        $found.ProductIds.Add($ProductId)
     }
     return $found
 }
@@ -1572,11 +1583,12 @@ function Get-FirstValue {
 }
 
 # The Physical System table: a row per machine with the services it runs below each other, from
-# what the modules read of it, merged by serial number or name. The hardware is as the iLO, iDRAC or
-# BMC reads it, the name as VMware, Hyper-V or the NAS does. A StorMagic VSA is a VM: it goes to the
-# host that runs it (from the VMware VMs). The lines entered in the configuration (Configure.ps1, I)
-# give the warranty and what no module reads; a line that matches no machine is a machine of its
-# own, in a full report only.
+# what the modules read of it, merged by serial number (or Dell service tag) or name. The hardware is
+# as the iLO, iDRAC or BMC reads it, the name as VMware, Hyper-V or the NAS does. A StorMagic VSA is a
+# VM: it goes to the host that runs it (from the VMware VMs), with the name of its witness in the
+# first column. The witness gets a row of its own only when a module reads it or a configuration
+# line names it. The lines entered in the configuration (Configure.ps1, I) give the warranty and
+# what no module reads; a line that matches no machine is a machine of its own, in a full report only.
 function Get-PhysicalSystemMarkdown {
     param(
         [object[]]$Inventory,
@@ -1593,10 +1605,27 @@ function Get-PhysicalSystemMarkdown {
         }
     }
 
+    # The StorMagic witnesses, by the StorMagic server that read them with their VSAs, and the names of
+    # the machines the report knows otherwise.
+    $witnesses = @{}
+    foreach ($item in @($Inventory | Where-Object { $_.MoseInventory -eq 'Service' -and "$(Get-MoseProperty $_ 'Product')" -eq 'StorMagic' -and "$($_.Name)" -match 'NSH' })) {
+        $server = "$(Get-MoseProperty $item 'Server')"
+        $witness = Get-ShortMachineName "$(Get-MoseProperty $item 'Machine')"
+        if (-not $witnesses.ContainsKey($server)) {
+            $witnesses[$server] = New-Object System.Collections.Generic.List[string]
+        }
+        if ($witness -and $witnesses[$server] -notcontains $witness) {
+            $witnesses[$server].Add($witness)
+        }
+    }
+    $knownMachines = @(@($Inventory | Where-Object { $_.MoseInventory -eq 'Machine' } | ForEach-Object { Get-ShortMachineName "$($_.Name)" }) +
+        @($MachineLines | Where-Object { $_ } | ForEach-Object { Get-ShortMachineName "$(Get-MoseProperty $_ 'Name')" }) | Where-Object { $_ })
+
     $rows = New-Object System.Collections.Generic.List[object]
     foreach ($item in $Inventory) {
         if ($item.MoseInventory -eq 'Machine') {
-            $row = Get-MachineRow -Rows $rows -Name (Get-ShortMachineName "$($item.Name)") -Serial (Get-MachineSerial "$($item.Serial)")
+            $row = Get-MachineRow -Rows $rows -Name (Get-ShortMachineName "$($item.Name)") -Serial (Get-MachineSerial "$($item.Serial)") `
+                -ProductId (Get-MachineSerial "$(Get-MoseProperty $item 'ProductId')")
             $row.Sources.Add($item)
         }
         elseif ($item.MoseInventory -eq 'Service') {
@@ -1604,6 +1633,10 @@ function Get-PhysicalSystemMarkdown {
             $serial = Get-MachineSerial "$(Get-MoseProperty $item 'MachineSerial')"
             if (-not $serial -and $vmHosts.ContainsKey($name)) {
                 $name = $vmHosts[$name]
+            }
+            # A witness is shown on the line of its VSAs, unless the report knows it as a machine.
+            if ("$(Get-MoseProperty $item 'Product')" -eq 'StorMagic' -and "$($item.Name)" -match 'NSH' -and -not $serial -and $name -notin $knownMachines) {
+                continue
             }
             if (-not $name -and -not $serial) {
                 continue
@@ -1664,7 +1697,8 @@ function Get-PhysicalSystemMarkdown {
         $serial = Get-MachineSerial (Get-FirstValue $hardware 'Serial')
         $machineCells = @($name, $brand, (Get-FirstValue $hardware 'Model'), $serial, (Get-FirstValue $hardware 'ProductId'), (Get-FirstValue $hardware 'Bios'))
 
-        # Services, version, and the support of the service (StorMagic) or the warranty of the machine.
+        # Per service: what goes in the first column (a VSA's witness), its name, version, and the
+        # support of the service (StorMagic) or the warranty of the machine.
         $serviceName = Get-FirstValue @($line | Where-Object { $_ }) 'Service'
         $entries = New-Object System.Collections.Generic.List[object]
         for ($i = 0; $i -lt $row.Services.Count; $i++) {
@@ -1676,10 +1710,14 @@ function Get-PhysicalSystemMarkdown {
             if ($supportEnd) {
                 $support = ("$(Get-MoseProperty $service 'Support') - Expires $(Format-EndDate $supportEnd)" -replace '^ - ', '')
             }
-            $entries.Add(@($shownName, $versionCell, $support))
+            $label = ''
+            if ("$(Get-MoseProperty $service 'Product')" -eq 'StorMagic' -and "$($service.Name)" -notmatch 'NSH') {
+                $label = @($witnesses["$(Get-MoseProperty $service 'Server')"]) -join ', '
+            }
+            $entries.Add(@($label, $shownName, $versionCell, $support))
         }
         if ($entries.Count -eq 0 -and $serviceName) {
-            $entries.Add(@($serviceName, '', ''))
+            $entries.Add(@('', $serviceName, '', ''))
         }
         $warranty = ''
         $warrantyEnd = "$(Get-MoseProperty $line 'WarrantyEnd')"
@@ -1690,16 +1728,23 @@ function Get-PhysicalSystemMarkdown {
         if ($note) {
             $warranty = if ($warranty) { "$warranty ($note)" } else { $note }
         }
-        if ($entries.Count -eq 0 -or ($warranty -and $entries[0][2])) {
-            $entries.Insert(0, @('', '', ''))
+        if ($entries.Count -eq 0 -or ($warranty -and $entries[0][3])) {
+            $entries.Insert(0, @('', '', '', ''))
         }
         if ($warranty) {
-            $entries[0][2] = $warranty
+            $entries[0][3] = $warranty
         }
 
         for ($i = 0; $i -lt $entries.Count; $i++) {
-            $cells = if ($i -eq 0) { $machineCells } else { @('', '', '', '', '', '') }
-            $cells = @(@($cells) + @($entries[$i]) | ForEach-Object { Format-InventoryCell $_ })
+            $entry = $entries[$i]
+            if ($i -eq 0) {
+                # The first line has the machine's name in the first column: a witness goes with the service.
+                $cells = @($machineCells) + @($(if ($entry[0]) { "$($entry[1]) (witness $($entry[0]))" } else { $entry[1] }), $entry[2], $entry[3])
+            }
+            else {
+                $cells = @($entry[0], '', '', '', '', '') + @($entry[1], $entry[2], $entry[3])
+            }
+            $cells = @($cells | ForEach-Object { Format-InventoryCell $_ })
             $text += "`n| $($cells -join ' | ') |"
         }
     }
