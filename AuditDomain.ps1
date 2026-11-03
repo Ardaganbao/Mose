@@ -12,6 +12,9 @@ param(
 # (certificate, HTTPS, hosting, WordPress version).
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 runs in strict mode, where a property or regex group that is missing is an error; this
+# script expects $null for it. Off for this script only.
+Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
 $area = 'Domains and e-mail'
 $script:DnsServer = $DnsServer

@@ -17,6 +17,9 @@ param(
 # Graph PowerShell. The sign-in is kept in this PowerShell process only, and ended at the end.
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 runs in strict mode, where a property that a Graph answer lacks is an error; this script
+# expects $null for it. Off for this script only.
+Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
 $area = 'Microsoft 365'
 $staleSince = (Get-Date).AddDays(-$StaleDays)
