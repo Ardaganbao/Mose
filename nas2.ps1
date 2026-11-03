@@ -295,7 +295,7 @@ $json = $response.Content
 $info = (ConvertFrom-Json $json).data
 
 # For the report's Physical System table (Report.ps1): the NAS by its name, and whether its DSM is
-# the latest (DSM's own update check). Both are optional: an older DSM without them still reports.
+# the latest. Both are optional: an older DSM without them still reports.
 $nasName = ''
 $dsmUpToDate = $null
 $dsmLatest = ''
@@ -305,17 +305,17 @@ try {
     $response = Invoke-NasWebRequest -Uri "https://$($server):5001/webapi/$($networkApi.path)?api=SYNO.Core.Network&version=1&method=get&_sid=$($sid)" -Method Get -Stage 'Host name'
     $nasName = "$((ConvertFrom-Json $response.Content).data.server_name)"
   }
+  # DSM's own update check offers neither a new major DSM nor an update not out in its region yet:
+  # its "no update" proves nothing, an update it offers is one.
   $upgradeApi = $apiList.'SYNO.Core.Upgrade.Server'
   if ($upgradeApi) {
     $response = Invoke-NasWebRequest -Uri "https://$($server):5001/webapi/$($upgradeApi.path)?api=SYNO.Core.Upgrade.Server&version=$($upgradeApi.maxVersion)&method=check&_sid=$($sid)" -Method Get -Stage 'DSM update check'
     $check = (ConvertFrom-Json $response.Content).data
     # DSM 7 gives the update under "update", older versions at the top.
     $update = if ($check -and $check.PSObject.Properties['update']) { $check.update } else { $check }
-    if ($update -and $update.available -is [bool]) {
-      $dsmUpToDate = -not $update.available
-      if ($update.available) {
-        $dsmLatest = "$($update.version)"
-      }
+    if ($update -and $update.available -eq $true) {
+      $dsmUpToDate = $false
+      $dsmLatest = "$($update.version)"
     }
   }
 }
@@ -325,6 +325,29 @@ catch {
 if (-not $nasName) {
   $nasName = "$server"
 }
+# The latest DSM of this model, from synology.com's release notes, when this computer can reach it.
+try {
+  $releaseNotes = Invoke-RestMethod -Uri "https://www.synology.com/api/releaseNote/findChangeLog?identify=DSM&lang=en-us&model=$([System.Uri]::EscapeDataString("$($info.model)"))" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+  # A model synology.com does not know gets the page of no model ("DSM"), without versions.
+  if ("$($releaseNotes.info.dname)" -eq "$($info.model)") {
+    $modelLatest = "$(@($releaseNotes.info.versions.DSM.all_versions | Where-Object { $_.version -and -not $_.is_rc })[0].version)"
+    $installed = ConvertTo-DsmVersion "$($info.firmware_ver)"
+    $newest = ConvertTo-DsmVersion $modelLatest
+    if ($installed -and $newest) {
+      if ($installed.Build -lt $newest.Build -or ($installed.Build -eq $newest.Build -and $installed.Update -lt $newest.Update)) {
+        $dsmUpToDate = $false
+        $dsmLatest = $modelLatest
+      }
+      elseif ($null -eq $dsmUpToDate) {
+        $dsmUpToDate = $true
+      }
+    }
+  }
+}
+catch {
+  Write-Verbose "Latest DSM of the $($info.model) on synology.com: $($_.Exception.Message)"
+}
+$dsmMark = if ($dsmUpToDate -eq $true) { ':white_check_mark:' } elseif ($dsmUpToDate -eq $false) { ":warning: (latest $dsmLatest)" } else { ':question:' }
 [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'NAS'; Name = $nasName; Brand = 'Synology'; Model = "$($info.model)"; Serial = "$($info.serial)"; ProductId = ''; Bios = ''; Server = $server }
 [pscustomobject]@{ MoseInventory = 'Service'; Machine = $nasName; MachineSerial = "$($info.serial)"; Name = 'NAS storage'; Version = "$($info.firmware_ver)"; Product = 'DSM'
   UpToDate = $dsmUpToDate; Latest = $dsmLatest; Server = $server
@@ -349,7 +372,7 @@ if($status-eq "normal" ){
    $Body += "`n- :warning: Check the disk !`n"
 }
 
- $Body += "- NAS version : $($info.firmware_ver)`n"
+ $Body += "- NAS version : $($info.firmware_ver) $dsmMark`n"
 
 $Body += "`n| volume           | status                     |  Available             |  Used       |`n"
 $Body += "|------------------|----------------------------|--------------|---------|`n"

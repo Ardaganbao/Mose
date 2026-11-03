@@ -219,13 +219,13 @@ Three tables made from what the modules read, once every server ran. By default 
 | Virtual System | The VMs of the VMware vCenters, a table per VM folder (Production, Acceptance...), with their operating system as VMware Tools reports it, else as configured: `Windows 2019`, `Windows 11`, `CentOS 9`. vSphere's own cluster VMs (`vCLS`) are left out. |
 | Software | Veeam with its version (both Veeam modules), msSQL with the SQL Server version (`2019 CU20 (15.0.4298.1)`) and `(with Always On)` when it is on (SQL Server maintenance plans module), then the lines entered with `I` in the configuration. A line with the name of one read (`Veeam`, `msSQL`) gives its purpose, or a version to show instead. Servers with the same version share a line. |
 
-A version gets :white_check_mark: when it is the latest of its product, else :warning: with the latest one:
+A version gets :white_check_mark: when it is the latest of its product, :warning: with the latest one when it is not, :question: when the latest is not known (a product with no check, like Hyper-V's Windows):
 
 | Product | The latest version |
 |---|---|
 | ESXi | The newest build of the host's release (8.0...) on its newest update line (8.0.3), from [virten.net](https://www.virten.net/repo/esxiReleases.json) when this computer can reach it, else from `latest-versions.json`. A newer patch of an older update line (8.0 Update 2) is not the latest. |
-| DSM | DSM's own update check on the NAS, else `latest-versions.json`. |
-| StorMagic | `latest-versions.json`. |
+| DSM | The newest DSM of the NAS's model in [Synology's release notes](https://www.synology.com/releaseNote/DSM) when this computer can reach them, or an update DSM's own update check offers, else `latest-versions.json` for its major version. DSM's own "no update" proves nothing: it offers no new major DSM. The NAS section's `NAS version` gets the same mark, without `latest-versions.json`. |
+| StorMagic | `latest-versions.json`, or a newer version read on a server of the report. |
 
 `latest-versions.json` comes with MOSE (and its updates); `Updated` says when it was written. A warranty or support end gets :white_check_mark: more than 60 days before it, :warning: in the last 60 days, :x: once past.
 

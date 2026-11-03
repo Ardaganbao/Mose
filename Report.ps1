@@ -1262,10 +1262,12 @@ function Format-InventoryCell {
 
 # The latest version of each product the Physical System table checks: latest-versions.json,
 # shipped with MOSE (Updated says when it was written), and with -Online the ESXi builds virten.net
-# publishes, when this computer can reach it.
+# publishes, when this computer can reach it. StorMagic publishes no list of its versions, so a
+# newer one read on a server of the report ($Inventory) is the latest known.
 function Get-LatestVersions {
     param(
-        [switch]$Online
+        [switch]$Online,
+        [object[]]$Inventory
     )
 
     $latest = [pscustomobject]@{ Updated = ''; ESXi = @{}; StorMagic = ''; DSM = @{} }
@@ -1296,6 +1298,14 @@ function Get-LatestVersions {
         }
         catch {
             Write-Host "virten.net could not be reached, so the latest ESXi builds are those of latest-versions.json ($($latest.Updated)): $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    }
+    # 6.3.U1.52061: the build, at the end, grows with every version.
+    foreach ($service in @($Inventory | Where-Object { (Get-MoseProperty $_ 'Product') -eq 'StorMagic' })) {
+        $knownBuild = if ($latest.StorMagic -match '(\d+)$') { [int]$Matches[1] } else { 0 }
+        $version = "$(Get-MoseProperty $service 'Version')".Trim()
+        if ($version -match '(\d+)$' -and [int]$Matches[1] -gt $knownBuild) {
+            $latest.StorMagic = $version
         }
     }
     return $latest
@@ -1335,25 +1345,9 @@ function Get-EsxiLatestBuilds {
     return $latest
 }
 
-# "DSM 7.3.2-86009 Update 1": its major version, build and update.
-function ConvertTo-DsmVersion {
-    param(
-        [string]$Text
-    )
-
-    if ($Text -match '(\d+)\.\d+(?:\.\d+)?-(\d+)(?:\s+Update\s+(\d+))?') {
-        $update = 0
-        if ($Matches[3]) {
-            $update = [int]$Matches[3]
-        }
-        return [pscustomobject]@{ Major = [int]$Matches[1]; Build = [int]$Matches[2]; Update = $update }
-    }
-    return $null
-}
-
 # The mark after a service's version: :white_check_mark: when it is the latest of its product,
-# :warning: with the latest one when it is not, nothing when that is not known. The NAS asks DSM
-# itself (UpToDate); the others are compared with $Latest (Get-LatestVersions).
+# :warning: with the latest one when it is not, :question: when that is not known. The NAS module
+# finds it for its DSM (UpToDate); the others are compared with $Latest (Get-LatestVersions).
 function Get-VersionMark {
     param(
         [object]$Service,
@@ -1398,8 +1392,11 @@ function Get-VersionMark {
             }
         }
     }
-    if ($upToDate -isnot [bool]) {
+    if (-not $version.Trim()) {
         return ''
+    }
+    if ($upToDate -isnot [bool]) {
+        return ':question:'
     }
     if ($upToDate) {
         return ':white_check_mark:'
@@ -1924,7 +1921,7 @@ try {
     }
     # The latest ESXi builds are looked up online only for a real report with ESXi hosts.
     $esxiHosts = @($inventory | Where-Object { (Get-MoseProperty $_ 'Product') -eq 'ESXi' }).Count
-    $latest = Get-LatestVersions -Online:(-not $DryRun -and $esxiHosts -gt 0)
+    $latest = Get-LatestVersions -Online:(-not $DryRun -and $esxiHosts -gt 0) -Inventory $inventory.ToArray()
     $inventoryTables = Get-InventoryTables -Inventory $inventory.ToArray() -Latest $latest -Partial:([bool]$selection.Tag) `
         -SoftwareLines @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -MachineLines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
     foreach ($section in $sections) {

@@ -176,6 +176,23 @@ function Get-MoseProperty {
     }
 }
 
+# "DSM 7.3.2-86009 Update 1": its major version, build and update. For the NAS module and the
+# Physical System table (Report.ps1).
+function ConvertTo-DsmVersion {
+    param(
+        [string]$Text
+    )
+
+    if ($Text -match '(\d+)\.\d+(?:\.\d+)?-(\d+)(?:\s+Update\s+(\d+))?') {
+        $update = 0
+        if ($Matches[3]) {
+            $update = [int]$Matches[3]
+        }
+        return [pscustomobject]@{ Major = [int]$Matches[1]; Build = [int]$Matches[2]; Update = $update }
+    }
+    return $null
+}
+
 # Replaces the {Name} placeholders found in $Values; unknown ones are left as typed.
 function Format-MoseTitle {
     param(
