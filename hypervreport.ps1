@@ -26,6 +26,18 @@ $collectHost = {
     $processors = @(Get-CimInstance -ClassName Win32_Processor)
     $vmHost = Get-VMHost
 
+    # Windows Server 2025 Datacenter 24H2 (26100.4349): the release (DisplayVersion, ReleaseId up to
+    # 2019, none before 2016) and the build with its patch level (UBR).
+    $currentVersion = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+    $release = "$($currentVersion.DisplayVersion)"
+    if (-not $release) {
+        $release = "$($currentVersion.ReleaseId)"
+    }
+    $build = "$($os.BuildNumber)"
+    if ($currentVersion.UBR) {
+        $build += ".$($currentVersion.UBR)"
+    }
+
     # The guest OS name comes from the integration services (KVP), when they run.
     $guestOs = @{}
     foreach ($kvp in @(Get-CimInstance -Namespace root\virtualization\v2 -ClassName Msvm_KvpExchangeComponent -ErrorAction SilentlyContinue)) {
@@ -102,7 +114,8 @@ $collectHost = {
         CpuUsage         = [math]::Round(($processors | Measure-Object -Property LoadPercentage -Average).Average)
         MemoryTotal      = [long]$computer.TotalPhysicalMemory
         MemoryFree       = [long]$os.FreePhysicalMemory * 1KB
-        Os               = "$($os.Caption) ($($os.BuildNumber))"
+        Os               = ("$($os.Caption -replace '^Microsoft\s+', '') $release".Trim() + " ($build)")
+        OsBuild          = $build
         LastBoot         = $os.LastBootUpTime
         Serial           = $bios.SerialNumber
         BiosVersion      = $bios.SMBIOSBIOSVersion
@@ -335,7 +348,9 @@ try {
         [pscustomobject]@{ MoseInventory = 'Machine'; Source = 'HyperV'; Name = "$($hostItem.Name)"; Brand = "$($hostItem.Manufacturer)"; Model = "$($hostItem.Model)"
             Serial = "$($hostItem.Serial)"; ProductId = ''; Bios = "$($hostItem.BiosVersion)"; Server = $Server
         }
-        [pscustomobject]@{ MoseInventory = 'Service'; Machine = "$($hostItem.Name)"; MachineSerial = "$($hostItem.Serial)"; Name = 'Host Hyper-V'; Version = "$($hostItem.Os)"; Server = $Server }
+        [pscustomobject]@{ MoseInventory = 'Service'; Machine = "$($hostItem.Name)"; MachineSerial = "$($hostItem.Serial)"; Name = 'Host Hyper-V'; Version = "$($hostItem.Os)"
+            Product = 'Windows'; Build = "$($hostItem.OsBuild)"; Server = $Server
+        }
     }
 
     Write-Progress -Id 10 -Activity $activity -Status 'Report complete' -PercentComplete 100

@@ -629,7 +629,7 @@ function Get-SampleMarkdown {
 
 | Configuration    |                                         |
 |------------------|-----------------------------------------|
-| OS               | Microsoft Windows Server 2022 Datacenter (20348) |
+| OS               | Windows Server 2022 Datacenter 21H2 (20348.2849) |
 | Live migration   | True |
 | Virtual machines | 2 |
 
@@ -864,7 +864,9 @@ function Get-SampleInventory {
                 ProductId = ''; Bios = 'IVE1'; Server = $server
             }
             if ($Target.Module -eq 'HyperV') {
-                [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'HV-NODE-01'; MachineSerial = 'J300SAMP'; Name = 'Host Hyper-V'; Version = 'Microsoft Windows Server 2022 Datacenter (20348)'; Server = $server }
+                [pscustomobject]@{ MoseInventory = 'Service'; Machine = 'HV-NODE-01'; MachineSerial = 'J300SAMP'; Name = 'Host Hyper-V'; Version = 'Windows Server 2022 Datacenter 21H2 (20348.2849)'
+                    Product = 'Windows'; Build = '20348.2849'; Server = $server
+                }
             }
         }
         'VMware' {
@@ -1261,21 +1263,22 @@ function Format-InventoryCell {
 }
 
 # The latest version of each product the Physical System table checks: latest-versions.json,
-# shipped with MOSE (Updated says when it was written), and with -Online the ESXi builds virten.net
-# publishes, when this computer can reach it. StorMagic publishes no list of its versions, so a
-# newer one read on a server of the report ($Inventory) is the latest known.
+# shipped with MOSE (Updated says when it was written), and with -Online, for the products of the
+# report ($Inventory), the ESXi builds virten.net publishes and the Windows builds of Microsoft's
+# release information, when this computer can reach them. StorMagic publishes no list of its
+# versions, so a newer one read on a server of the report is the latest known.
 function Get-LatestVersions {
     param(
         [switch]$Online,
         [object[]]$Inventory
     )
 
-    $latest = [pscustomobject]@{ Updated = ''; ESXi = @{}; StorMagic = ''; DSM = @{} }
+    $latest = [pscustomobject]@{ Updated = ''; ESXi = @{}; StorMagic = ''; DSM = @{}; Windows = @{} }
     try {
         $file = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'latest-versions.json') -Raw -ErrorAction Stop | ConvertFrom-Json
         $latest.Updated = "$(Get-MoseProperty $file 'Updated')"
         $latest.StorMagic = "$(Get-MoseProperty $file 'StorMagic')"
-        foreach ($product in 'ESXi', 'DSM') {
+        foreach ($product in 'ESXi', 'DSM', 'Windows') {
             $releases = Get-MoseProperty $file $product
             $table = $latest.$product
             if ($releases) {
@@ -1288,7 +1291,8 @@ function Get-LatestVersions {
     catch {
         Write-Warning "latest-versions.json could not be read, so the versions are not checked: $($_.Exception.Message)"
     }
-    if ($Online) {
+    $products = @($Inventory | ForEach-Object { Get-MoseProperty $_ 'Product' })
+    if ($Online -and 'ESXi' -in $products) {
         try {
             $answer = Invoke-RestMethod -Uri 'https://www.virten.net/repo/esxiReleases.json' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
             $builds = Get-EsxiLatestBuilds -Releases @($answer.data.esxiReleases)
@@ -1298,6 +1302,18 @@ function Get-LatestVersions {
         }
         catch {
             Write-Host "virten.net could not be reached, so the latest ESXi builds are those of latest-versions.json ($($latest.Updated)): $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    }
+    if ($Online -and 'Windows' -in $products) {
+        try {
+            $page = Invoke-WebRequest -Uri 'https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info' -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+            $builds = Get-WindowsLatestBuilds -Html "$($page.Content)"
+            foreach ($release in $builds.Keys) {
+                $latest.Windows[$release] = $builds[$release]
+            }
+        }
+        catch {
+            Write-Host "Microsoft's Windows Server release information could not be reached, so the latest Windows builds are those of latest-versions.json ($($latest.Updated)): $($_.Exception.Message)" -ForegroundColor DarkGray
         }
     }
     # 6.3.U1.52061: the build, at the end, grows with every version.
@@ -1345,6 +1361,43 @@ function Get-EsxiLatestBuilds {
     return $latest
 }
 
+# The latest build of each Windows Server release (20348...) in Microsoft's release information
+# page: the newest of its update history (20348.5773), and the newest of its hotpatch calendar when
+# that is a hotpatch, which a hotpatched server runs instead in the months between two restarts.
+function Get-WindowsLatestBuilds {
+    param(
+        [string]$Html
+    )
+
+    $latest = @{}
+    $calendar = @{}
+    foreach ($table in [regex]::Matches($Html, '(?s)<table[^>]*\bid="(historyTable|HotpatchCalendar)_[^"]*"[^>]*>(.*?)</table>')) {
+        foreach ($row in [regex]::Matches($table.Groups[2].Value, '(?s)<tr[^>]*>(.*?)</tr>')) {
+            $cell = [regex]::Match($row.Groups[1].Value, '<td[^>]*>\s*(\d{4,5})\.(\d+)\s*</td>')
+            if (-not $cell.Success) {
+                continue
+            }
+            $release = $cell.Groups[1].Value
+            $patch = [int]$cell.Groups[2].Value
+            if ($table.Groups[1].Value -eq 'historyTable') {
+                if (-not $latest.ContainsKey($release) -or $patch -gt $latest[$release].Patch) {
+                    $latest[$release] = [pscustomobject]@{ Build = "$release.$patch"; Patch = $patch; Hotpatch = '' }
+                }
+            }
+            elseif (-not $calendar.ContainsKey($release) -or $patch -gt $calendar[$release].Patch) {
+                # A Hotpatch month, or a Baseline (Restart) one: the update every server gets.
+                $calendar[$release] = [pscustomobject]@{ Patch = $patch; IsHotpatch = $row.Groups[1].Value -match '>\s*Hotpatch\s*<' }
+            }
+        }
+    }
+    foreach ($release in $calendar.Keys) {
+        if ($latest.ContainsKey($release) -and $calendar[$release].IsHotpatch) {
+            $latest[$release].Hotpatch = "$release.$($calendar[$release].Patch)"
+        }
+    }
+    return $latest
+}
+
 # The mark after a service's version: :white_check_mark: when it is the latest of its product,
 # :warning: with the latest one when it is not, :question: when that is not known. The NAS module
 # finds it for its DSM (UpToDate); the others are compared with $Latest (Get-LatestVersions).
@@ -1376,6 +1429,20 @@ function Get-VersionMark {
                 if ($version -match '(\d+)$') {
                     $upToDate = [int]$Matches[1] -ge $newestBuild
                     $newer = $Latest.StorMagic
+                }
+            }
+        }
+        'Windows' {
+            # 20348.2849: the release (Windows Server 2022) and its patch level (UBR).
+            if ("$(Get-MoseProperty $Service 'Build')" -match '^(\d+)\.(\d+)$') {
+                $release = $Matches[1]
+                $patch = [int]$Matches[2]
+                $newest = $Latest.Windows[$release]
+                # latest-versions.json gives the build, Microsoft's page the build and the latest hotpatch.
+                $newestBuild = if ($newest -is [string]) { $newest } else { "$(Get-MoseProperty $newest 'Build')" }
+                if ($newestBuild -match '\.(\d+)$') {
+                    $upToDate = $patch -ge [int]$Matches[1] -or "$(Get-MoseProperty $newest 'Hotpatch')" -eq "$release.$patch"
+                    $newer = $newestBuild
                 }
             }
         }
@@ -1919,9 +1986,8 @@ try {
             }
         }
     }
-    # The latest ESXi builds are looked up online only for a real report with ESXi hosts.
-    $esxiHosts = @($inventory | Where-Object { (Get-MoseProperty $_ 'Product') -eq 'ESXi' }).Count
-    $latest = Get-LatestVersions -Online:(-not $DryRun -and $esxiHosts -gt 0) -Inventory $inventory.ToArray()
+    # The latest ESXi and Windows builds are looked up online only for a real report.
+    $latest = Get-LatestVersions -Online:(-not $DryRun) -Inventory $inventory.ToArray()
     $inventoryTables = Get-InventoryTables -Inventory $inventory.ToArray() -Latest $latest -Partial:([bool]$selection.Tag) `
         -SoftwareLines @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -MachineLines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
     foreach ($section in $sections) {

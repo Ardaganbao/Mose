@@ -23,7 +23,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
 | `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`) and reports shown in the Script Manager (`Scripts`). |
 | `helper.ps1` | SecretStore helpers, the client configuration and the list of modules. |
-| `latest-versions.json` | The latest ESXi, StorMagic and DSM versions, for the [Physical System](#inventory-tables) check marks when they can't be read online. |
+| `latest-versions.json` | The latest ESXi, StorMagic, DSM and Windows Server versions, for the [Physical System](#inventory-tables) check marks when they can't be read online. |
 | `iloreport.ps1`, `IDRAC.ps1`, `BMCreport.ps1` | Modules: HPE iLO, Dell iDRAC, Lenovo BMC. |
 | `nas2.ps1` | Module: Synology NAS. |
 | `stormagicHealth.ps1` | Module: StorMagic SvSAN. |
@@ -219,13 +219,14 @@ Three tables made from what the modules read, once every server ran. By default 
 | Virtual System | The VMs of the VMware vCenters, a table per VM folder (Production, Acceptance...), with their operating system as VMware Tools reports it, else as configured: `Windows 2019`, `Windows 11`, `CentOS 9`. vSphere's own cluster VMs (`vCLS`) are left out. |
 | Software | Veeam with its version (both Veeam modules), msSQL with the SQL Server version (`2019 CU20 (15.0.4298.1)`) and `(with Always On)` when it is on (SQL Server maintenance plans module), then the lines entered with `I` in the configuration. A line with the name of one read (`Veeam`, `msSQL`) gives its purpose, or a version to show instead. Servers with the same version share a line. |
 
-A version gets :white_check_mark: when it is the latest of its product, :warning: with the latest one when it is not, :question: when the latest is not known (a product with no check, like Hyper-V's Windows):
+A version gets :white_check_mark: when it is the latest of its product, :warning: with the latest one when it is not, :question: when the latest is not known (a release no list has, like Windows Server 2012 R2):
 
 | Product | The latest version |
 |---|---|
 | ESXi | The newest build of the host's release (8.0...) on its newest update line (8.0.3), from [virten.net](https://www.virten.net/repo/esxiReleases.json) when this computer can reach it, else from `latest-versions.json`. A newer patch of an older update line (8.0 Update 2) is not the latest. |
 | DSM | The newest DSM of the NAS's model in [Synology's release notes](https://www.synology.com/releaseNote/DSM) when this computer can reach them, or an update DSM's own update check offers, else `latest-versions.json` for its major version. DSM's own "no update" proves nothing: it offers no new major DSM. The NAS section's `NAS version` gets the same mark, without `latest-versions.json`. |
 | StorMagic | `latest-versions.json`, or a newer version read on a server of the report. |
+| Windows (Hyper-V hosts) | The newest cumulative update of the host's release (`20348.5773` for Windows Server 2022), from [Microsoft's release information](https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info) when this computer can reach it, else from `latest-versions.json`. A hotpatched server on the latest hotpatch is up to date too. The version shows the release name and the patch level: `Windows Server 2025 Datacenter 24H2 (26100.4349)`. |
 
 `latest-versions.json` comes with MOSE (and its updates); `Updated` says when it was written. A warranty or support end gets :white_check_mark: more than 60 days before it, :warning: in the last 60 days, :x: once past.
 
