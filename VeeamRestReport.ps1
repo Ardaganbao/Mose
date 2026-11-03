@@ -476,7 +476,8 @@ function Get-LastJobSession {
     return (Get-NewestSession $sessions)
 }
 
-# The VMs of a session; none when the API doesn't give them for this session.
+# The VMs of a session; none when the API doesn't give them for this session. An agent job's session
+# is refused with HTTP 500: the API cannot convert its type (AgentManagement).
 function Get-TaskSessions {
     param(
         $Session
@@ -486,11 +487,74 @@ function Get-TaskSessions {
         @(Get-VeeamApiItems -Path "/api/v1/sessions/$($Session.id)/taskSessions" | Sort-Object -Property name)
     }
     catch {
-        if ($_.Exception.Data['HttpStatus'] -ne 404) {
+        $status = $_.Exception.Data['HttpStatus']
+        if ($status -eq 500 -and $_.Exception.Message -match 'ESessionType') {
+            return
+        }
+        if ($status -ne 404) {
             throw
         }
         Write-Warning "The VMs of the Veeam session '$($Session.name)' are not available (HTTP 404)."
     }
+}
+
+# The machines (VMs or computers) in the backups of these jobs, else in the backups named after the job.
+function Get-JobBackupObjects {
+    param(
+        [object[]]$JobId,
+        [string]$JobName
+    )
+
+    $JobId = @($JobId | Where-Object { $_ })
+    $backups = @(Get-AllBackups)
+    $ownBackups = @($backups | Where-Object { (Get-VeeamValue $_ 'jobId') -in $JobId })
+    if ($ownBackups.Count -eq 0) {
+        $ownBackups = @($backups | Where-Object { "$($_.name)" -eq $JobName -or "$($_.name)".StartsWith("$JobName\") })
+    }
+    foreach ($backup in $ownBackups) {
+        Get-VeeamApiItems -Path "/api/v1/backups/$($backup.id)/objects"
+    }
+}
+
+# The computers of an agent job, whose sessions the API gives no details of: from its backups, with
+# their newest restore point. Empty when the job has no backup.
+function Format-BackupObjects {
+    param(
+        $JobState
+    )
+
+    try {
+        $objects = @(Get-JobBackupObjects -JobId (Get-VeeamValue $JobState 'id') -JobName $JobState.name)
+    }
+    catch {
+        Write-Warning "The backups of job '$($JobState.name)' are not available: $($_.Exception.Message)"
+        return ''
+    }
+    if ($objects.Count -eq 0) {
+        return ''
+    }
+    $text = "| Name | Last restore point | Number of RP |`n"
+    $text += "|------|--------------------|--------------|`n"
+    foreach ($group in @($objects | Group-Object -Property { "$($_.name)" } | Sort-Object -Property Name)) {
+        $times = @()
+        $counts = @()
+        foreach ($object in $group.Group) {
+            try {
+                $points = @(Get-VeeamApiItems -Path "/api/v1/backupObjects/$($object.id)/restorePoints" -MaxItems 1000)
+                $times += @($points | ForEach-Object { ConvertTo-LocalTime (Get-VeeamValue $_ 'creationTime') } | Where-Object { $_ })
+            }
+            catch {
+                $points = @()
+                Write-Verbose "Restore points of '$($object.name)' are not available: $($_.Exception.Message)"
+            }
+            $count = Get-VeeamValue $object 'restorePointsCount'
+            $counts += if ($null -ne $count) { [int]$count } elseif ($points.Count -gt 0) { $points.Count }
+        }
+        $last = if ($times.Count -gt 0) { ($times | Sort-Object)[-1].ToString('yyyy-MM-dd HH:mm:ss') } else { 'n/a' }
+        $count = if ($counts.Count -gt 0) { ($counts | Measure-Object -Sum).Sum } else { 'n/a' }
+        $text += "| $($group.Name) | $last | $count |`n"
+    }
+    return $text
 }
 
 function Get-TaskSize {
@@ -533,27 +597,48 @@ function Format-BackupJob {
     $text = "`n#### $($JobState.name)`n"
     $session = Get-LastJobSession $JobState
     if ($null -eq $session) {
-        return $text + "No backup session found.`n"
+        # The API lists no session of some agent jobs: their last run as the job's state gives it.
+        $text += "No backup session found."
+        $lastRun = Get-VeeamValue $JobState 'lastRun'
+        if ($lastRun) {
+            $text += " Last run: $(Format-Time $lastRun 'yyyy-MM-dd HH:mm:ss'), $(Get-VeeamValue $JobState 'lastResult')."
+        }
+        $text += " Job status: $(Get-VeeamValue $JobState 'status').`n"
+        $objects = Format-BackupObjects $JobState
+        if ($objects) {
+            $text += "`n##### Details`n" + $objects
+        }
+        return $text
     }
     $tasks = @(Get-TaskSessions $session)
     $results = @($tasks | ForEach-Object { Get-VeeamResult $_ })
     $succeeded = @($results | Where-Object { $_ -match '(?i)success' }).Count
     $warnings = @($results | Where-Object { $_ -match '(?i)warning' }).Count
     $failed = @($results | Where-Object { $_ -match '(?i)fail|error' }).Count
-    $processed = $succeeded + $warnings + $failed
+    $processedText = "$($succeeded + $warnings + $failed) of $($tasks.Count) VMs processed"
+    if ($tasks.Count -eq 0) {
+        # No details (an agent job): no count either, only the job's number of objects.
+        $succeeded = $warnings = $failed = 'n/a'
+        $objectsCount = Get-VeeamValue $JobState 'objectsCount'
+        $processedText = if ($null -ne $objectsCount) { "$objectsCount objects" } else { 'n/a' }
+    }
     $start = Get-VeeamValue $session 'creationTime'
     $end = Get-VeeamValue $session 'endTime'
     $repository = Get-VeeamValue $JobState 'repositoryName'
     $nextRun = Get-VeeamValue $JobState 'nextRun'
     $nextRunText = if ($nextRun) { Format-Time $nextRun 'yyyy-MM-dd HH:mm' } else { 'Not scheduled' }
 
-    $text += "|$(Format-Time $start 'yyyy-MM-dd HH:mm:ss')||||||$(Get-VeeamResult $session)|$processed of $($tasks.Count) VMs processed |`n"
+    $text += "|$(Format-Time $start 'yyyy-MM-dd HH:mm:ss')||||||$(Get-VeeamResult $session)|$processedText |`n"
     $text += "|---|---|---|-----|---|----|----|----|`n"
     $text += "|Success|$succeeded| Start time |$(Format-Time $start)| Total size |$(Convert-Bytes (Get-TaskSizeSum $tasks $totalSizeNames)) |Repository |$(if ($repository) { $repository } else { 'n/a' })|`n"
     $text += "|Warning|$warnings| End time   |$(Format-Time $end)| Data read  |$(Convert-Bytes (Get-TaskSizeSum $tasks $readSizeNames)) |Next run |$nextRunText|`n"
     $text += "|Error|$failed| Duration     |$(Format-Duration $null $start $end)| Transferred  |$(Convert-Bytes (Get-TaskSizeSum $tasks $transferredSizeNames)) |Job status |$(Get-VeeamValue $JobState 'status')|`n"
     $text += "`n##### Details`n"
     if ($tasks.Count -eq 0) {
+        $objects = Format-BackupObjects $JobState
+        if ($objects) {
+            return $text + "Veeam's REST API gives no details of this session (an agent job's): the computers of the job's backups.`n`n" + $objects
+        }
         return $text + "No VM details were returned for this session.`n"
     }
     $text += "| Name | Status | Start time | End time | Size | Read | Transferred | Duration |`n"
@@ -629,18 +714,10 @@ function Format-BackupCopyJob {
     # Restore points per VM, from the backups of the job or of its workers.
     $restorePoints = @{}
     try {
-        $jobIds = @(@(Get-VeeamValue $JobState 'id') + $workerIds | Where-Object { $_ })
-        $backups = @(Get-AllBackups)
-        $ownBackups = @($backups | Where-Object { (Get-VeeamValue $_ 'jobId') -in $jobIds })
-        if ($ownBackups.Count -eq 0) {
-            $ownBackups = @($backups | Where-Object { "$($_.name)" -eq $JobState.name -or "$($_.name)".StartsWith("$($JobState.name)\") })
-        }
-        foreach ($backup in $ownBackups) {
-            foreach ($object in @(Get-VeeamApiItems -Path "/api/v1/backups/$($backup.id)/objects")) {
-                $count = Get-VeeamValue $object 'restorePointsCount'
-                if ($null -ne $count) {
-                    $restorePoints["$($object.name)"] = [int]$count + [int]$restorePoints["$($object.name)"]
-                }
+        foreach ($object in @(Get-JobBackupObjects -JobId (@(Get-VeeamValue $JobState 'id') + $workerIds) -JobName $JobState.name)) {
+            $count = Get-VeeamValue $object 'restorePointsCount'
+            if ($null -ne $count) {
+                $restorePoints["$($object.name)"] = [int]$count + [int]$restorePoints["$($object.name)"]
             }
         }
     }
