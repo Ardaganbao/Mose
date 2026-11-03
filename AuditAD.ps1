@@ -16,6 +16,9 @@ param(
 # doesn't give them, and LAPS is only checked for its expiry dates.
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 runs in strict mode, where an attribute or regex group that is missing is an error; this
+# script expects $null for it. Off for this script only.
+Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
 Add-Type -AssemblyName System.DirectoryServices
 $area = 'Active Directory'
@@ -61,7 +64,16 @@ function Find-LdapObject {
             $object = [ordered]@{}
             foreach ($name in $Properties) {
                 $values = $result.Properties[$name.ToLower()]
-                $object[$name] = if ($values.Count -gt 1) { @($values) } elseif ($values.Count -eq 1) { $values[0] } else { $null }
+                # Assigned in each branch: "= if ..." would unroll a byte array (objectSid) into an object array.
+                if ($values.Count -gt 1) {
+                    $object[$name] = @($values)
+                }
+                elseif ($values.Count -eq 1) {
+                    $object[$name] = $values[0]
+                }
+                else {
+                    $object[$name] = $null
+                }
             }
             [pscustomobject]$object
         }
@@ -299,7 +311,7 @@ if ($enabledUsers.Count -gt 500) {
 ""
 Format-AuditTable -Rows ($activeComputers | Group-Object -Property { "$($_.Os)" } | Sort-Object -Property Count -Descending | ForEach-Object {
         $versions = @($_.Group | Group-Object -Property Version | Sort-Object -Property Name | ForEach-Object { "$($_.Name) ($($_.Count))" })
-        $supports = @($_.Group | ForEach-Object { $_.Support } | Where-Object { $_ } | Sort-Object -Property End)
+        $supports = @($_.Group | ForEach-Object { $_.Support } | Where-Object { $_ -and $_.End } | Sort-Object -Property End)
         [pscustomobject]@{ Os = $(if ($_.Name) { $_.Name } else { 'unknown' }); Count = $_.Count; Versions = $versions; Support = $(if ($supports.Count) { Format-WindowsSupport $supports[0] }) }
     }) -Columns 'Windows=Os', 'Count', 'Versions', 'Support (earliest end)=Support'
 ""
@@ -382,14 +394,20 @@ if ($endedComputers.Count -gt 0) {
 }
 $endingComputers = @($activeComputers | Where-Object { $_.Support -and $_.Support.Status -eq 'Ending' })
 if ($endingComputers.Count -gt 0) {
-    New-AuditFinding -Severity Medium -Area $area -Finding "$($endingComputers.Count) computers run a Windows whose support ends within a year: $(($endingComputers | Select-Object -First 30 | ForEach-Object { "$($_.Name) ($($_.Os) $($_.Version), $($_.Support.End.ToString('yyyy-MM-dd')))" }) -join ', ')." -Recommendation 'Plan their update or replacement.'
+    New-AuditFinding -Severity Medium -Area $area -Finding "$($endingComputers.Count) computers run a Windows whose support ends soon: $(($endingComputers | Select-Object -First 30 | ForEach-Object { "$($_.Name) ($($_.Os) $($_.Version), $($_.Support.End.ToString('yyyy-MM-dd')))" }) -join ', ')$(if ($endingComputers.Count -gt 30) { ', ...' })." -Recommendation 'Plan their update (Windows 11 feature update) or replacement.'
+}
+$unknownVersions = @($activeComputers | Where-Object { $_.Support -and $_.Support.Status -eq 'Unknown' })
+if ($unknownVersions.Count -gt 0) {
+    New-AuditFinding -Severity Info -Area $area -Finding "$($unknownVersions.Count) computers run a Windows 11 version this audit has no end of support for ($(($unknownVersions | Group-Object -Property Version | ForEach-Object { "$($_.Name): $($_.Count)" }) -join ', ')): an Insider or a newer build." -Recommendation 'Check that they run a released version; add its dates to $windowsSupportEnds in AuditCommon.ps1.'
 }
 if ($staleComputers.Count -gt 0) {
     New-AuditFinding -Severity Low -Area $area -Finding "$($staleComputers.Count) enabled computer accounts not used for $StaleDays days." -Recommendation 'Disable, then delete, the accounts of computers that are gone.'
 }
-$withoutLaps = @($activeComputers | Where-Object { -not $_.Laps -and $_.Name -notin @($controllers | ForEach-Object { $_.Name }) })
-if ($withoutLaps.Count -gt 0 -and $activeComputers.Count -gt 0) {
-    New-AuditFinding -Severity Medium -Area $area -Finding "$($withoutLaps.Count) of $($activeComputers.Count) computers in use have no LAPS: their local administrator passwords are probably the same everywhere." -Recommendation 'Turn on Windows LAPS by group policy, so that each computer gets its own local administrator password.'
+# LAPS is for Windows computers other than the domain controllers (a NAS joined to the domain has none).
+$lapsComputers = @($activeComputers | Where-Object { "$($_.Os)" -like 'Windows*' -and $_.Name -notin @($controllers | ForEach-Object { $_.Name }) })
+$withoutLaps = @($lapsComputers | Where-Object { -not $_.Laps })
+if ($withoutLaps.Count -gt 0) {
+    New-AuditFinding -Severity Medium -Area $area -Finding "$($withoutLaps.Count) of $($lapsComputers.Count) Windows computers in use have no LAPS: their local administrator passwords are probably the same everywhere." -Recommendation 'Turn on Windows LAPS by group policy, so that each computer gets its own local administrator password.'
 }
 if ($recycleBin -eq $false) {
     New-AuditFinding -Severity Low -Area $area -Finding 'The Active Directory Recycle Bin is off: a deleted account or OU comes back only from a backup.' -Recommendation 'Turn it on (Active Directory Administrative Center, or Enable-ADOptionalFeature).'

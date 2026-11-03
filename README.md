@@ -282,7 +282,7 @@ It writes `<Client>_Audit_<yyyy-MM-dd>.md` next to the scripts (or in `-OutputPa
 
 A part of the audit dot-sources `AuditCommon.ps1` and writes Markdown strings for its section (`###` headings; `Audit.ps1` adds the `##` title of the part), findings (`New-AuditFinding -Severity High|Medium|Low|Info -Area <part> -Finding <what is wrong> -Recommendation <what to do>`) and its data (`New-AuditData -Name <part> -Value <object>`, saved in the JSON). To add a check, add a finding where the part has the data. To add a part, call it from `Audit.ps1` (`Invoke-AuditPart`) and add it to `Audit` in `updater.config.json`. A part never reads or writes a password.
 
-Windows PowerShell 5.1 reads the scripts: keep them ASCII, and don't write `Key = if (...) { }` in a multi-line hashtable, which 5.1 cannot parse when another key follows. Write `Key = $(if (...) { })`, or set a variable first when the value can be an empty list, which `$(...)` turns into `$null`.
+Windows PowerShell 5.1 reads the scripts: keep them ASCII, and don't write `Key = if (...) { }` in a multi-line hashtable, which 5.1 cannot parse when another key follows. Write `Key = $(if (...) { })`, or set a variable first when the value can be an empty list or a byte array, which `= if ...` and `$(...)` unroll (an empty list becomes `$null`). `Start.ps1 -Audit` runs the audit in its own strict mode, where a missing property or regex group is an error: each audit script starts with `Set-StrictMode -Off`, so test a new part both alone and from `Start.ps1`.
 
 ## Commvault Cloud licenses
 

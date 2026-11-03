@@ -19,6 +19,9 @@ param(
 # of its web pages, which also tell its type (firewall, switch, NAS, printer, UPS...).
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 runs in strict mode, where a property or regex group that is missing is an error; this
+# script expects $null for it. Off for this script only.
+Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
 $area = 'Network'
 
@@ -600,7 +603,7 @@ $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Silentl
 $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
 
 "### This computer"
-"The audit ran on $env:COMPUTERNAME ($(if ($os) { "$($os.Caption) $($os.Version)" }), $(if ($computer -and $computer.PartOfDomain) { "domain $($computer.Domain)" } else { "workgroup $(if ($computer) { $computer.Workgroup })" })), as $env:USERDOMAIN\$env:USERNAME."
+"The audit ran on $env:COMPUTERNAME ($(if ($os) { "$($os.Caption) $($os.Version)" }), $(if ($computer -and $computer.PartOfDomain) { "domain $($computer.Domain)" } else { "workgroup $(if ($computer) { $computer.Workgroup })" })), as $([Security.Principal.WindowsIdentity]::GetCurrent().Name)."
 ""
 if ($local.Count -gt 0) {
     Format-AuditTable -Rows ($local | ForEach-Object {
