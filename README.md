@@ -10,7 +10,7 @@ It is built on the [powershellRepo](https://github.com/Ardaganbao/powershellRepo
 
 The scripts are the same for every client. Everything about a client (its name, servers, IP addresses, user names, passwords and API tokens) is entered once on its computer and saved in that Windows user's SecretStore vault, never in a file of this repository.
 
-Keep it that way: never commit a client name, IP address, host name or user name. Reports (`*_Report_*.md`) and saved passwords or tokens are listed in `.gitignore`.
+Keep it that way: never commit a client name, IP address, host name or user name. Reports (`*_Report_*.md`), audits (`*_Audit_*`) and saved passwords or tokens are listed in `.gitignore`.
 
 ## Files
 
@@ -21,8 +21,10 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `Report.ps1` | Runs every configured module and writes `<Client>_Report_<yyyy-MM-dd>.md`, with the client's report layout. Starts `Configure.ps1` when nothing is configured yet. |
 | `Manager.ps1` | Script Manager window: configure the client, turn reports on/off and run them. |
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
-| `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`), the Keeper scripts, downloaded only with `-Keeper` or once present (`Keeper`), and reports shown in the Script Manager (`Scripts`). |
+| `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`), audit scripts updated only where audits are run (`Audit`), the Keeper scripts, downloaded only with `-Keeper` or once present (`Keeper`), and reports shown in the Script Manager (`Scripts`). |
 | `Keeper.ps1` | Imports or exports Keeper entries over its API, independent of the report: `.\Start.ps1 -Keeper` asks its questions in the console, `.\Start.ps1 -Keeper -Gui` or **Keeper import/export** in the Script Manager opens a window with the same steps as fields and buttons (connect, export, pick the CSV and the IDs, preview the changes, write them). Export: lists the Keeper Connection Managers used on this computer to pick one, or asks for a new one's address and data source (kept in `keeper.local.json`), then asks for the `Guacamole-Token` of a session signed in in the browser (F12, Network; never saved) and writes its RDP connections with their drive settings (drive redirection, upload and download) to `KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv` and opens it. Import: lists the CSVs laid out like the export next to the scripts, in the folder above and in the current folder, newest first, to pick one by number (or give its path), then writes it to the connections of its `ID` column, all of them or only the IDs given at its question or with `-Id` (`44`, or `40-50,60`). The ID says which connection a row is; every other column is written to it: `Name` renames it, `ParentID` moves it to that folder, the others are its settings (an empty `Name`, `ParentID` or `Hostname` is left as it is). The export writes every setting of the connections: `Name`, `ID`, `ParentID`, `Hostname` and the drive columns first, then the secrets (`password`, `private-key`...) as their vault token (`${KEEPER_SERVER_PASSWORD}`...), or `(stored here, not from the vault)` for a secret stored in Keeper itself, a misconfiguration it also warns about, never the secret itself; then every other parameter under Keeper's own name (`port`, `security`...), then the attributes (`attr:max-connections`...). The import writes the columns named that way too, with Excel's `TRUE` as `true`; a column named otherwise (`Notes`...) or holding a secret is ignored. It shows the changes, then writes all of them, or the first connection only to check it in Keeper, after a backup of the connections in `KCM-RDP-Backup_<yyyy-MM-dd_HHmmss>.json`, and reads each one again to check it. |
+| `Audit.ps1` | [IT audit](#it-audit) of a client, independent of the report: runs the audit scripts below and writes `<Client>_Audit_<yyyy-MM-dd>.md` and `.json`. |
+| `AuditNetwork.ps1`, `AuditAD.ps1`, `AuditM365.ps1`, `AuditDomain.ps1`, `AuditCommon.ps1` | The parts of the audit: the network and its devices, Active Directory, Microsoft 365, the public domains and e-mail; and their shared helpers. |
 | `helper.ps1` | SecretStore helpers, the client configuration and the list of modules. |
 | `latest-versions.json` | The latest ESXi, StorMagic, DSM and Windows Server versions, for the [Physical System](#inventory-tables) check marks when they can't be read online. |
 | `iloreport.ps1`, `IDRAC.ps1`, `BMCreport.ps1` | Modules: HPE iLO, Dell iDRAC, Lenovo BMC. |
@@ -169,6 +171,7 @@ cd $HOME\Mose
 .\Start.ps1 -MultiClientMode  # update, then pick a client vault and run its report (several clients here)
 .\Start.ps1 -Keeper      # update, then import or export Keeper entries over its API (not the report)
 .\Start.ps1 -Keeper -Gui # the same in a window, also opened by Keeper import/export in the Script Manager
+.\Start.ps1 -Audit       # update, then the IT audit of a client (see IT audit)
 .\Start.ps1 -Gui         # update, then open the Script Manager
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only
@@ -271,6 +274,41 @@ A version gets :white_check_mark: when it is the latest of its product, :warning
 `latest-versions.json` comes with MOSE (and its updates); `Updated` says when it was written. A warranty or support end gets :white_check_mark: more than 60 days before it, :warning: in the last 60 days, :x: once past.
 
 The text of their section (`W`) goes before them, e.g. a schema of the network. A table with nothing to show is left out: a partial report has only the tables of its servers, without the lines entered by hand for other machines or software.
+
+## IT audit
+
+`Audit.ps1` audits a client from nothing, for example a new client. It is independent of the monthly report: no configuration, no vault. Run it on a computer plugged into the client's network:
+
+```powershell
+.\Start.ps1 -Audit                                  # update, then audit: asks for the client and the logins
+.\Audit.ps1 -Client Contoso -Domain contoso.be      # the same without updating
+.\Audit.ps1 -Client Contoso -Subnet 192.0.2.0/24 -ADServer 192.0.2.10 -Skip Microsoft365
+```
+
+Or click **IT audit** in the Script Manager. The first `-Audit` downloads the audit scripts; later runs of `Start.ps1` keep them up to date.
+
+It writes `<Client>_Audit_<yyyy-MM-dd>.md` next to the scripts (or in `-OutputPath`): the findings first, from High (fix now) to Info, then what each part found, then a checklist of what to complete on site (network diagram, UPS, backup, business applications, contacts...). `<Client>_Audit_<yyyy-MM-dd>.json` has everything read, for the client's documentation or to compare with the next audit. Both describe the client's network, and git ignores them. The audit never reads or writes a password: logins go to the password manager.
+
+| Part | Script | Needs | What it reads |
+|---|---|---|---|
+| Network | `AuditNetwork.ps1` | Nothing | This computer's IP settings, DHCP and DNS servers, Wi-Fi (connected and in range), and the public address and its provider. Then every address of its networks, or of `-Subnet`: ping, ARP, 37 common TCP ports, DNS and NetBIOS names, MAC vendor, SNMP with the community `public`, and the title and certificate of web pages. From those, each device's type: firewall, switch, access point, NAS, printer, UPS, server management, hypervisor, Windows computer... |
+| Active Directory | `AuditAD.ps1` | Any domain account | The domain and its controllers, functional level, password policy, privileged groups (with nested members), users (last logon, password age, risky flags), computers and the end of support of their Windows, LAPS, group policies, Recycle Bin, Entra Connect. On a computer in the domain, as its user. Otherwise the audit offers the domain controllers the scan found and asks for a domain account (or `-ADServer` and `-ADCredential`). |
+| Microsoft 365 | `AuditM365.ps1` | An administrator signs in (Global Reader is enough) | The tenant and its domains, licences (bought, assigned, free), users with their licences, MFA methods, last sign-in and roles, security defaults, Conditional Access, and the devices in Entra ID. |
+| Domains and e-mail | `AuditDomain.ps1` | Nothing | For each public domain (`-Domain`, plus those of Active Directory and Microsoft 365): the registrar (RDAP, or WHOIS for `.be` and `.eu`), name servers, mail provider, SPF, DKIM, DMARC, the Microsoft 365 tenant and how its users sign in, and the website's certificate, HTTPS redirect, hosting and WordPress version. |
+
+- Each part also runs alone, e.g. `.\AuditDomain.ps1 -Domain contoso.be` shows its Markdown and findings. `-Skip Network,Microsoft365` leaves parts out. `-NonInteractive` asks nothing and skips Microsoft 365.
+- The network scan tries every address and port of the network: agree on it with the client first, since a firewall or intrusion detection may report it. A network of more than 1024 addresses is reduced to the /24 of this computer and of its gateway, unless `-Subnet` names it.
+- Microsoft 365 is read with the module `Microsoft.Graph.Authentication`, which the audit offers to install. The first time in a tenant, a Global Administrator consents to the read permissions of Microsoft Graph Command Line Tools. The sign-in stays in the audit's PowerShell process and ends with it, so the next client's audit can't use it. Without Entra ID P1, the last sign-in and Conditional Access can't be read, and MFA methods are read user by user (the first 300 enabled users).
+- DNS is asked of 1.1.1.1, for the public answers, or of this computer's DNS when port 53 is blocked.
+- Windows 11 hides the Wi-Fi networks in range from the audit unless location services are allowed for desktop apps.
+- The MAC vendors (Wireshark's list) and Microsoft's licence names are downloaded once and kept in `audit-cache`, which git ignores.
+- When Windows support ends is in `AuditCommon.ps1` (`Get-WindowsSupportEnd`). Add each new Windows 11 version to `$windowsSupportEnds` when Microsoft publishes its dates.
+
+### Add an audit check
+
+A part of the audit dot-sources `AuditCommon.ps1` and writes Markdown strings for its section (`###` headings; `Audit.ps1` adds the `##` title of the part), findings (`New-AuditFinding -Severity High|Medium|Low|Info -Area <part> -Finding <what is wrong> -Recommendation <what to do>`) and its data (`New-AuditData -Name <part> -Value <object>`, saved in the JSON). To add a check, add a finding where the part has the data. To add a part, call it from `Audit.ps1` (`Invoke-AuditPart`) and add it to `Audit` in `updater.config.json`. A part never reads or writes a password.
+
+Windows PowerShell 5.1 reads the scripts: keep them ASCII, and don't write `Key = if (...) { }` in a multi-line hashtable, which 5.1 cannot parse when another key follows. Write `Key = $(if (...) { })`, or set a variable first when the value can be an empty list, which `$(...)` turns into `$null`.
 
 ## Commvault Cloud licenses
 

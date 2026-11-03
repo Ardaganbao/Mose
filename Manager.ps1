@@ -267,6 +267,12 @@ Add-Button "Keeper import/export" {
     Add-Job -Label "Keeper import/export" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-Keeper -Gui"
 }
 
+# The IT audit of a client, independent of the report: Start.ps1 downloads the audit scripts the
+# first time. It asks for the client and the logins in its own window.
+Add-Button "IT audit" {
+    Add-Job -Label "IT audit" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-Audit"
+}
+
 Add-Button "Check for updates" {
     Add-Job -Label "Check for updates" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-UpdateOnly" -ReloadList -Hidden
 }
