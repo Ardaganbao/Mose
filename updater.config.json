@@ -29,6 +29,14 @@
     "Keeper": [
         "Keeper.ps1"
     ],
+    "Audit": [
+        "Audit.ps1",
+        "AuditCommon.ps1",
+        "AuditNetwork.ps1",
+        "AuditAD.ps1",
+        "AuditM365.ps1",
+        "AuditDomain.ps1"
+    ],
     "Scripts": [
         "Report.ps1"
     ]
