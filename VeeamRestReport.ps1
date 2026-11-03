@@ -343,6 +343,15 @@ function Format-Time {
     return 'n/a'
 }
 
+# Table cells must not contain a | or a line break.
+function Format-TableCell {
+    param(
+        $Value
+    )
+
+    return ("$Value" -replace '\|', '/' -replace '\s*[\r\n]+\s*', ' ').Trim()
+}
+
 # A duration given as "hh:mm:ss" or seconds, else the time between start and end.
 function Format-Duration {
     param(
@@ -498,7 +507,19 @@ function Get-TaskSessions {
     }
 }
 
-# The machines (VMs or computers) in the backups of these jobs, else in the backups named after the job.
+# Whether a backup is named after a job: the job's name, alone or followed by more (a worker of a
+# backup copy job, a computer of an agent policy).
+function Test-NamedAfterJob {
+    param(
+        [string]$Name,
+        [string]$JobName
+    )
+
+    return $Name -match ('^' + [regex]::Escape($JobName) + '(?![\p{L}\p{N}])')
+}
+
+# The machines (VMs or computers) in the backups of these jobs, else in the backups named after the
+# job, unless they are another job's: by its ID, or by a longer name that starts with this job's.
 function Get-JobBackupObjects {
     param(
         [object[]]$JobId,
@@ -509,7 +530,14 @@ function Get-JobBackupObjects {
     $backups = @(Get-AllBackups)
     $ownBackups = @($backups | Where-Object { (Get-VeeamValue $_ 'jobId') -in $JobId })
     if ($ownBackups.Count -eq 0) {
-        $ownBackups = @($backups | Where-Object { "$($_.name)" -eq $JobName -or "$($_.name)".StartsWith("$JobName\") })
+        $otherJobs = @($script:jobs | Where-Object { (Get-VeeamValue $_ 'id') -notin $JobId })
+        $otherJobIds = @($otherJobs | ForEach-Object { Get-VeeamValue $_ 'id' } | Where-Object { $_ })
+        $longerNames = @($otherJobs | ForEach-Object { "$($_.name)" } | Where-Object { $_.Length -gt $JobName.Length })
+        $ownBackups = @($backups | Where-Object {
+                $backupName = "$($_.name)"
+                (Test-NamedAfterJob $backupName $JobName) -and (Get-VeeamValue $_ 'jobId') -notin $otherJobIds -and
+                @($longerNames | Where-Object { Test-NamedAfterJob $backupName $_ }).Count -eq 0
+            })
     }
     foreach ($backup in $ownBackups) {
         Get-VeeamApiItems -Path "/api/v1/backups/$($backup.id)/objects"
@@ -553,6 +581,49 @@ function Format-BackupObjects {
         $last = if ($times.Count -gt 0) { ($times | Sort-Object)[-1].ToString('yyyy-MM-dd HH:mm:ss') } else { 'n/a' }
         $count = if ($counts.Count -gt 0) { ($counts | Measure-Object -Sum).Sum } else { 'n/a' }
         $text += "| $($group.Name) | $last | $count |`n"
+    }
+    return $text
+}
+
+# The log of a session, as the Veeam console shows it: for an agent job, whose session the API gives
+# no task details of, what happened on each computer. A long log keeps only its warnings and errors.
+# Empty when the API doesn't give it.
+function Format-SessionLog {
+    param(
+        $Session
+    )
+
+    try {
+        $log = Invoke-VeeamApi -Path "/api/v1/sessions/$($Session.id)/logs"
+    }
+    catch {
+        Write-Verbose "The log of the Veeam session '$($Session.name)' is not available: $($_.Exception.Message)"
+        return ''
+    }
+    $records = @(Get-VeeamValue $log 'records' | Sort-Object -Property { [long](Get-VeeamValue $_ 'id') })
+    if ($records.Count -eq 0) {
+        return ''
+    }
+    $maxLines = 50
+    $shown = $records
+    $text = ''
+    if ($records.Count -gt $maxLines) {
+        $shown = @($records | Where-Object { "$(Get-VeeamValue $_ 'status')" -match '(?i)warning|fail|error' } | Select-Object -Last $maxLines)
+        if ($shown.Count -eq 0) {
+            return "The session log has $($records.Count) lines, none with a warning or an error.`n"
+        }
+        $which = if ($shown.Count -ge $maxLines) { "its last $maxLines warnings and errors" } else { 'its warnings and errors' }
+        $text += "The session log has $($records.Count) lines: only $which are shown.`n`n"
+    }
+    $text += "| Time | Status | Message |`n"
+    $text += "|------|--------|---------|`n"
+    foreach ($record in $shown) {
+        $message = "$(Get-VeeamValue $record 'title')"
+        $description = "$(Get-VeeamValue $record 'description')"
+        if ($description -and $description -ne $message) {
+            $message += ": $description"
+        }
+        $text += "| $(Format-Time (Get-VeeamValue $record 'startTime', 'updateTime') 'yyyy-MM-dd HH:mm:ss') | $(Get-VeeamValue $record 'status') | $(Format-TableCell $message) |`n"
     }
     return $text
 }
@@ -635,11 +706,28 @@ function Format-BackupJob {
     $text += "|Error|$failed| Duration     |$(Format-Duration $null $start $end)| Transferred  |$(Convert-Bytes (Get-TaskSizeSum $tasks $transferredSizeNames)) |Job status |$(Get-VeeamValue $JobState 'status')|`n"
     $text += "`n##### Details`n"
     if ($tasks.Count -eq 0) {
+        # No task details (an agent job): the computers of the job's backups, then the session's
+        # result message and its log, which says what happened on each computer.
         $objects = Format-BackupObjects $JobState
-        if ($objects) {
-            return $text + "Veeam's REST API gives no details of this session (an agent job's): the computers of the job's backups.`n`n" + $objects
+        $message = Get-VeeamValue (Get-VeeamValue $session 'result') 'message'
+        $log = Format-SessionLog $session
+        if (-not ($objects -or $message -or $log)) {
+            return $text + "No VM details were returned for this session.`n"
         }
-        return $text + "No VM details were returned for this session.`n"
+        if ($objects) {
+            $text += "Veeam's REST API gives no details of this session (an agent job's): the computers of the job's backups.`n`n" + $objects
+        }
+        else {
+            $text += "Veeam's REST API gives no details of this session (an agent job's), and no backup of the job was found.`n"
+        }
+        if ($message -or $log) {
+            $text += "`n##### Session log`n"
+            if ($message) {
+                $text += "Result message: $(Format-TableCell $message)`n`n"
+            }
+            $text += $log
+        }
+        return $text
     }
     $text += "| Name | Status | Start time | End time | Size | Read | Transferred | Duration |`n"
     $text += "|------|--------|------------|----------|------|------|-------------|----------|`n"
