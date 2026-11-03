@@ -2021,6 +2021,17 @@ try {
 
     $reportText
 }
+catch {
+    # The report itself failed, not one of its servers: where it stopped, which the error shown by
+    # Start.ps1 doesn't say, and with -DebugLog the statement and the call stack.
+    $location = Get-MoseErrorLocation $_
+    Write-Host "The report stopped$(if ($location) { " at $location" }): $($_.Exception.Message)" -ForegroundColor Red
+    if ($debugLogPath) {
+        Write-DebugLog @('', 'The report failed:')
+        Write-ErrorDetail $_
+    }
+    throw
+}
 finally {
     Set-Location -LiteralPath $originalLocation
     if ($debugSummary.Count -gt 0) {
