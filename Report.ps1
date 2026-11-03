@@ -1649,8 +1649,16 @@ function Get-PhysicalSystemMarkdown {
         if (-not $name) {
             $name = Get-ShortMachineName (Get-FirstValue $named 'Name')
         }
-        if (-not $name) {
+        if (-not $name -and $row.Names.Count -gt 0) {
             $name = $row.Names[0]
+        }
+        if (-not $name) {
+            # Known only by its serial number, e.g. an iDRAC or iLO that reports no host name (the OS
+            # tells it none) for a server no other module reads: the address of the board.
+            $board = @($row.Sources | Where-Object { "$(Get-MoseProperty $_ 'Server')" }) | Select-Object -First 1
+            if ($board) {
+                $name = "$(Get-MoseProperty $board 'Server') ($(Get-MoseProperty $board 'Source'))"
+            }
         }
         $brand = (Get-FirstValue $hardware 'Brand') -replace ',?\s+Inc\.?$', '' -replace '^Hewlett Packard Enterprise$', 'HPE' -replace '^Hewlett-Packard$', 'HP'
         $serial = Get-MachineSerial (Get-FirstValue $hardware 'Serial')
