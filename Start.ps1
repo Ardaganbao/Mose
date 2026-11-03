@@ -67,6 +67,11 @@ param(
     [Parameter()]
     [switch]$Keeper,
 
+    # Run the IT audit of a client (Audit.ps1) after updating, instead of the report. The audit scripts
+    # are downloaded the first time.
+    [Parameter()]
+    [switch]$Audit,
+
     # Set internally when the script restarts after all updates were downloaded.
     [Parameter(DontShow)]
     [switch]$UpdatesApplied,
@@ -318,6 +323,7 @@ elseif (-not $Quiet) {
     Write-Host "  .\Start.ps1 -Choose      Pick the servers of the report from a list" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper      Import or export Keeper entries over its API" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper -Gui The same in a window" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Audit       Audit a client's network, Active Directory, Microsoft 365 and domains" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -514,6 +520,10 @@ if (-not $UpdatesApplied -and ($FirstRun -or -not $SkipUpdate)) {
         if ($config.PSObject.Properties['Keeper']) {
             $files += @($config.Keeper | Where-Object { $Keeper -or (Test-Path -LiteralPath (Join-Path $PSScriptRoot $_) -PathType Leaf) })
         }
+        # The audit scripts only where audits are run: with -Audit, and once they are here.
+        if ($config.PSObject.Properties['Audit']) {
+            $files += @($config.Audit | Where-Object { $Audit -or (Test-Path -LiteralPath (Join-Path $PSScriptRoot $_) -PathType Leaf) })
+        }
         $changed = @($files | Where-Object { Update-RepoFile -Name $_ })
 
         if (-not $restart -and -not $configChanged -and $changed.Count -eq 0) {
@@ -576,6 +586,11 @@ if ($Configure) {
 if ($Keeper) {
     # -Gui: its window instead of its questions.
     & (Join-Path $PSScriptRoot "Keeper.ps1") -Gui:$Gui
+    return
+}
+
+if ($Audit) {
+    & (Join-Path $PSScriptRoot "Audit.ps1")
     return
 }
 
