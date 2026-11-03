@@ -766,6 +766,49 @@ function Edit-SavedSecrets {
     }
 }
 
+# V in the menu: a new vault password, changed at once rather than on S; everything in the vault
+# stays. The weekly Commvault token renewal (Renew-CommvaultToken.ps1 -Register) keeps the password
+# in a file next to the scripts, saved again with the new one.
+function Set-MoseVaultPassword {
+    Write-Host ""
+    Write-Host "Password of the SecretStore vault '$MoseVaultName'" -ForegroundColor Cyan
+    Write-Host "It changes at once, for every vault of $env:USERNAME on this computer. The saved logins, tokens and configuration stay."
+    $current = Read-Host -Prompt 'Current password (Enter to cancel)' -AsSecureString
+    if ($current.Length -eq 0) {
+        return
+    }
+    $new = Read-Host -Prompt 'New password' -AsSecureString
+    if ($new.Length -eq 0) {
+        Write-Host "No new password: nothing changed." -ForegroundColor Yellow
+        return
+    }
+    $again = Read-Host -Prompt 'New password again' -AsSecureString
+    if ([System.Net.NetworkCredential]::new('', $new).Password -cne [System.Net.NetworkCredential]::new('', $again).Password) {
+        Write-Host "The two new passwords differ: nothing changed." -ForegroundColor Yellow
+        return
+    }
+    try {
+        Set-SecretStorePassword -Password $current -NewPassword $new -ErrorAction Stop
+    }
+    catch {
+        Write-Host "The vault password was not changed: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+    $script:MoseVaultPassword = $new
+    Write-Host "Changed the vault password. The report and the configuration ask for the new one from now on." -ForegroundColor Green
+
+    $renewalFile = Join-Path $PSScriptRoot 'SecretStore1.password.xml'
+    if (Test-Path -LiteralPath $renewalFile -PathType Leaf) {
+        try {
+            $new | Export-Clixml -LiteralPath $renewalFile
+            Write-Host "Saved it for the weekly Commvault token renewal too ($renewalFile)." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "The weekly Commvault token renewal still has the old password ($($_.Exception.Message)): run .\Renew-CommvaultToken.ps1 -Register." -ForegroundColor Yellow
+        }
+    }
+}
+
 # The fields of the lines entered under I, in the order they are asked. More: asked for a new line
 # only when wanted; Date: yyyy-MM-dd.
 $softwareFields = @(
@@ -942,9 +985,13 @@ while ($true) {
     Write-Host "   I. Inventory: lines of the Software ($($software.Count)) and Physical System ($($machines.Count)) tables"
     Write-Host "   L. Report layout ($layoutText): the report sections and the servers in each"
     Write-Host "   C. Client name: $client"
+    # Not when Report.ps1 started this: it keeps the password it was given, for the Commvault modules.
+    if (-not $VaultUnlocked) {
+        Write-Host "   V. Vault password: change it (at once, not on S)"
+    }
     Write-Host ""
 
-    $choice = Read-Answer 'Module number to add servers, R to remove one, P for the saved logins, I for the inventory, L for the report layout, C for the client name, S to save, Q to quit without saving'
+    $choice = Read-Answer 'Module number to add servers, R to remove one, P for the saved logins, I for the inventory, L for the report layout, C for the client name, V for the vault password, S to save, Q to quit without saving'
     $number = 0
 
     if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $moduleKeys.Count) {
@@ -991,6 +1038,13 @@ while ($true) {
     }
     elseif ($choice -match '^[Cc]$') {
         $client = Read-Answer 'Client name (report title and file name)' $client
+    }
+    elseif ($choice -match '^[Vv]$') {
+        if ($VaultUnlocked) {
+            Write-Host "Change the vault password after this first configuration: .\Start.ps1 -Configure, then V." -ForegroundColor Yellow
+            continue
+        }
+        Set-MoseVaultPassword
     }
     elseif ($choice -match '^[Ss]$') {
         Save-MoseConfig -Client $client -Targets $targets.ToArray() -Layout $layout -Software $software.ToArray() -Machines $machines.ToArray()

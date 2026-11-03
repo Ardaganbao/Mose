@@ -83,6 +83,8 @@ The vault password is asked first. Logins are saved as `MOSE:<module>:<server>` 
 
 `P` in the menu lists every login and token in the vault with the servers that use it. Pick one to edit it: the user name and password, or the Commvault tokens and ring or URL (Enter keeps each value). Or remove it: only a login or token no server uses can be removed, and it leaves the vault when you save with `S`.
 
+`V` in the menu changes the vault password: the current one, then the new one twice. It changes at once, not on `S`, and everything in the vault stays. SecretStore has one password per Windows user and computer, so it is the password of that user's every vault there. When the weekly Commvault token renewal is set up (`Renew-CommvaultToken.ps1 -Register`), its copy of the password is saved again with the new one. A forgotten vault password cannot be recovered: `Reset-SecretStore` empties the vault, and the client is configured again.
+
 A computer only downloads the module scripts its client uses. Saving downloads the modules just added, and every run of `Start.ps1` checks them for updates. They are listed in `modules.local.json` (file names only), so `Start.ps1` knows them without opening the vault.
 
 Commvault tokens already in the vault (for example saved by an older report script) are offered for reuse, so a Commvault Cloud token chain keeps going.
