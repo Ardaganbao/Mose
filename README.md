@@ -63,7 +63,7 @@ The token is saved to `github-token.xml`, encrypted so only this Windows user on
 
 ### A computer without GitHub access
 
-Each release (`v1.0.0-rc.14`...) has a zip, `Mose-<version>.zip`, with every script and `installed-version.txt` naming its commit. Unzip it and copy the content of its `Mose` folder over the install folder (e.g. `C:\script`): the configuration, the vault and the reports stay as they are. Then run `.\Start.ps1 -SkipUpdate`, so it doesn't wait for GitHub; without it, the local scripts run after a warning that GitHub can't be reached.
+Each release (`v1.0.0-rc.15`...) has a zip, `Mose-<version>.zip`, with every script and `installed-version.txt` naming its commit. Unzip it and copy the content of its `Mose` folder over the install folder (e.g. `C:\script`): the configuration, the vault and the reports stay as they are. Then run `.\Start.ps1 -SkipUpdate`, so it doesn't wait for GitHub; without it, the local scripts run after a warning that GitHub can't be reached.
 
 ## Configure the client
 
