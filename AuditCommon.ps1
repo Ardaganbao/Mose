@@ -258,7 +258,9 @@ function Get-AuditWebInfo {
 
 # When Microsoft stops the security updates of a Windows, from its name and version (Active Directory's
 # "Windows 11 Pro" and "10.0 (26100)", or Entra ID's "Windows" and "10.0.26100.4349"): Status Ended,
-# Ending (within a year) or Supported, and End. $null for what this list doesn't know (not Windows).
+# Ending (within a year, or 90 days for a Windows 11 version, which the next feature update replaces
+# for free) or Supported, and End. Unknown for a Windows 11 version not in this list (an Insider or a
+# newer build), $null for what is not Windows.
 # Windows 11 ends per version: Home and Pro 24 months after it came out, Enterprise and Education 36.
 # Add the new versions when Microsoft publishes their dates.
 $windowsSupportEnds = @{
@@ -277,6 +279,7 @@ function Get-WindowsSupportEnd {
 
     $build = if ("$Version" -match '(?:^10\.0\.|\()(\d{5})') { [int]$Matches[1] }
     $end = $null
+    $warnDays = 365
     switch -Regex ($Name) {
         'Windows (XP|Vista|7|8)\b|Windows NT|Server (2000|2003|2008|2012)' { $end = [datetime]'2023-10-10'; break }
         'Server.*2016' { $end = [datetime]'2027-01-12'; break }
@@ -298,6 +301,10 @@ function Get-WindowsSupportEnd {
             $dates = $windowsSupportEnds[$build]
             if ($dates) {
                 $end = [datetime]$dates[$(if ($Name -match 'Enterprise|Education') { 1 } else { 0 })]
+                $warnDays = 90
+            }
+            elseif ($build -ge 22000) {
+                return [pscustomobject]@{ Status = 'Unknown'; End = $null }
             }
             break
         }
@@ -309,11 +316,11 @@ function Get-WindowsSupportEnd {
     if (-not $end) {
         return $null
     }
-    $status = if ($end -lt (Get-Date)) { 'Ended' } elseif ($end -lt (Get-Date).AddYears(1)) { 'Ending' } else { 'Supported' }
+    $status = if ($end -lt (Get-Date)) { 'Ended' } elseif ($end -lt (Get-Date).AddDays($warnDays)) { 'Ending' } else { 'Supported' }
     return [pscustomobject]@{ Status = $status; End = $end }
 }
 
-# The support of a Windows as a cell: :x: ended on, :warning: ends on, :white_check_mark:.
+# The support of a Windows as a cell: :x: ended on, :warning: ends on, :white_check_mark:, or :question:.
 function Format-WindowsSupport {
     param(
         $Support
@@ -325,6 +332,7 @@ function Format-WindowsSupport {
     switch ($Support.Status) {
         'Ended' { return ":x: ended $($Support.End.ToString('yyyy-MM-dd'))" }
         'Ending' { return ":warning: ends $($Support.End.ToString('yyyy-MM-dd'))" }
+        'Unknown' { return ':question: version not in the list' }
         default { return ":white_check_mark: until $($Support.End.ToString('yyyy-MM-dd'))" }
     }
 }

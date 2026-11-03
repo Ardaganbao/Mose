@@ -43,6 +43,9 @@ param(
 # of its own (AuditNetwork.ps1, AuditAD.ps1, AuditM365.ps1, AuditDomain.ps1) that can also run alone.
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 runs in strict mode, where a property or regex group that is missing is an error; the
+# audit expects $null for it. Off for the audit and its parts only.
+Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
 
 function Read-Answer {
@@ -230,7 +233,7 @@ $order = @{ High = 0; Medium = 1; Low = 2; Info = 3 }
 $findings = @($script:Findings | Sort-Object -Property { $order[$_.AuditFinding] }, Area)
 $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("# $Client IT audit")
-$lines.Add("$($started.ToString('yyyy-MM-dd')), from $env:COMPUTERNAME by $env:USERDOMAIN\$env:USERNAME. This document holds no password: keep every login in the password manager.")
+$lines.Add("$($started.ToString('yyyy-MM-dd')), from $env:COMPUTERNAME by $([Security.Principal.WindowsIdentity]::GetCurrent().Name). This document holds no password: keep every login in the password manager.")
 $lines.Add('')
 $lines.Add('## Findings')
 if ($findings.Count -eq 0) {
