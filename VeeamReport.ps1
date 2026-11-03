@@ -41,6 +41,40 @@ function Test-VeeamModuleHere {
     }
     return [bool]@($manifests | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count
 }
+
+# True when $Name is this computer: localhost, its name, its full DNS name or one of its addresses.
+function Test-ThisComputer {
+    param(
+        [string]$Name
+    )
+
+    # A full DNS name can end with a dot (server.example.local.).
+    $Name = $Name.Trim()
+    if ($Name -ne '.') {
+        $Name = $Name.TrimEnd('.')
+    }
+    $network = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+    $names = @('localhost', '.', $env:COMPUTERNAME, $network.HostName)
+    if ($network.DomainName) {
+        $names += "$($network.HostName).$($network.DomainName)"
+    }
+    if ($Name -in $names) {
+        return $true
+    }
+    $address = $null
+    if ([System.Net.IPAddress]::TryParse($Name, [ref]$address)) {
+        if ([System.Net.IPAddress]::IsLoopback($address)) {
+            return $true
+        }
+        $addresses = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+            ForEach-Object { $_.GetIPProperties().UnicastAddresses } | ForEach-Object { $_.Address.ToString() })
+        return $address.ToString() -in $addresses
+    }
+    return $false
+}
+# A Veeam server named as this computer is the one this report runs on: no PowerShell remoting, and
+# connected to as localhost.
+$serverIsThisComputer = Test-ThisComputer $Server
 # Like the other modules' progress bars. Run remotely, the Veeam server's bar shows here too.
 $progressServer = if ($Server -in @('localhost', '.')) { $env:COMPUTERNAME } else { $Server }
 $progressActivity = "Veeam report: $progressServer"
@@ -68,8 +102,8 @@ function Write-VeeamInventory {
 Write-VeeamReportProgress -Status 'Starting report' -PercentComplete 0
 
 # With the Veeam console installed here, its module connects to the server itself; without it, the
-# report runs on the Veeam server over PowerShell remoting.
-if ($RunOnVbrServer -or (-not (Test-VeeamModuleHere) -and $Server -notin @('localhost', '.'))) {
+# report runs on the Veeam server over PowerShell remoting, unless that is this computer.
+if (-not $serverIsThisComputer -and ($RunOnVbrServer -or -not (Test-VeeamModuleHere))) {
     if (-not (Test-Path -LiteralPath $PSCommandPath -PathType Leaf)) {
         throw 'Remote execution requires running this from the saved VeeamReport.ps1 file.'
     }
@@ -364,24 +398,31 @@ $script:VbrConnected = $false
 Write-VeeamReportProgress -Status "Connecting to Veeam server '$Server'" -PercentComplete 0
 try {
     try {
+        $connectParameters = @{ Server = $Server; ErrorAction = 'Stop' }
+        if ($serverIsThisComputer) {
+            $connectParameters.Server = 'localhost'
+            # Veeam 13 checks the server's certificate and, with no one here to accept it, refuses it.
+            # A connection to this computer does not leave it, so nothing can stand in between.
+            if ((Get-Command Connect-VBRServer).Parameters.ContainsKey('ForceAcceptTlsCertificate')) {
+                $connectParameters.ForceAcceptTlsCertificate = $true
+            }
+        }
         if ($null -ne $Credential) {
-            Connect-VBRServer -Server $Server -Credential $Credential -ErrorAction Stop | Out-Null
+            $connectParameters.Credential = $Credential
         }
-        else {
-            Connect-VBRServer -Server $Server -ErrorAction Stop | Out-Null
-        }
+        Connect-VBRServer @connectParameters | Out-Null
         $script:VbrConnected = $true
     }
     catch {
         $connectionError = $_
         $moduleVersion = if ($availableModule) { $availableModule.Version } else { 'unknown' }
         $diagnostics = @(
-            "Target: $Server"
+            "Target: $Server$(if ($serverIsThisComputer -and $Server -notin @('localhost', '.')) { ' (this computer, connected to as localhost)' })"
             "PowerShell: $($PSVersionTable.PSVersion)"
             "Veeam PowerShell module: $moduleVersion"
         )
 
-        if ($Server -in @('localhost', '.')) {
+        if ($serverIsThisComputer) {
             $backupService = Get-Service -Name 'VeeamBackupSvc' -ErrorAction SilentlyContinue
             if ($backupService) {
                 $diagnostics += "Veeam Backup Service: $($backupService.Status)"
