@@ -167,7 +167,7 @@ To change it, press `L` in the client configuration (`.\Start.ps1 -Configure`). 
 | `M` | Move a section, a server or a table before another one, or to the end of the report. |
 | `T` | Change the title of a server, a table or a section. It shows the current and default titles; Enter keeps the title, `-` goes back to the default (`<Module> <server>`, the table's name). Placeholders: `{Label}`, `{Server}`, `{Site}` (servers), `{Client}`, `{Date}`. |
 | `W` | Write the text of a section or subsection, shown under its title before its servers: type it here (a line with only `.` ends it) or edit it in Notepad. Markdown is allowed, with `{Client}` and `{Date}`. A section with text is shown even without servers, e.g. a Summary. |
-| `H` | Hide or show a server or a table. A section whose servers and tables are all hidden is left out. |
+| `H` | Hide or show a server, a table or a section with all it holds. A section whose servers and tables are all hidden is left out too. A hidden server does not run, so the inventory tables get nothing from it either. |
 | `X` | Remove a section, keeping its servers and tables in its place. |
 | `R` | Report title. |
 | `J` | Edit the layout as JSON in Notepad, for wildcards or sections inside sections. |
@@ -202,7 +202,7 @@ The JSON (`J`) looks like this:
 
 - `Sections` lists the report sections in order. An entry with `Module` adds one `###` per configured server of that module (a name, a wildcard like `Commvault*`, or a list). `Server` keeps only the matching servers (wildcards allowed).
 - An entry with `Table` adds one of the [inventory tables](#inventory-tables): `PhysicalSystem`, `VirtualSystem` or `Software`, with its name as title unless it has a `Title`.
-- A server goes under the first entry that matches it, and so does a table. `"Hide": true` leaves the servers or the table it matches out of the report.
+- A server goes under the first entry that matches it, and so does a table. `"Hide": true` leaves the servers or the table it matches out of the report, and on a section, the section with all it holds.
 - An entry with `Title` and `Sections` is a section: a heading with its servers one level below. Sections can be nested. `Text` adds Markdown under its heading.
 - `Title` placeholders: `{Client}` and `{Date}` everywhere, and for a server `{Label}` (module name), `{Module}`, `{Server}` and `{Site}`.
 - `Unlisted`: servers that no entry matches are added at the end (`End`, the default) or left out (`Hide`). A server added later then still shows up. Tables that no entry places (a layout saved before there were tables) go at the start, in a section `Infrastructure detail`.

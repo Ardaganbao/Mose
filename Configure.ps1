@@ -190,6 +190,9 @@ function ConvertTo-LayoutEntry {
             $group.Text = $Section.Text
         }
         $group.Sections = @($Section.Children | ForEach-Object { ConvertTo-LayoutEntry $_ })
+        if ($Section.Hide) {
+            $group.Hide = $true
+        }
         return [pscustomobject]$group
     }
     if ($Section.Table) {
@@ -228,17 +231,20 @@ function ConvertTo-Layout {
     return [pscustomobject]$result
 }
 
-# Numbers the sections in report order, those inside groups included.
+# Numbers the sections in report order, those inside groups included. Hidden: hidden itself or
+# inside a hidden section.
 function Get-LayoutRows {
     param(
         [System.Collections.Generic.List[object]]$Sections,
-        [int]$Depth = 0
+        [int]$Depth = 0,
+        [bool]$Hidden = $false
     )
 
     foreach ($section in $Sections) {
-        [pscustomobject]@{ Section = $section; Parent = $Sections; Depth = $Depth }
+        $sectionHidden = $Hidden -or [bool]$section.Hide
+        [pscustomobject]@{ Section = $section; Parent = $Sections; Depth = $Depth; Hidden = $sectionHidden }
         if (Test-LayoutGroup $section) {
-            Get-LayoutRows -Sections $section.Children -Depth ($Depth + 1)
+            Get-LayoutRows -Sections $section.Children -Depth ($Depth + 1) -Hidden $sectionHidden
         }
     }
 }
@@ -407,10 +413,6 @@ function Edit-ReportLayout {
                     $text += '  (empty, left out of the report)'
                 }
             }
-            elseif ($section.Hide) {
-                $text += '  (hidden)'
-                $color = 'DarkGray'
-            }
             elseif ($section.Table -and $section.Title) {
                 # A renamed table is also named as the report makes it.
                 $text += "  ($($MoseInventoryTables[$section.Table]) table)"
@@ -422,13 +424,20 @@ function Edit-ReportLayout {
                 # A renamed server is also named as configured, to recognise it.
                 $text += "  ($($MoseModules[$section.Target.Module].Label) $(Get-MoseTargetName $section.Target))"
             }
+            if ($section.Hide) {
+                $text += '  (hidden)'
+            }
+            # What a hidden section holds is hidden with it.
+            if ($rows[$i].Hidden) {
+                $color = 'DarkGray'
+            }
             # The Markdown heading level each line gets in the report.
             $level = $rows[$i].Depth + 2
             $heading = if ($level -le 6) { '#' * $level } else { '**' }
             Write-Host ("  {0,2}. {1}{2,-4}{3}" -f ($i + 1), ('  ' * $rows[$i].Depth), $heading, $text) -ForegroundColor $color
         }
         Write-Host ""
-        Write-Host "  N new section or subsection   A attach servers or tables to a section   M move   H hide/show a server or table"
+        Write-Host "  N new section or subsection   A attach servers or tables to a section   M move   H hide/show"
         Write-Host "  T change the title of a server, table or section   W write the text of a section"
         Write-Host "  X remove a section (its servers and tables stay)   R report title   J edit as JSON   D default layout"
         Write-Host "  P preview the report with sample data   B back"
@@ -548,12 +557,8 @@ function Edit-ReportLayout {
             }
         }
         elseif ($choice -match '^[Hh]$') {
-            $row = Read-LayoutRow $rows 'Number of the server or table to hide or show'
+            $row = Read-LayoutRow $rows 'Number of the server, table or section to hide or show (a section with all it holds)'
             if (-not $row) {
-                continue
-            }
-            if (Test-LayoutGroup $row.Section) {
-                Write-Host "Only a server or a table can be hidden. A section is left out when all its servers and tables are." -ForegroundColor Yellow
                 continue
             }
             $row.Section.Hide = -not $row.Section.Hide

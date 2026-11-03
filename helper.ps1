@@ -307,7 +307,7 @@ function New-MoseReportSections {
                 $children.Add($child)
             }
             if ($title) {
-                $group = New-MoseSection -Title $title -Text "$(Get-MoseProperty $entry 'Text')"
+                $group = New-MoseSection -Title $title -Text "$(Get-MoseProperty $entry 'Text')" -Hide ([bool](Get-MoseProperty $entry 'Hide'))
                 $group.Children = $children
                 $group
             }
