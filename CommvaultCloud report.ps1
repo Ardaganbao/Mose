@@ -773,6 +773,10 @@ trap {
     break
 }
 
+# The time of each part of the report, from here, shown at the end to see where the time goes.
+$apiTimes = [ordered]@{}
+$apiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
 Write-CommvaultReportProgress -Status "Reading token from secret '$ClientName$SecretSuffix'" -PercentComplete 0
 Import-SecretModules
 
@@ -847,9 +851,8 @@ $licenseDatasets = [ordered]@{
     'Operating instances'        = 'd7faef75-cf66-40a2-98ce-a2d0cc2a144b:cd38c52a-e099-4252-d36f-3e2c54540f6f'
     'Other'                      = 'd7faef75-cf66-40a2-98ce-a2d0cc2a144b:2654b01f-9bb0-481e-b273-4b4fddc585b1'
 }
-# The time of each part of the report, shown at the end to see where the time goes.
-$apiTimes = [ordered]@{}
-$apiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$apiTimes['token'] = $apiTimer.Elapsed.ToString('m\:ss')
+Write-CommvaultReportProgress -Status "License usage: asking for $($licenseDatasets.Count) datasets at once" -PercentComplete 5
 
 $licenseSections = @()
 $licenseNotes = @()
@@ -863,6 +866,25 @@ $licenseResults = @(Invoke-MetallicApiParallel -Requests $licenseRequests -Throt
     param($Answered, $Elapsed)
     Write-CommvaultReportProgress -Status "License usage: $Answered of $($licenseNames.Count) datasets received ($($Elapsed.ToString('m\:ss')))" -PercentComplete (5 + 10 * $Answered / $licenseNames.Count)
 })
+# Sent at once, the calls can all fail before Commvault answers (seen: "Could not create SSL/TLS
+# secure channel"): those are asked for again, one at a time.
+for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) {
+    $licenseResult = $licenseResults[$licenseIndex]
+    if (-not $licenseResult.Error -or $null -ne (Get-HttpStatusCode -Exception $licenseResult.Error)) {
+        continue
+    }
+    Write-CommvaultReportProgress -Status "License usage: asking again for $($licenseNames[$licenseIndex]), one at a time ($($apiTimer.Elapsed.ToString('m\:ss')))" -PercentComplete 15
+    $licenseRequest = $licenseRequests[$licenseIndex]
+    $licenseWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $licenseResult.Response = Invoke-MetallicApi @licenseRequest
+        $licenseResult.Error = $null
+    }
+    catch {
+        $licenseResult.Error = $_.Exception
+    }
+    $licenseResult.Seconds = $licenseWatch.Elapsed.TotalSeconds
+}
 for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) {
     $licenseName = $licenseNames[$licenseIndex]
     $licenseResult = $licenseResults[$licenseIndex]
@@ -1570,10 +1592,6 @@ $attentionNote
 | Job ID | Client | Protected item | Operation | Start time | Status | Duration | Reason |
 |---:|---|---|---|---|---|---:|---|
 $($attentionLines -join "`r`n")
-
----
-
-Report generated: $(Get-Date)
 "@
 
 $md | Set-Content -LiteralPath $mdPath -Encoding UTF8 -ErrorAction Stop
