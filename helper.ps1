@@ -465,6 +465,13 @@ function Invoke-MoseModule {
             if ($Target.AcceptAnyCertificate) {
                 $nasParameters.AcceptAnyCertificate = $true
             }
+            # An account with 2-step verification: the code Report.ps1 asked for, else the device ID the NAS gave for it.
+            if ($Target.OtpCode) {
+                $nasParameters.OtpCode = $Target.OtpCode
+            }
+            elseif ($Target.NasDeviceId) {
+                $nasParameters.DeviceId = $Target.NasDeviceId
+            }
             & $scriptPath @nasParameters
         }
         'StorMagic' {
@@ -588,6 +595,8 @@ function ConvertTo-MoseFailure {
         LoginRefused         = [bool]$ErrorRecord.Exception.Data['LoginRefused']
         UntrustedCertificate = "$($ErrorRecord.Exception.Data['UntrustedCertificate'])"
         CertificateSubject   = "$($ErrorRecord.Exception.Data['CertificateSubject'])"
+        # Set by the NAS module: the account has 2-step verification and the NAS asks for a code.
+        OtpRequired          = [bool]$ErrorRecord.Exception.Data['OtpRequired']
     }
 }
 

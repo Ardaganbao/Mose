@@ -12,7 +12,13 @@
     [string]$CertificateThumbprint,
 
     [Parameter(HelpMessage = 'Accept any server certificate during this NAS script run. This disables certificate identity and trust checks and is vulnerable to interception.')]
-    [switch]$AcceptAnyCertificate
+    [switch]$AcceptAnyCertificate,
+
+    [Parameter(HelpMessage = '2-step verification code of the account, for its first sign-in from this computer: the NAS then trusts this computer and gives its DeviceId.')]
+    [string]$OtpCode,
+
+    [Parameter(HelpMessage = 'ID the NAS gave this computer when it was trusted with a 2-step verification code, to sign in without a code.')]
+    [string]$DeviceId
 )
 
 
@@ -260,7 +266,7 @@ throw "Synology API discovery did not return all required API paths. Response: $
 }
 
 $url = "https://$($server):5001/webapi/$($authpath)"
-$response = Invoke-NasWebRequest -Uri $url -Method Post -Stage 'API login' -Body @{
+$loginBody = @{
 api = 'SYNO.API.Auth'
 method = 'login'
   version = 6
@@ -269,15 +275,55 @@ method = 'login'
   session = 'InfrastructureReport'
   format = 'cookie'
 }
+# An account with 2-step verification: the code once, and the NAS trusts this computer, under this
+# device name, with the device ID it gives; later sign-ins give that ID instead of a code.
+$deviceName = "MOSE report $env:COMPUTERNAME"
+if ($OtpCode) {
+  $loginBody.otp_code = $OtpCode
+  $loginBody.enable_device_token = 'yes'
+  $loginBody.device_name = $deviceName
+}
+elseif ($DeviceId) {
+  $loginBody.device_id = $DeviceId
+  $loginBody.device_name = $deviceName
+}
+$response = Invoke-NasWebRequest -Uri $url -Method Post -Stage 'API login' -Body $loginBody
 $url = $null
+$loginBody = $null
 
-$json = $response.Content 
+$json = $response.Content
 $loginResponse = ConvertFrom-Json $json
 if (-not $loginResponse.success -or [string]::IsNullOrWhiteSpace([string]$loginResponse.data.sid)) {
   $errorCode = if ($loginResponse.error.code) { $loginResponse.error.code } else { 'unknown' }
-  throw "Synology API login failed (error code $errorCode). Verify the NAS account, password, and account policy. Response: $json"
+  # DSM's sign-in error codes. The answer for a 2-step verification account holds a sign-in token,
+  # which stays out of the report.
+  $reason = switch ("$errorCode") {
+    '400' { "The account $user does not exist or its password is wrong." }
+    '401' { "The account $user is disabled." }
+    '402' { "The account $user has no permission to sign in to DSM." }
+    { $_ -in '403', '406' } { "The account $user has 2-step verification$(if ($DeviceId) { ', and the NAS no longer trusts this computer' }): the report asks for its code when it runs in a window." }
+    '404' { "The 2-step verification code of the account $user was wrong or expired." }
+    '407' { "The NAS blocks the IP address of this computer (Control Panel > Security > Protection)." }
+    { $_ -in '408', '409', '410' } { "The password of the account $user expired or must be changed." }
+    default { "Verify the NAS account, password, and account policy. Response: $($json -replace '"token"\s*:\s*"[^"]*"', '"token":"<hidden>"')" }
+  }
+  $exception = [System.Exception]::new("Synology API login failed (error code $errorCode). $reason")
+  # For Report.ps1, which then asks for the code and runs this NAS again.
+  $exception.Data['OtpRequired'] = "$errorCode" -in '403', '404', '406'
+  throw $exception
 }
 $sid = $loginResponse.data.sid
+if ($OtpCode) {
+  # DSM 7 names it device_id, DSM 6 did.
+  $newDeviceId = "$(if ($loginResponse.data.device_id) { $loginResponse.data.device_id } else { $loginResponse.data.did })"
+  if ($newDeviceId) {
+    # For Report.ps1, which saves it with the NAS in the client configuration.
+    [pscustomobject]@{ MoseNasDeviceId = $newDeviceId }
+  }
+  else {
+    Write-Warning "The NAS signed in with the code but gave no device ID: the report will ask for a code again next time."
+  }
+}
 
  
 

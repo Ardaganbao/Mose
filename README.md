@@ -103,6 +103,10 @@ Enter the SQL Server: the cluster or host name, `HOST\INSTANCE` for a named inst
 
 It connects as the Windows account running the report, or with a SQL Server login, or as another Windows account (`DOMAIN\user`, the query then runs in a process of that account). The account needs to read `msdb`, for example through its `db_datareader` role.
 
+### Synology NAS with 2-step verification
+
+When the NAS account has 2-step verification, the report asks for its code (from the authenticator app) once every server ran, then runs that NAS again. The NAS then trusts this computer, as `MOSE report <computer>`, and gives it a device ID, saved with the NAS in the client configuration: the next reports need no code. When the NAS no longer trusts the computer, e.g. after its trusted devices were removed in DSM, the report asks again. A report run without a window, such as a scheduled task, cannot ask: run it once in a window first.
+
 ### Veeam over the REST API
 
 **Veeam Backup & Replication (REST API)** reads the same report from Veeam's REST API (Veeam 11 or later, HTTPS port 9419 of the Veeam server), with the repositories' free space too. Except for SureBackup (below), it needs no Veeam console, no PowerShell remoting and no Windows administrator rights on the Veeam server: only port 9419 open from this computer, and a Veeam account with a role (Users and Roles in the Veeam console, e.g. Veeam Backup Viewer), entered as `DOMAIN\user`, or `SERVER\user` for an account of the Veeam server itself, `SERVER` being its computer name (not its IP address).

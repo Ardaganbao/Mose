@@ -137,6 +137,8 @@ function New-TargetRun {
         Log           = New-Object System.Collections.Generic.List[string]
         Lines         = @()
         Inventory     = @()
+        # A NAS's 2-step verification code, for its next run only: never saved.
+        OtpCode       = ''
         Error         = $null
         Status        = ''
         Elapsed       = ''
@@ -181,6 +183,12 @@ function Start-TargetRun {
         if ($debugLogPath) {
             $dumpPath = $debugLogPath -replace '\.log$', "_$($target.Module)_$((Get-MoseTargetName $target) -replace '[\\/:*?"<>|\s]', '_').log"
         }
+        if ($Run.OtpCode) {
+            # On a copy, so that the code never reaches the saved configuration.
+            $target = $target.PSObject.Copy()
+            $target | Add-Member -NotePropertyName OtpCode -NotePropertyValue $Run.OtpCode -Force
+            $Run.OtpCode = ''
+        }
         $Run.Job = Start-TargetJob -Target $target -Credential $credential -VaultPassword $vaultPassword -DebugDumpPath $dumpPath
     }
     catch {
@@ -218,8 +226,9 @@ function Start-TargetJob {
             if ($DebugDumpPath) {
                 $moduleParameters.DebugDumpPath = $DebugDumpPath
             }
-            # The Markdown lines, and what the module found for the inventory tables (MoseInventory objects).
-            Invoke-MoseModule @moduleParameters | Where-Object { $_ -is [string] -or ($null -ne $_ -and $_.PSObject.Properties['MoseInventory']) }
+            # The Markdown lines, what the module found for the inventory tables (MoseInventory objects),
+            # and the device ID a NAS gave for its 2-step verification (MoseNasDeviceId).
+            Invoke-MoseModule @moduleParameters | Where-Object { $_ -is [string] -or ($null -ne $_ -and ($_.PSObject.Properties['MoseInventory'] -or $_.PSObject.Properties['MoseNasDeviceId'])) }
         }
         catch {
             ConvertTo-MoseFailure $_
@@ -330,6 +339,16 @@ function Complete-TargetRun {
             if ($state -eq 'Failed') {
                 throw "The PowerShell process of the module failed: $($reason.Message)"
             }
+            # Saved even when the module failed after signing in: the NAS trusts this computer already.
+            $device = @($Run.Output | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties['MoseNasDeviceId'] }) | Select-Object -First 1
+            if ($device) {
+                try {
+                    Save-NasDeviceId $Run.Target "$($device.MoseNasDeviceId)"
+                }
+                catch {
+                    Write-Warning "The device ID of $($Run.Target.Server) could not be saved, so its next report asks for a code again: $($_.Exception.Message)"
+                }
+            }
             $failure = @($Run.Output | Where-Object { $_.PSObject.Properties['MoseFailure'] }) | Select-Object -First 1
             if ($failure) {
                 $exception = [System.Exception]::new($failure.Message)
@@ -339,6 +358,7 @@ function Complete-TargetRun {
                 $exception.Data['LoginRefused'] = [bool]$failure.LoginRefused
                 $exception.Data['UntrustedCertificate'] = "$($failure.UntrustedCertificate)"
                 $exception.Data['CertificateSubject'] = "$($failure.CertificateSubject)"
+                $exception.Data['OtpRequired'] = [bool]$failure.OtpRequired
                 throw $exception
             }
             $Run.Lines = @($Run.Output | Where-Object { $_ -is [string] })
@@ -1231,8 +1251,51 @@ function Request-CertificateTrust {
     return $true
 }
 
+# The device ID a NAS gave when it trusted this computer with a 2-step verification code: kept with
+# the NAS in the client configuration, so that its next reports need no code.
+function Save-NasDeviceId {
+    param(
+        [object]$Target,
+        [string]$DeviceId
+    )
+
+    if ($Target.PSObject.Properties['NasDeviceId']) {
+        $Target.NasDeviceId = $DeviceId
+    }
+    else {
+        $Target | Add-Member -NotePropertyName NasDeviceId -NotePropertyValue $DeviceId
+    }
+    if ($configFromVault) {
+        Save-MoseConfig -Client $config.Client -Targets @($config.Targets) -Layout (Get-MoseProperty $config 'Layout') `
+            -Software @(Get-MoseProperty $config 'Software' | Where-Object { $_ }) -Machines @(Get-MoseProperty $config 'Machines' | Where-Object { $_ })
+        Write-Host "$($Target.Server) now trusts this computer: saved in the client configuration, the next reports need no code." -ForegroundColor Green
+    }
+}
+
+# A NAS whose account has 2-step verification: its code, for one more run. Returns $true when one
+# was entered.
+function Request-NasOtpCode {
+    param(
+        [object]$Run
+    )
+
+    if (-not [Environment]::UserInteractive) {
+        return $false
+    }
+    $server = $Run.Target.Server
+    $userName = (Get-TargetCredential $Run.Target).UserName
+    Write-Host "$server asks for the 2-step verification code of $userName. With it, the NAS trusts this computer and the next reports need no code." -ForegroundColor Yellow
+    $code = "$(Read-Host "Code from the authenticator app for $userName on $server (Enter to skip)")".Trim() -replace '\s', ''
+    if (-not $code) {
+        return $false
+    }
+    $Run.OtpCode = $code
+    return $true
+}
+
 # After a server failed for a reason the user can fix here (a refused login, an untrusted
-# certificate): the offer to fix it. Returns $true when the server should run again.
+# certificate, a 2-step verification code): the offer to fix it. Returns $true when the server
+# should run again.
 function Request-RunRetry {
     param(
         [object]$Run
@@ -1248,6 +1311,9 @@ function Request-RunRetry {
         }
         if ($data['LoginRefused']) {
             return (Request-ApiLogin $Run.Target)
+        }
+        if ($data['OtpRequired']) {
+            return (Request-NasOtpCode $Run)
         }
     }
     catch {
