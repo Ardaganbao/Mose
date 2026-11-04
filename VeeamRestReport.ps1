@@ -273,60 +273,112 @@ function Get-VeeamApiItems {
         [int]$MaxItems = 0
     )
 
-    $limit = 200
     $skip = 0
     while ($true) {
-        $pageQuery = @{ skip = $skip; limit = $limit }
-        foreach ($key in $Query.Keys) {
-            $pageQuery[$key] = $Query[$key]
-        }
-        $page = Invoke-VeeamApi -Path $Path -Query $pageQuery
-        $items = @(Get-VeeamData $page)
-        $items
-        $skip += $items.Count
-        # The server may return fewer items than asked per page: its total says when all came.
-        $total = Get-VeeamValue (Get-VeeamValue $page 'pagination') 'total'
-        if ($items.Count -eq 0 -or ($null -ne $total -and $skip -ge [int]$total) -or ($null -eq $total -and $items.Count -lt $limit) -or
-            ($MaxItems -gt 0 -and $skip -ge $MaxItems)) {
+        $page = Get-VeeamPage -Path $Path -Query $Query -Skip $skip -Count 200
+        $page.Items
+        $skip += $page.Count
+        if ($page.Ended -or ($MaxItems -gt 0 -and $skip -ge $MaxItems)) {
             break
         }
     }
 }
 
-# Every job with its state. Veeam refuses a whole page when one of its jobs has a type this API
-# version cannot give (HTTP 500, e.g. "Job type WindowsAgentBackupFailoverCluster is not supported
-# in this API version"): the jobs are then read one by one, and the types of the refused ones are
-# returned in Unsupported.
-function Get-VeeamJobStates {
-    $unsupportedPattern = 'Job type (\S+) is not supported in this API version'
+# The type of an item Veeam refused because this API version cannot give it (HTTP 500, e.g. "Job
+# type WindowsAgentBackupFailoverCluster is not supported in this API version"), else nothing.
+function Get-RefusedType {
+    param(
+        [System.Exception]$Exception
+    )
+
+    if ($Exception.Data['HttpStatus'] -eq 500 -and $Exception.Message -match '(?<type>\S+) is not supported in this API version') {
+        return $Matches['type']
+    }
+}
+
+# The items it refused, by list: { Path, Type }.
+$script:RefusedItems = New-Object System.Collections.Generic.List[object]
+
+# $Count items of a list from $Skip: the items, the positions read, and whether the list ended.
+# Veeam refuses a whole page for one item it cannot give: that page is read again in halves, down
+# to the refused item, which is left out but counted as read.
+function Get-VeeamPage {
+    param(
+        [string]$Path,
+        [hashtable]$Query,
+        [int]$Skip,
+        [int]$Count
+    )
+
+    $pageQuery = @{ skip = $Skip; limit = $Count }
+    foreach ($key in $Query.Keys) {
+        $pageQuery[$key] = $Query[$key]
+    }
+    $refusedType = $null
     try {
-        return [pscustomobject]@{ Jobs = @(Get-VeeamApiItems -Path '/api/v1/jobs/states'); Unsupported = @() }
+        $page = Invoke-VeeamApi -Path $Path -Query $pageQuery
     }
     catch {
-        if ($_.Exception.Data['HttpStatus'] -ne 500 -or $_.Exception.Message -notmatch $unsupportedPattern) {
+        $refusedType = Get-RefusedType $_.Exception
+        if (-not $refusedType) {
             throw
         }
     }
-    $jobs = @()
-    $unsupported = @()
-    # Past the last job the API answers an empty page, which ends the loop.
-    for ($skip = 0; ; $skip++) {
-        try {
-            $items = @(Get-VeeamData (Invoke-VeeamApi -Path '/api/v1/jobs/states' -Query @{ skip = $skip; limit = 1 }))
-        }
-        catch {
-            if ($_.Exception.Data['HttpStatus'] -ne 500 -or $_.Exception.Message -notmatch $unsupportedPattern) {
-                throw
-            }
-            $unsupported += $Matches[1]
-            continue
-        }
-        if ($items.Count -eq 0) {
-            break
-        }
-        $jobs += $items
+    if (-not $refusedType) {
+        $items = @(Get-VeeamData $page)
+        # The server may return fewer items than asked per page: its total says when all came.
+        $total = Get-VeeamValue (Get-VeeamValue $page 'pagination') 'total'
+        $ended = $items.Count -eq 0 -or ($null -ne $total -and $Skip + $items.Count -ge [int]$total) -or ($null -eq $total -and $items.Count -lt $Count)
+        return [pscustomobject]@{ Items = $items; Count = $items.Count; Ended = $ended }
     }
-    return [pscustomobject]@{ Jobs = $jobs; Unsupported = $unsupported }
+    if ($Count -eq 1) {
+        $script:RefusedItems.Add([pscustomobject]@{ Path = $Path; Type = $refusedType })
+        return [pscustomobject]@{ Items = @(); Count = 1; Ended = $false }
+    }
+    $first = Get-VeeamPage -Path $Path -Query $Query -Skip $Skip -Count ([math]::Floor($Count / 2))
+    if ($first.Ended) {
+        return $first
+    }
+    $rest = Get-VeeamPage -Path $Path -Query $Query -Skip ($Skip + $first.Count) -Count ($Count - $first.Count)
+    return [pscustomobject]@{ Items = @($first.Items) + @($rest.Items); Count = $first.Count + $rest.Count; Ended = $rest.Ended }
+}
+
+# The jobs Veeam refused (a type this API version cannot give), rebuilt from their sessions of the
+# last 31 days: the backup sessions of a job that is not listed. Only when there are as many as
+# refused jobs; else none, and the report says which types are missing.
+function Get-RefusedJobs {
+    param(
+        [object[]]$Jobs
+    )
+
+    $refused = @($script:RefusedItems | Where-Object { $_.Path -eq '/api/v1/jobs/states' })
+    if ($refused.Count -eq 0) {
+        return
+    }
+    $knownIds = @($Jobs | ForEach-Object { Get-VeeamValue $_ 'id' } | Where-Object { $_ })
+    $knownNames = @($Jobs | ForEach-Object { "$($_.name)" })
+    # Not a backup copy worker ("<copy job>\<source job> (<copy type>)"), nor a copy, configuration
+    # backup or SureBackup session.
+    $groups = @(Get-RecentSessions | Where-Object {
+            $jobId = Get-VeeamValue $_ 'jobId'
+            $jobId -and $jobId -notin $knownIds -and "$($_.name)" -notin $knownNames -and "$($_.name)" -notmatch '\\' -and
+            "$(Get-VeeamValue $_ 'sessionType')" -match '(?i)backup' -and "$(Get-VeeamValue $_ 'sessionType')" -notmatch '(?i)copy|config|sure'
+        } | Group-Object -Property { Get-VeeamValue $_ 'jobId' })
+    if ($groups.Count -ne $refused.Count) {
+        Write-Warning "Veeam refused $($refused.Count) job(s) ($(@($refused | ForEach-Object { $_.Type }) -join ', ')); $($groups.Count) unlisted job(s) ran in the last 31 days, so they are not rebuilt from their sessions."
+        return
+    }
+    $types = @($refused | ForEach-Object { $_.Type } | Sort-Object -Unique)
+    foreach ($group in $groups) {
+        $session = Get-NewestSession $group.Group
+        [pscustomobject]@{
+            id          = $group.Name
+            name        = "$($session.name)"
+            type        = if ($types.Count -eq 1) { $types[0] } else { $types -join ' or ' }
+            status      = 'n/a'
+            MoseRebuilt = $true
+        }
+    }
 }
 
 function Convert-Bytes {
@@ -702,6 +754,9 @@ function Format-BackupJob {
     )
 
     $text = "`n#### $($JobState.name)`n"
+    if (Get-VeeamValue $JobState 'MoseRebuilt') {
+        $text += "Veeam's REST API $script:ApiVersion does not give this job type ($($JobState.type)): the job as its last session shows it.`n`n"
+    }
     $session = Get-LastJobSession $JobState
     if ($null -eq $session) {
         # The API lists no session of some agent jobs: their last run as the job's state gives it.
@@ -733,7 +788,7 @@ function Format-BackupJob {
     $end = Get-VeeamValue $session 'endTime'
     $repository = Get-VeeamValue $JobState 'repositoryName'
     $nextRun = Get-VeeamValue $JobState 'nextRun'
-    $nextRunText = if ($nextRun) { Format-Time $nextRun 'yyyy-MM-dd HH:mm' } else { 'Not scheduled' }
+    $nextRunText = if ($nextRun) { Format-Time $nextRun 'yyyy-MM-dd HH:mm' } elseif (Get-VeeamValue $JobState 'MoseRebuilt') { 'n/a' } else { 'Not scheduled' }
 
     $text += "|$(Format-Time $start 'yyyy-MM-dd HH:mm:ss')||||||$(Get-VeeamResult $session)|$processedText |`n"
     $text += "|---|---|---|-----|---|----|----|----|`n"
@@ -840,6 +895,15 @@ function Format-BackupCopyJob {
     try {
         foreach ($object in @(Get-JobBackupObjects -JobId (@(Get-VeeamValue $JobState 'id') + $workerIds) -JobName $JobState.name)) {
             $count = Get-VeeamValue $object 'restorePointsCount'
+            if ($null -eq $count) {
+                # Not given with the object by every Veeam version: its restore points, counted.
+                try {
+                    $count = @(Get-VeeamApiItems -Path "/api/v1/backupObjects/$($object.id)/restorePoints" -MaxItems 1000).Count
+                }
+                catch {
+                    Write-Verbose "Restore points of '$($object.name)' are not available: $($_.Exception.Message)"
+                }
+            }
             if ($null -ne $count) {
                 $restorePoints["$($object.name)"] = [int]$count + [int]$restorePoints["$($object.name)"]
             }
@@ -1006,8 +1070,10 @@ try {
     }
 
     Write-VeeamReportProgress -Status 'Collecting jobs' -PercentComplete 5
-    $jobStates = Get-VeeamJobStates
-    $jobs = @($jobStates.Jobs | Sort-Object -Property name)
+    $jobs = @(Get-VeeamApiItems -Path '/api/v1/jobs/states')
+    $refusedJobs = @($script:RefusedItems | Where-Object { $_.Path -eq '/api/v1/jobs/states' })
+    $rebuiltJobs = @(Get-RefusedJobs -Jobs $jobs)
+    $jobs = @(@($jobs) + $rebuiltJobs | Sort-Object -Property name)
     $copyJobs = @($jobs | Where-Object { "$($_.type)" -match '(?i)copy' })
     $sureBackupJobs = @($jobs | Where-Object { "$($_.type)" -match '(?i)surebackup' })
     $backupJobs = @($jobs | Where-Object { "$($_.type)" -notmatch '(?i)copy|surebackup' })
@@ -1015,10 +1081,12 @@ try {
     $done = 0
 
     $Body += "`n### Backup jobs`n"
-    foreach ($group in @($jobStates.Unsupported | Group-Object | Sort-Object -Property Name)) {
-        $Body += "- :warning: $($group.Count) job(s) of type $($group.Name) not shown: Veeam's REST API $script:ApiVersion does not give this job type.`n"
+    if ($rebuiltJobs.Count -eq 0) {
+        foreach ($group in @($refusedJobs | Group-Object -Property Type | Sort-Object -Property Name)) {
+            $Body += "- :warning: $($group.Count) job(s) of type $($group.Name) not shown: Veeam's REST API $script:ApiVersion does not give this job type, and no session of it was found.`n"
+        }
     }
-    if ($backupJobs.Count -eq 0 -and $jobStates.Unsupported.Count -eq 0) {
+    if ($backupJobs.Count -eq 0 -and $refusedJobs.Count -eq 0) {
         $Body += "No backup jobs are configured.`n"
     }
     foreach ($job in $backupJobs) {
