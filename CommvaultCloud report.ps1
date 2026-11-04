@@ -1579,8 +1579,6 @@ $md = @"
 
 $licenseText
 
----
-
 ## Protected Item Health and SLA
 
 $slaSummary
@@ -1594,8 +1592,6 @@ An item meets the SLA when its last completed backup (with or without errors) is
 $($protectedItemLines -join "`r`n")
 
 Inventory status: $inventoryNotesText
-
----
 
 ## Job History
 
