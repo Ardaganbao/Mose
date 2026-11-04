@@ -939,7 +939,7 @@ for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) 
     }
 }
 if ($licenseForbidden.Count -gt 0) {
-    $licenseNotes = @("- $($licenseForbidden -join ', '): Commvault refused them to this account (HTTP 403 Forbidden). Its role needs access to the License Summary report.") + $licenseNotes
+    $licenseNotes = @("- $($licenseForbidden -join ', '): Commvault refused them to this account (HTTP 403 Forbidden): the License Summary report is for CommCell administrators.") + $licenseNotes
 }
 $licenseText = if ($licenseSections.Count -gt 0) {
     $licenseSections -join "`r`n`r`n"
@@ -949,6 +949,11 @@ else {
 }
 if ($licenseNotes.Count -gt 0) {
     $licenseText += "`r`n`r`nLicense datasets that could not be read:`r`n`r`n" + ($licenseNotes -join "`r`n")
+}
+if ($licenseSections.Count -eq 0 -and $Mode -eq 'Cloud') {
+    # Commvault Cloud runs the CommCell, so even a tenant's administrator gets no license rows:
+    # Report.ps1 puts the Subscriptions page exported from Commvault Cloud in place of this text.
+    $licenseText = "<!-- MOSE:CommvaultSubscriptions -->`r`n$licenseText`r`n<!-- /MOSE:CommvaultSubscriptions -->"
 }
 # Sent together, so answers at regular steps (10, 20, 30 s...) mean Commvault runs them one at a time.
 $licenseSeconds = @($licenseResults | Where-Object { $null -ne $_.Seconds } | ForEach-Object { [math]::Round($_.Seconds) } | Sort-Object)

@@ -1323,6 +1323,110 @@ function Request-RunRetry {
     return $false
 }
 
+# The rows of the Subscriptions page exported from Commvault Cloud as CSV (Service, Type, Start
+# date, End date, Purchased, Used, Summary).
+function Read-CommvaultSubscriptions {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "There is no file $Path."
+    }
+    $rows = @(Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Csv)
+    if ($rows.Count -eq 0 -or -not $rows[0].PSObject.Properties['Service']) {
+        throw "$Path is not the Subscriptions page exported from Commvault Cloud: it has no Service column."
+    }
+    return $rows
+}
+
+# The subscriptions as a table, an end date within 45 days marked.
+function Format-CommvaultSubscriptions {
+    param(
+        [object[]]$Rows,
+        [datetime]$Exported
+    )
+
+    $stale = if ($Exported -lt (Get-Date).AddDays(-31)) { ' :warning: Export it again for the next report.' } else { '' }
+    $columns = @($Rows[0].PSObject.Properties.Name)
+    $lines = @(
+        "Commvault Cloud gives no license data to this account, so they come from its Subscriptions page, exported on $($Exported.ToString('yyyy-MM-dd')).$stale"
+        ''
+        "| $($columns -join ' | ') |"
+        "|$(@($columns | ForEach-Object { '---' }) -join '|')|"
+    )
+    foreach ($row in $Rows) {
+        $cells = foreach ($column in $columns) {
+            $cell = Format-InventoryCell (Get-MoseProperty $row $column)
+            $end = [datetime]::MinValue
+            if ($column -eq 'End date' -and [datetime]::TryParse($cell, [cultureinfo]::GetCultureInfo('en-US'), [System.Globalization.DateTimeStyles]::None, [ref]$end)) {
+                $daysLeft = ($end.Date - (Get-Date).Date).Days
+                if ($daysLeft -lt 0) { $cell += ' :no_entry:' } elseif ($daysLeft -le 45) { $cell += ' :warning:' }
+            }
+            $cell
+        }
+        $lines += "| $($cells -join ' | ') |"
+    }
+    return $lines -join "`r`n"
+}
+
+# Commvault Cloud gives no license rows to its tenants' accounts, not even an administrator's: the
+# module then marks its license text, replaced here by the Subscriptions page exported as CSV. A
+# copy of the export is kept next to the scripts, one per Commvault Cloud, and asked for again when
+# it is older than 25 days (the report is monthly). Returns the module's lines.
+function Add-CommvaultSubscriptions {
+    param(
+        [object]$Run
+    )
+
+    $pattern = '(?s)<!-- MOSE:CommvaultSubscriptions -->\r?\n(.*?)\r?\n<!-- /MOSE:CommvaultSubscriptions -->'
+    if (-not @($Run.Lines | Where-Object { $_ -match $pattern })) {
+        return $Run.Lines
+    }
+    $file = Join-Path $PSScriptRoot "Subscriptions_$((Get-MoseTargetName $Run.Target) -replace '[\\/:*?"<>|\s]', '_').csv"
+    $saved = Get-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    if ([Environment]::UserInteractive -and (-not $saved -or $saved.LastWriteTime -lt (Get-Date).AddDays(-25))) {
+        $why = if ($saved) { "The Subscriptions export kept for $($Run.Title) is from $($saved.LastWriteTime.ToString('yyyy-MM-dd'))." } else { "$($Run.Title) gives no license data to this account." }
+        Write-Host "$why For its licenses, export the Subscriptions page of Commvault Cloud as CSV." -ForegroundColor Yellow
+        while ($true) {
+            $path = "$(Read-Host -Prompt 'Path of the exported CSV (Enter to skip)')".Trim().Trim('"')
+            if (-not $path) {
+                break
+            }
+            try {
+                [void](Read-CommvaultSubscriptions $path)
+                Copy-Item -LiteralPath $path -Destination $file -Force
+                $saved = Get-Item -LiteralPath $file
+                Write-Host "Kept a copy for the next reports: $file" -ForegroundColor Green
+                break
+            }
+            catch {
+                Write-Warning $_.Exception.Message
+            }
+        }
+    }
+    $text = ''
+    if ($saved) {
+        try {
+            $text = Format-CommvaultSubscriptions -Rows @(Read-CommvaultSubscriptions $file) -Exported $saved.LastWriteTime
+            Write-DebugLog "  $($Run.Title): licenses from $file, exported $($saved.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))"
+        }
+        catch {
+            Write-Warning "The Subscriptions export of $($Run.Title) could not be read: $($_.Exception.Message)"
+        }
+    }
+    foreach ($line in $Run.Lines) {
+        $match = [regex]::Match($line, $pattern)
+        if (-not $match.Success) {
+            $line
+            continue
+        }
+        # Without an export, the module's own text.
+        $replacement = if ($text) { $text } else { $match.Groups[1].Value }
+        $line.Substring(0, $match.Index) + $replacement + $line.Substring($match.Index + $match.Length)
+    }
+}
+
 # Table cells must not contain a | or a line break.
 function Format-InventoryCell {
     param($Value)
@@ -2091,6 +2195,19 @@ try {
                 Write-Host "Trying $($run.Title) again..." -ForegroundColor DarkGray
                 Write-DebugLog "  $($run.Title) runs again after: $($run.Error.Exception.Message)"
                 Invoke-TargetRuns -Runs @($run)
+            }
+        }
+
+        # The licenses of a Commvault Cloud, from its Subscriptions page exported as CSV, asked for
+        # once every server ended.
+        foreach ($run in $runs) {
+            if (-not $run.Error -and $run.Target.Module -eq 'CommvaultCloud') {
+                try {
+                    $run.Lines = @(Add-CommvaultSubscriptions $run)
+                }
+                catch {
+                    Write-Warning "The Subscriptions export of $($run.Title) could not be added: $($_.Exception.Message)"
+                }
             }
         }
 

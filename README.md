@@ -242,6 +242,10 @@ A version gets :white_check_mark: when it is the latest of its product, :warning
 
 The text of their section (`W`) goes before them, e.g. a schema of the network. A table with nothing to show is left out: a partial report has only the tables of its servers, without the lines entered by hand for other machines or software.
 
+## Commvault Cloud licenses
+
+Commvault's API gives the licenses from its License Summary report, which is for CommCell administrators. Commvault Cloud runs the CommCell, so it refuses them to every tenant account, even an administrator's (HTTP 403). The report then asks, once every server ran, for the Subscriptions page of Commvault Cloud exported as CSV, and shows it as the license table, with the date it was exported. A copy is kept next to the scripts (`Subscriptions_<secret>.csv`, which git ignores), so the next reports reuse it; the report asks for a new export when the copy is older than 25 days. A subscription ending within 45 days is marked :warning:, an ended one :no_entry:.
+
 ## Commvault Cloud token renewal
 
 Commvault Cloud deletes a token chain that is not renewed for 14 days. On a computer with a Commvault Cloud, register the weekly renewal once, from the install folder:
