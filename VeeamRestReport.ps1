@@ -293,6 +293,42 @@ function Get-VeeamApiItems {
     }
 }
 
+# Every job with its state. Veeam refuses a whole page when one of its jobs has a type this API
+# version cannot give (HTTP 500, e.g. "Job type WindowsAgentBackupFailoverCluster is not supported
+# in this API version"): the jobs are then read one by one, and the types of the refused ones are
+# returned in Unsupported.
+function Get-VeeamJobStates {
+    $unsupportedPattern = 'Job type (\S+) is not supported in this API version'
+    try {
+        return [pscustomobject]@{ Jobs = @(Get-VeeamApiItems -Path '/api/v1/jobs/states'); Unsupported = @() }
+    }
+    catch {
+        if ($_.Exception.Data['HttpStatus'] -ne 500 -or $_.Exception.Message -notmatch $unsupportedPattern) {
+            throw
+        }
+    }
+    $jobs = @()
+    $unsupported = @()
+    # Past the last job the API answers an empty page, which ends the loop.
+    for ($skip = 0; ; $skip++) {
+        try {
+            $items = @(Get-VeeamData (Invoke-VeeamApi -Path '/api/v1/jobs/states' -Query @{ skip = $skip; limit = 1 }))
+        }
+        catch {
+            if ($_.Exception.Data['HttpStatus'] -ne 500 -or $_.Exception.Message -notmatch $unsupportedPattern) {
+                throw
+            }
+            $unsupported += $Matches[1]
+            continue
+        }
+        if ($items.Count -eq 0) {
+            break
+        }
+        $jobs += $items
+    }
+    return [pscustomobject]@{ Jobs = $jobs; Unsupported = $unsupported }
+}
+
 function Convert-Bytes {
     param(
         $Bytes
@@ -970,7 +1006,8 @@ try {
     }
 
     Write-VeeamReportProgress -Status 'Collecting jobs' -PercentComplete 5
-    $jobs = @(Get-VeeamApiItems -Path '/api/v1/jobs/states' | Sort-Object -Property name)
+    $jobStates = Get-VeeamJobStates
+    $jobs = @($jobStates.Jobs | Sort-Object -Property name)
     $copyJobs = @($jobs | Where-Object { "$($_.type)" -match '(?i)copy' })
     $sureBackupJobs = @($jobs | Where-Object { "$($_.type)" -match '(?i)surebackup' })
     $backupJobs = @($jobs | Where-Object { "$($_.type)" -notmatch '(?i)copy|surebackup' })
@@ -978,7 +1015,10 @@ try {
     $done = 0
 
     $Body += "`n### Backup jobs`n"
-    if ($backupJobs.Count -eq 0) {
+    foreach ($group in @($jobStates.Unsupported | Group-Object | Sort-Object -Property Name)) {
+        $Body += "- :warning: $($group.Count) job(s) of type $($group.Name) not shown: Veeam's REST API $script:ApiVersion does not give this job type.`n"
+    }
+    if ($backupJobs.Count -eq 0 -and $jobStates.Unsupported.Count -eq 0) {
         $Body += "No backup jobs are configured.`n"
     }
     foreach ($job in $backupJobs) {
