@@ -238,7 +238,7 @@ function Start-TargetJob {
 
 # Shows what the module of a running server wrote since the last look: its Write-Host lines,
 # warnings and errors with the server's name in front, and its progress bars under one bar for the
-# server. Its warnings and errors also wait in $Run.Log for the debug log.
+# server. Its Write-Host lines, warnings and errors also wait in $Run.Log for the debug log.
 function Receive-TargetRun {
     param(
         [object]$Run
@@ -277,6 +277,7 @@ function Receive-TargetRun {
             }
         }
         Write-Host @hostParameters
+        $Run.Log.Add("  $($hostParameters.Object.Substring($prefix.Length + 1))")
     }
     $Run.Read.Information = $i
 
