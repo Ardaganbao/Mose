@@ -377,6 +377,37 @@ function Import-SecretModules {
     }
 }
 
+# In a background job (Report.ps1), a call SecretManagement passes on to the vault stops the rest
+# of the job's progress, Write-Host lines and warnings from reaching the report: there it is made in
+# a runspace of its own. SecretStore stays unlocked for the whole process; should the call fail
+# there, it is made here.
+function Invoke-SecretCommand {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Get-Secret', 'Set-Secret')][string]$Name,
+        [Parameter(Mandatory = $true)][hashtable]$Parameters
+    )
+
+    if ($Host.Name -eq 'ServerRemoteHost') {
+        $vaultCall = [powershell]::Create()
+        try {
+            [void]$vaultCall.AddCommand('Import-Module').AddParameter('Name', 'Microsoft.PowerShell.SecretManagement').AddStatement()
+            [void]$vaultCall.AddCommand($Name).AddParameters($Parameters)
+            $result = $vaultCall.Invoke()
+            if (-not $vaultCall.HadErrors) {
+                return $result
+            }
+            Write-Verbose "$Name in a runspace of its own failed: $($vaultCall.Streams.Error[0])"
+        }
+        catch {
+            Write-Verbose "$Name in a runspace of its own failed: $($_.Exception.Message)"
+        }
+        finally {
+            $vaultCall.Dispose()
+        }
+    }
+    & $Name @Parameters
+}
+
 #--------------------------------------------------------
 # Get secret containing access/refresh tokens and the ring ID
 #--------------------------------------------------------
@@ -393,7 +424,7 @@ function Get-CommvaultSecret {
     )
     $name = "$ClientName$Suffix"
 
-    $secret = Get-Secret -Name $name -Vault $VaultName -ErrorAction Stop
+    $secret = Invoke-SecretCommand -Name Get-Secret -Parameters @{ Name = $name; Vault = $VaultName; ErrorAction = 'Stop' }
     if (-not $secret) {
         throw "Secret '$name' not found."
     }
@@ -551,7 +582,7 @@ function Update-MetallicAccessToken {
         $updatedSecret.ClientSecret = ConvertTo-SecureSecretValue -Value $script:SecretObject.ClientSecret
     }
 
-    Set-Secret -Name $script:SecretObject.Name -Vault $script:SecretObject.VaultName -Secret $updatedSecret -ErrorAction Stop
+    Invoke-SecretCommand -Name Set-Secret -Parameters @{ Name = $script:SecretObject.Name; Vault = $script:SecretObject.VaultName; Secret = $updatedSecret; ErrorAction = 'Stop' } | Out-Null
     $script:SecretObject.AccessToken = [string]$newAccessToken
     $script:SecretObject.RefreshToken = [string]$newRefreshToken
     $script:GlobalHeaders = New-CommvaultHeaders -SecretObject $script:SecretObject -Mode Cloud
