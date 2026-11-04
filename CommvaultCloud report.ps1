@@ -853,6 +853,7 @@ $apiTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 $licenseSections = @()
 $licenseNotes = @()
+$licenseForbidden = @()
 # Commvault runs each dataset's query when it is asked for, so they are all asked for at once.
 $licenseNames = @($licenseDatasets.Keys)
 $licenseRequests = @(foreach ($licenseName in $licenseNames) {
@@ -875,8 +876,17 @@ for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) 
         }
     }
     catch {
-        $licenseNotes += "- ${licenseName}: $($_.Exception.Message)"
+        # Refused to the account: said once for all of them, rather than in Windows' language for each.
+        if ((Get-HttpStatusCode -Exception $_.Exception) -eq 403) {
+            $licenseForbidden += $licenseName
+        }
+        else {
+            $licenseNotes += "- ${licenseName}: $($_.Exception.Message)"
+        }
     }
+}
+if ($licenseForbidden.Count -gt 0) {
+    $licenseNotes = @("- $($licenseForbidden -join ', '): Commvault refused them to this account (HTTP 403 Forbidden). Its role needs access to the License Summary report.") + $licenseNotes
 }
 $licenseText = if ($licenseSections.Count -gt 0) {
     $licenseSections -join "`r`n`r`n"
