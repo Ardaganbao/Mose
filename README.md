@@ -34,6 +34,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
 | `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the last 16 days, from msdb), and the SQL Server version. |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
+| `TESTING.md` | Which modules were tested against a real server, and when. Not copied to the client computers. |
 
 ## Install on a computer
 
