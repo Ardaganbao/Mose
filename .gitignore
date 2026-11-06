@@ -32,3 +32,6 @@ Keeper_Export_*
 
 # The RDP connections of a Keeper Connection Manager, written by Keeper.ps1, name the client's servers.
 KCM-RDP-Drive-Report_*.csv
+
+# The addresses and data sources of the Keeper Connection Managers used on this computer (Keeper.ps1).
+keeper.local.json
