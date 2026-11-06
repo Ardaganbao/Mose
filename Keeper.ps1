@@ -17,6 +17,9 @@ param(
     # Import: the CSV of the drive settings to write, laid out like the export. Asked when not given.
     [string]$Path,
 
+    # Import: only the rows of these connection IDs, e.g. 44, or 40-50,60 (* for all). Asked when not given.
+    [string[]]$Id,
+
     # Don't open the export once it is written.
     [switch]$NoOpen
 )
@@ -27,7 +30,7 @@ param(
 # their drive settings, shown, written to KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv next to the
 # scripts and opened. It names the client's servers, so git ignores it like the report.
 # Import: the drive settings of such a CSV, edited in Excel for example, written to the connections of
-# its ID column. Only its drive columns are written; Name, ParentID and Hostname only say which
+# its ID column, all of them or those picked by ID (44, or 40-50,60). Only its drive columns are written; Name, ParentID and Hostname only say which
 # connection a row is, and a row whose name is not the connection's is skipped. The changes are shown
 # first, then written to all connections or to the first one only, after a backup of them in
 # KCM-RDP-Backup_<yyyy-MM-dd_HHmmss>.json.
@@ -241,6 +244,62 @@ function Read-DriveCsv {
     return @($text | ConvertFrom-Csv -Delimiter $delimiter)
 }
 
+# IDs as ranges: 2-5, 8, 10-12. The IDs are numbers in Keeper's databases; any other is listed as is.
+function Format-IdRanges {
+    param(
+        [string[]]$Ids
+    )
+
+    $numbers = @($Ids | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [long]$_ } | Sort-Object -Unique)
+    $parts = New-Object System.Collections.Generic.List[string]
+    $start = 0
+    while ($start -lt $numbers.Count) {
+        $end = $start
+        while ($end + 1 -lt $numbers.Count -and $numbers[$end + 1] -eq $numbers[$end] + 1) {
+            $end++
+        }
+        $parts.Add($(if ($end -gt $start) { "$($numbers[$start])-$($numbers[$end])" } else { "$($numbers[$start])" }))
+        $start = $end + 1
+    }
+    foreach ($other in @($Ids | Where-Object { $_ -notmatch '^\d+$' })) {
+        $parts.Add($other)
+    }
+    return $parts -join ', '
+}
+
+# The rows whose ID is in a selection like 44, or 40-50,60: a range takes the IDs from one number to
+# the other. An ID or a range that no row has stops, in case of a typo.
+function Select-DriveRows {
+    param(
+        [object[]]$Rows,
+        [string]$Selection
+    )
+
+    $picked = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($part in @(($Selection -replace '\s*-\s*', '-') -split '[,;\s]+' | Where-Object { $_ })) {
+        if ($part -match '^(\d+)-(\d+)$') {
+            $low = [long]$Matches[1]
+            $high = [long]$Matches[2]
+            if ($low -gt $high) {
+                $low, $high = $high, $low
+            }
+            $inRange = @($Rows | ForEach-Object { "$($_.ID)".Trim() } | Where-Object { $_ -match '^\d+$' -and [long]$_ -ge $low -and [long]$_ -le $high })
+            if ($inRange.Count -eq 0) {
+                throw "No row of the CSV has an ID from $low to $high."
+            }
+            $inRange | ForEach-Object { [void]$picked.Add($_) }
+        }
+        elseif (@($Rows | Where-Object { "$($_.ID)".Trim() -eq $part }).Count -gt 0) {
+            [void]$picked.Add($part)
+        }
+        else {
+            throw "No row of the CSV has ID $part."
+        }
+    }
+    # In the CSV's order.
+    return @($Rows | Where-Object { $picked.Contains("$($_.ID)".Trim()) })
+}
+
 # Writes the drive settings of a CSV laid out like the export to the connections of its ID column.
 function Import-KeeperConnections {
     $file = $Path
@@ -281,6 +340,17 @@ function Import-KeeperConnections {
     if ($twice.Count -gt 0) {
         throw "These IDs are on more than one row of ${file}: $($twice -join ', ')."
     }
+
+    # Some rows only: the ID is the one thing that is unique, names repeat.
+    $selection = "$($Id -join ',')".Trim()
+    if (-not $Id) {
+        Write-Host "IDs in the CSV: $(Format-IdRanges @($rows | ForEach-Object { "$($_.ID)".Trim() }))" -ForegroundColor DarkGray
+        $selection = "$(Read-Host -Prompt "IDs to import (44, or 40-50,60; Enter for all $($rows.Count))")".Trim()
+    }
+    if ($selection -and $selection -ne '*') {
+        $rows = @(Select-DriveRows -Rows $rows -Selection $selection)
+        Write-Host "$($rows.Count) row(s) picked: IDs $(Format-IdRanges @($rows | ForEach-Object { "$($_.ID)".Trim() }))." -ForegroundColor DarkGray
+    }
     $wanted = @(foreach ($row in $rows) {
             $values = [ordered]@{}
             foreach ($column in $changed) {
@@ -293,7 +363,7 @@ function Import-KeeperConnections {
             [pscustomobject]@{ ID = "$($row.ID)".Trim(); Name = "$(Get-MoseProperty $row 'Name')".Trim(); Values = $values }
         })
     # Name, ParentID and Hostname only say which connection a row is.
-    Write-Host "$($rows.Count) row(s) in $file. Columns written: $($changed -join ', ')." -ForegroundColor DarkGray
+    Write-Host "$($rows.Count) row(s) of $file to import. Columns written: $($changed -join ', ')." -ForegroundColor DarkGray
 
     $kcm = Connect-Kcm
     $plans = New-Object System.Collections.Generic.List[object]
