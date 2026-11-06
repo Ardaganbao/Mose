@@ -309,21 +309,49 @@ $OtherFields = [ordered]@{
     Hostname = @{ Parameter = 'hostname' }
 }
 
+# The CSV to import: one of those laid out like the export (an ID column) next to the scripts, in the
+# folder above or in PowerShell's folder, newest first, or a path. No Enter default: the last export,
+# which only says what Keeper had, was taken for the CSV to import.
+function Select-ImportCsv {
+    $folders = @($PSScriptRoot, (Split-Path -Parent $PSScriptRoot), (Get-Location).ProviderPath) | Where-Object { $_ } | Sort-Object -Unique
+    $found = @(foreach ($folder in $folders) {
+            # Not the ~$ file Excel keeps beside a workbook it has open.
+            Get-ChildItem -LiteralPath $folder -Filter '*.csv' -File -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -notlike '~$*' -and "$(Get-Content -LiteralPath $_.FullName -TotalCount 1 -ErrorAction SilentlyContinue)" -match '(^|[,;])"?ID"?([,;]|$)'
+            }
+        }) | Sort-Object FullName -Unique | Sort-Object LastWriteTime -Descending
+    $found = @($found)
+
+    $prompt = 'Path of the CSV to import'
+    if ($found.Count -gt 0) {
+        Write-Host 'CSVs found, newest first' -ForegroundColor Cyan
+        for ($i = 0; $i -lt $found.Count; $i++) {
+            $csv = $found[$i]
+            $count = [math]::Max(0, @(Get-Content -LiteralPath $csv.FullName).Count - 1)
+            $note = if ($csv.Name -like 'KCM-RDP-Drive-Report_*.csv') { '; an export: what Keeper had then' } else { '' }
+            Write-Host ('  {0,2}. {1}  (in {2}, {3} rows, saved {4:yyyy-MM-dd HH:mm}{5})' -f ($i + 1), $csv.Name, (Split-Path -Leaf $csv.DirectoryName), $count, $csv.LastWriteTime, $note)
+        }
+        $prompt = 'Number of the CSV to import, or its path'
+    }
+    $answer = "$(Read-Host -Prompt $prompt)".Trim().Trim('"')
+    if (-not $answer) {
+        throw 'No CSV was given.'
+    }
+    $number = 0
+    if ($found.Count -gt 0 -and [int]::TryParse($answer, [ref]$number)) {
+        if ($number -lt 1 -or $number -gt $found.Count) {
+            throw "Answer a number from 1 to $($found.Count), or a path."
+        }
+        return $found[$number - 1].FullName
+    }
+    return $answer
+}
+
 # Writes every column of a CSV laid out like the export to the connections of its ID column.
 function Import-KeeperConnections {
     $file = $Path
     if (-not $file) {
-        $latest = Get-ChildItem -Path (Join-Path $PSScriptRoot 'KCM-RDP-Drive-Report_*.csv') -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        # The last export, for an export edited and saved again in Excel.
-        $prompt = if ($latest) { "Path of the CSV to import (Enter for the last export, $($latest.Name))" } else { 'Path of the CSV to import' }
-        $file = "$(Read-Host -Prompt $prompt)".Trim().Trim('"')
-        if (-not $file -and $latest) {
-            $file = $latest.FullName
-        }
-    }
-    if (-not $file) {
-        throw 'No CSV was given.'
+        $file = Select-ImportCsv
     }
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw "There is no file $file."
