@@ -323,7 +323,7 @@ elseif (-not $Quiet) {
     Write-Host "  .\Start.ps1 -Choose      Pick the servers of the report from a list" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper      Import or export Keeper entries over its API" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper -Gui The same in a window" -ForegroundColor DarkGray
-    Write-Host "  .\Start.ps1 -Audit       Audit a client's network, Active Directory, Microsoft 365 and domains" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Audit       Audit a client's network, Active Directory, servers and computers, Microsoft 365 and domains" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray

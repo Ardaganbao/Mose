@@ -34,6 +34,7 @@
         "AuditCommon.ps1",
         "AuditNetwork.ps1",
         "AuditAD.ps1",
+        "AuditInventory.ps1",
         "AuditM365.ps1",
         "AuditDomain.ps1"
     ],

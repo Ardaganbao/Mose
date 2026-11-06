@@ -24,9 +24,10 @@ CommvaultReport_*.md
 # Lists the audit downloads and keeps: MAC vendors, Microsoft licence names.
 audit-cache/
 
-# Audits (Audit.ps1) describe a client's network, accounts and devices.
+# Audits (Audit.ps1) describe a client's network, accounts and devices, and so does their diagram.
 *_Audit_*.md
 *_Audit_*.json
+*_Audit_*.drawio
 
 # The Subscriptions page of a Commvault Cloud, exported as CSV and kept by Report.ps1, is client data.
 Subscriptions_*.csv
