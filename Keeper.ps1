@@ -29,11 +29,12 @@ param(
 # Export: the RDP connections of a Keeper Connection Manager (the REST API of Apache Guacamole) with
 # their drive settings, shown, written to KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv next to the
 # scripts and opened. It names the client's servers, so git ignores it like the report.
-# Import: the drive settings of such a CSV, edited in Excel for example, written to the connections of
-# its ID column, all of them or those picked by ID (44, or 40-50,60). Only its drive columns are written; Name, ParentID and Hostname only say which
-# connection a row is, and a row whose name is not the connection's is skipped. The changes are shown
-# first, then written to all connections or to the first one only, after a backup of them in
-# KCM-RDP-Backup_<yyyy-MM-dd_HHmmss>.json.
+# Import: such a CSV, edited in Excel for example, written to the connections of its ID column, all of
+# them or those picked by ID (44, or 40-50,60). The ID says which connection a row is; every other
+# column is written to it: Name renames it, ParentID moves it to that folder, Hostname and the drive
+# columns are its parameters. An empty Name, ParentID or Hostname is left as it is. The values that
+# differ from Keeper are shown first, then written to all connections or to the first one only, after
+# a backup of them in KCM-RDP-Backup_<yyyy-MM-dd_HHmmss>.json.
 # The API is read with the token of a session signed in in the browser, which may need a second
 # factor this script can't give. The session is not signed out: that would sign out the browser too.
 
@@ -300,7 +301,15 @@ function Select-DriveRows {
     return @($Rows | Where-Object { $picked.Contains("$($_.ID)".Trim()) })
 }
 
-# Writes the drive settings of a CSV laid out like the export to the connections of its ID column.
+# Import: the CSV columns besides the drive ones and where they go in Keeper, the connection itself
+# (Field) or one of its parameters. Left as they are when empty: a connection can't be without them.
+$OtherFields = [ordered]@{
+    Name     = @{ Field = 'name' }
+    ParentID = @{ Field = 'parentIdentifier' }
+    Hostname = @{ Parameter = 'hostname' }
+}
+
+# Writes every column of a CSV laid out like the export to the connections of its ID column.
 function Import-KeeperConnections {
     $file = $Path
     if (-not $file) {
@@ -331,9 +340,9 @@ function Import-KeeperConnections {
     if ($columns -notcontains 'ID') {
         throw "$file has no ID column, which says the connection of each row: start from an export."
     }
-    $changed = @($DriveFields.Keys | Where-Object { $columns -contains $_ })
-    if ($changed.Count -eq 0) {
-        throw "$file has none of the drive columns: $(@($DriveFields.Keys) -join ', ')."
+    $imported = @(@($OtherFields.Keys) + @($DriveFields.Keys) | Where-Object { $columns -contains $_ })
+    if ($imported.Count -eq 0) {
+        throw "$file has no column to import: $(@(@($OtherFields.Keys) + @($DriveFields.Keys)) -join ', ')."
     }
     $noId = @($rows | Where-Object { -not "$($_.ID)".Trim() })
     if ($noId.Count -gt 0) {
@@ -354,19 +363,39 @@ function Import-KeeperConnections {
         $rows = @(Select-DriveRows -Rows $rows -Selection $selection)
         Write-Host "$($rows.Count) row(s) picked: IDs $(Format-IdRanges @($rows | ForEach-Object { "$($_.ID)".Trim() }))." -ForegroundColor DarkGray
     }
+    # Each row: its values for the connection itself (Fields) and for its parameters (Values), and the
+    # CSV column of each, for the list of the changes.
+    $columnOf = @{}
     $wanted = @(foreach ($row in $rows) {
+            $fields = [ordered]@{}
             $values = [ordered]@{}
-            foreach ($column in $changed) {
+            foreach ($column in $imported) {
                 $value = "$($row.$column)".Trim()
+                if ($OtherFields.Contains($column)) {
+                    if (-not $value) {
+                        continue
+                    }
+                    $target = $OtherFields[$column]
+                    if ($target.Contains('Field')) {
+                        $fields[$target.Field] = $value
+                        $columnOf[$target.Field] = $column
+                    }
+                    else {
+                        $values[$target.Parameter] = $value
+                        $columnOf[$target.Parameter] = $column
+                    }
+                    continue
+                }
                 if ($DriveFields[$column].YesNo) {
                     $value = ConvertTo-KcmYesNo -Value $value -Where "ID $($row.ID), column $column"
                 }
                 $values[$DriveFields[$column].Parameter] = $value
+                $columnOf[$DriveFields[$column].Parameter] = $column
             }
-            [pscustomobject]@{ ID = "$($row.ID)".Trim(); Name = "$(Get-MoseProperty $row 'Name')".Trim(); Values = $values }
+            [pscustomobject]@{ ID = "$($row.ID)".Trim(); Fields = $fields; Values = $values }
         })
-    # Name, ParentID and Hostname only say which connection a row is.
-    Write-Host "$($rows.Count) row(s) of $file to import. Columns written: $($changed -join ', ')." -ForegroundColor DarkGray
+    # The ID says which connection a row is; every other column of the CSV is written to it.
+    Write-Host "$($rows.Count) row(s) of $file to import. Columns imported: $($imported -join ', ')." -ForegroundColor DarkGray
 
     $kcm = Connect-Kcm
     $plans = New-Object System.Collections.Generic.List[object]
@@ -379,15 +408,18 @@ function Import-KeeperConnections {
             $skipped++
             continue
         }
-        if ($item.Name -and $item.Name -ne "$($summary.name)") {
-            Write-Warning "Connection $($item.ID) is $($summary.name) in Keeper, not $($item.Name): its row is skipped, in case its ID is wrong."
-            $skipped++
-            continue
-        }
         if ("$(Get-MoseProperty $summary 'protocol')" -ne 'rdp') {
             Write-Warning "$($summary.name) [$($item.ID)] is not an RDP connection: its row is skipped."
             $skipped++
             continue
+        }
+        # Only what differs from Keeper is written; the other values are already the same.
+        $changes = New-Object System.Collections.Generic.List[object]
+        foreach ($field in $item.Fields.Keys) {
+            $old = "$(Get-MoseProperty $summary $field)"
+            if ($old -cne $item.Fields[$field]) {
+                $changes.Add([pscustomobject]@{ Column = $columnOf[$field]; Key = $field; Field = $true; Before = $old; After = $item.Fields[$field] })
+            }
         }
         try {
             $before = Invoke-RestMethod -Method GET -Uri "$($kcm.Api)/connections/$($item.ID)/parameters" -Headers $kcm.Headers
@@ -396,26 +428,26 @@ function Import-KeeperConnections {
             foreach ($parameter in $before.PSObject.Properties) {
                 $after[$parameter.Name] = "$($parameter.Value)"
             }
-            $changes = @(foreach ($parameter in $item.Values.Keys) {
-                    $old = "$(Get-MoseProperty $before $parameter)"
-                    $new = $item.Values[$parameter]
-                    if ($old -ceq $new) {
-                        continue
-                    }
-                    if ($new) {
-                        $after[$parameter] = $new
-                    }
-                    else {
-                        $after.Remove($parameter)
-                    }
-                    [pscustomobject]@{ Parameter = $parameter; Before = $old; After = $new }
-                })
+            foreach ($parameter in $item.Values.Keys) {
+                $old = "$(Get-MoseProperty $before $parameter)"
+                $new = $item.Values[$parameter]
+                if ($old -ceq $new) {
+                    continue
+                }
+                if ($new) {
+                    $after[$parameter] = $new
+                }
+                else {
+                    $after.Remove($parameter)
+                }
+                $changes.Add([pscustomobject]@{ Column = $columnOf[$parameter]; Key = $parameter; Field = $false; Before = $old; After = $new })
+            }
             if ($changes.Count -eq 0) {
                 $unchanged++
                 continue
             }
             $connection = Invoke-RestMethod -Method GET -Uri "$($kcm.Api)/connections/$($item.ID)" -Headers $kcm.Headers
-            $plans.Add([pscustomobject]@{ ID = $item.ID; Name = "$($summary.name)"; Connection = $connection; Before = $before; After = $after; Changes = $changes })
+            $plans.Add([pscustomobject]@{ ID = $item.ID; Name = "$($summary.name)"; Connection = $connection; Before = $before; After = $after; Changes = $changes.ToArray() })
         }
         catch {
             Write-Warning "$($summary.name) [$($item.ID)] could not be read, so its row is skipped: $($_.Exception.Message)"
@@ -427,7 +459,7 @@ function Import-KeeperConnections {
     if ($plans.Count -eq 0) {
         Write-Host "Nothing to change: $counts." -ForegroundColor Green
         if ($unchanged -gt 0) {
-            Write-Host "Keeper already has the drive settings of $file. To change them, edit its drive columns first, or give the path of the CSV you edited." -ForegroundColor Yellow
+            Write-Host "Keeper already has every value of these columns for the rows picked: $($imported -join ', ')." -ForegroundColor Yellow
         }
         return
     }
@@ -436,16 +468,17 @@ function Import-KeeperConnections {
         foreach ($change in $plan.Changes) {
             $old = if ($change.Before) { $change.Before } else { '(not set)' }
             $new = if ($change.After) { $change.After } else { '(not set)' }
-            [pscustomobject]@{ Name = $plan.Name; ID = $plan.ID; Parameter = $change.Parameter; Before = $old; After = $new }
+            [pscustomobject]@{ Name = $plan.Name; ID = $plan.ID; Column = $change.Column; 'In Keeper now' = $old; 'From the CSV' = $new }
         }
     }
     Write-Host ($preview | Format-Table -AutoSize -Wrap | Out-String).TrimEnd()
+    Write-Host "All the columns are imported ($($imported -join ', ')); only the values that differ from Keeper are listed, the others are already the same." -ForegroundColor DarkGray
     Write-Host "$($plans.Count) connection(s) to change, $counts." -ForegroundColor Cyan
 
     # Nothing is written before this answer. A and F, the answers of earlier versions, still work.
     $first = $plans[0]
     if ($plans.Count -eq 1) {
-        $answer = "$(Read-Host -Prompt "Nothing is written yet. Write the change above to $($first.Name) [$($first.ID)] in Keeper now? Y: yes, Enter: no")".Trim()
+        $answer = "$(Read-Host -Prompt "Nothing is written yet. Write the values above to $($first.Name) [$($first.ID)] in Keeper now? Y: yes, Enter: no")".Trim()
         # @() around the if: the value of an if is unrolled, one connection or none would be no list.
         $toWrite = @(if ($answer -match '^(y|o|j|a|f)') { $first })
     }
@@ -488,14 +521,23 @@ function Import-KeeperConnections {
                 $body[$property.Name] = $property.Value
             }
         }
+        # Its new name and folder, if the CSV changes them.
+        foreach ($change in @($plan.Changes | Where-Object { $_.Field })) {
+            $body[$change.Key] = $change.After
+        }
         $body['parameters'] = $plan.After
         $json = ConvertTo-Json -InputObject $body -Depth 10
         try {
             Invoke-RestMethod -Method PUT -Uri "$($kcm.Api)/connections/$($plan.ID)" -Headers $kcm.Headers `
                 -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
-            # Read again: the drive settings as asked, and no other parameter lost.
+            # Read again: the values as asked, and no other parameter lost.
             $check = Invoke-RestMethod -Method GET -Uri "$($kcm.Api)/connections/$($plan.ID)/parameters" -Headers $kcm.Headers
-            $wrong = @($plan.Changes | Where-Object { "$(Get-MoseProperty $check $_.Parameter)" -cne $_.After } | ForEach-Object { $_.Parameter })
+            $wrong = @($plan.Changes | Where-Object { -not $_.Field -and "$(Get-MoseProperty $check $_.Key)" -cne $_.After } | ForEach-Object { $_.Column })
+            $fieldChanges = @($plan.Changes | Where-Object { $_.Field })
+            if ($fieldChanges.Count -gt 0) {
+                $checkConnection = Invoke-RestMethod -Method GET -Uri "$($kcm.Api)/connections/$($plan.ID)" -Headers $kcm.Headers
+                $wrong += @($fieldChanges | Where-Object { "$(Get-MoseProperty $checkConnection $_.Key)" -cne $_.After } | ForEach-Object { $_.Column })
+            }
             $lost = @($plan.After.Keys | Where-Object { -not $check.PSObject.Properties[$_] })
             if ($wrong.Count -gt 0 -or $lost.Count -gt 0) {
                 Write-Warning "$($plan.Name) [$($plan.ID)] was written, but Keeper now shows other values for: $(@($wrong + $lost | Sort-Object -Unique) -join ', '). Compare it with the backup."
