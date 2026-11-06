@@ -77,6 +77,41 @@ param(
     [Parameter()]
     [switch]$Audit,
 
+    # The audit's own options, passed on to Audit.ps1 with -Audit (Audit.ps1 says what each one does),
+    # e.g. .\Start.ps1 -Audit -AddSubnet 10.0.20.0/24 -Skip SpeedTest.
+    [Parameter()]
+    [string]$Client,
+
+    [Parameter()]
+    [string[]]$Domain,
+
+    [Parameter()]
+    [string[]]$Subnet,
+
+    [Parameter()]
+    [string[]]$AddSubnet,
+
+    [Parameter()]
+    [string[]]$SnmpCommunity,
+
+    [Parameter()]
+    [string[]]$Skip,
+
+    [Parameter()]
+    [string]$ADServer,
+
+    [Parameter()]
+    [pscredential]$ADCredential,
+
+    [Parameter()]
+    [pscredential]$AdminCredential,
+
+    [Parameter()]
+    [string]$Tenant,
+
+    [Parameter()]
+    [switch]$NonInteractive,
+
     # Set internally when the script restarts after all updates were downloaded.
     [Parameter(DontShow)]
     [switch]$UpdatesApplied,
@@ -138,6 +173,13 @@ if (-not $PSCommandPath) {
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Set-StrictMode -Version Latest
+
+# The audit's options do nothing without -Audit: say so before updating, rather than run the report.
+$auditOptions = @('Client', 'Domain', 'Subnet', 'AddSubnet', 'SnmpCommunity', 'Skip', 'ADServer', 'ADCredential', 'AdminCredential', 'Tenant', 'NonInteractive')
+$givenAuditOptions = @($auditOptions | Where-Object { $PSBoundParameters.ContainsKey($_) })
+if ($givenAuditOptions.Count -gt 0 -and -not $Audit) {
+    throw "$(($givenAuditOptions | ForEach-Object { "-$_" }) -join ', ') $(if ($givenAuditOptions.Count -eq 1) { 'is an option' } else { 'are options' }) of the IT audit: add -Audit."
+}
 
 # The version is the git commit this folder was last updated to (kept out of the repository, see .gitignore).
 $VersionPath = Join-Path $PSScriptRoot "installed-version.txt"
@@ -341,6 +383,7 @@ elseif (-not $Quiet) {
     Write-Host "  .\Start.ps1 -Keeper      Import or export Keeper entries over its API" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper -Gui The same in a window" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Audit       Audit a client's network, Active Directory, servers and computers, Microsoft 365 and domains" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Audit -AddSubnet 10.0.20.0/24  The audit's options (see Audit.ps1) work here too" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -613,7 +656,14 @@ if ($Keeper) {
 }
 
 if ($Audit) {
-    & (Join-Path $PSScriptRoot "Audit.ps1")
+    # The audit's options given to Start.ps1 go on to it.
+    $auditParameters = @{}
+    foreach ($name in $auditOptions) {
+        if ($PSBoundParameters.ContainsKey($name)) {
+            $auditParameters[$name] = $PSBoundParameters[$name]
+        }
+    }
+    & (Join-Path $PSScriptRoot "Audit.ps1") @auditParameters
     return
 }
 

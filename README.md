@@ -285,7 +285,10 @@ The text of their section (`W`) goes before them, e.g. a schema of the network. 
 .\Audit.ps1 -Client Contoso -Domain contoso.be      # the same without updating
 .\Audit.ps1 -Client Contoso -Subnet 192.0.2.0/24 -ADServer 192.0.2.10 -Skip Microsoft365
 .\Audit.ps1 -Client Contoso -AddSubnet 10.0.20.0/24, 10.0.30.0/24 -Skip SpeedTest
+.\Start.ps1 -Audit -AddSubnet 10.0.20.0/24 -Skip SpeedTest   # the audit's options also work after -Audit
 ```
+
+The speed test runs unless `-Skip SpeedTest`; there is no option to turn it on. An older `Start.ps1` doesn't know the audit's options (`A parameter cannot be found that matches parameter name 'AddSubnet'`): update it first with `.\Start.ps1 -UpdateOnly`.
 
 Or click **IT audit** in the Script Manager. The first `-Audit` downloads the audit scripts; later runs of `Start.ps1` keep them up to date.
 
@@ -316,11 +319,22 @@ It writes `<Client>_Audit_<yyyy-MM-dd>.md` next to the scripts (or in `-OutputPa
 After a change, run from the repository:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Audit.ps1              # about 2 minutes
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Audit.ps1              # about 3 minutes
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Audit.ps1 -RunSpeedTest  # and the speed test
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Audit.ps1 -SkipGitHub    # offline: no update test
 ```
 
-It scans no other device of the network: the SNMP device (an APC UPS with VLANs and an LLDP neighbour), the UPnP description and the WS-Discovery camera are fakes on 127.0.0.1, the scans cover this computer's own address and 127.0.0.1, and the inventory reads this computer. It checks the SNMP encoding against known bytes, what each part reads from the fakes, the device types, the other networks offered, the diagram, the speed test's checked download, then runs the full audit twice in a PowerShell of its own, in strict mode as `Start.ps1` runs it, answering each question: an unexpected question fails it, and no Microsoft 365 sign-in is ever tried. The second run has a stand-in Active Directory, whose computer the inventory is asked to read. It ends with the number of checks passed and failed; `-Keep` keeps the audits it wrote. A real client network is still needed for what fakes can't show: see [TESTING.md](TESTING.md).
+It scans no other device of the network: the SNMP device (an APC UPS with VLANs and an LLDP neighbour), the UPnP description and the WS-Discovery camera are fakes on 127.0.0.1, the scans cover this computer's own address and 127.0.0.1, and the inventory reads this computer. It checks:
+
+- the SNMP encoding against known bytes, what each part reads from the fakes, the device types, the other networks offered, the diagram, the speed test's checked download;
+- why a computer was not read, from the errors of English, French, Dutch and German Windows;
+- that `Start.ps1` gives the audit its options, and refuses them without `-Audit`;
+- the update from GitHub (`-Branch`, by default the branch of this repository) into a new folder: the files of every computer, then the audit scripts with `-Audit` (it says which files GitHub has in another version, when the last changes are not pushed);
+- the **IT audit** button of the Script Manager, its window opened out of sight: the script it starts, in its own window;
+- the findings of made-up servers and computers (no antivirus, old updates and signatures, a full disk, a failing disk, a laptop without BitLocker, Windows not activated, a user as local administrator, two remote access tools, no backup, SQL Server 2014 and 2017), and those of made-up routes to the Internet (double NAT, CGNAT, no answer);
+- then the full audit twice in a PowerShell of its own, in strict mode as `Start.ps1` runs it, answering each question: an unexpected question fails it, and no Microsoft 365 sign-in is ever tried. The second run has a stand-in Active Directory, whose computer the inventory is asked to read.
+
+It ends with the number of checks passed and failed; `-Keep` keeps the audits it wrote. A copy of a script changed for a test (the made-up computers, the routes, the Script Manager) stops the tests if the script no longer has the text it replaces. A real client network is still needed for what fakes can't show: see the checklist of the first real audit in [TESTING.md](TESTING.md).
 
 ### Add an audit check
 

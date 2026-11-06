@@ -5,24 +5,39 @@ param(
     [switch]$RunSpeedTest,
 
     [Parameter(HelpMessage = 'Keep the test folder, with the audits written, instead of deleting it.')]
-    [switch]$Keep
+    [switch]$Keep,
+
+    [Parameter(HelpMessage = 'Branch, tag or commit that the update test downloads from GitHub. Default: the branch of this repository, else main.')]
+    [string]$Branch,
+
+    [Parameter(HelpMessage = 'No update test from GitHub (offline, or before pushing).')]
+    [switch]$SkipGitHub
 )
 
 # Tests of the IT audit (Audit.ps1 and its parts) on this computer only: no other device of the network
 # is scanned. The SNMP, UPnP and WS-Discovery devices are fakes on 127.0.0.1; the network scans cover
-# this computer's own address and 127.0.0.1; the inventory reads this computer over DCOM. The full
-# audit then runs twice in a PowerShell of its own, in strict mode as Start.ps1 runs it, with each of
-# its questions answered by the test: an unexpected question fails it. The second run has a stand-in
-# Active Directory, whose computers the inventory is asked to read.
+# this computer's own address and 127.0.0.1; the inventory reads this computer over DCOM. Then: why a
+# computer was not read in the languages of Windows, Start.ps1 giving the audit its options, the update
+# from GitHub into a new folder, the Script Manager's IT audit button, the findings of made-up computers
+# and routes to the Internet. The full audit then runs twice in a PowerShell of its own, in strict mode
+# as Start.ps1 runs it, with each of its questions answered by the test: an unexpected question fails
+# it. The second run has a stand-in Active Directory, whose computers the inventory is asked to read.
 #
-# It needs the Internet for the public address, the route to 1.1.1.1, the MAC vendors and the speed
-# test's download (checked, run only with -RunSpeedTest). In Windows PowerShell, from the repository:
+# It needs the Internet for the public address, the route to 1.1.1.1, the MAC vendors, the update test
+# (-SkipGitHub leaves it out) and the speed test's download (checked, run only with -RunSpeedTest). In
+# Windows PowerShell, from the repository:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Audit.ps1
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 $repository = Split-Path -Parent $PSScriptRoot
 $started = Get-Date
+if (-not $Branch) {
+    $Branch = $(try { "$(git -C $repository rev-parse --abbrev-ref HEAD 2>$null)".Trim() } catch { '' })
+    if (-not $Branch -or $Branch -eq 'HEAD') {
+        $Branch = 'main'
+    }
+}
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Passed = 0
 
@@ -308,11 +323,13 @@ try {
     }
 
     # Runs a script in a PowerShell of its own, in strict mode as Start.ps1 runs it, with Read-Host and
-    # Get-Credential answered from a list of (question pattern, answer). The questions it asked come back.
+    # Get-Credential answered from a list of (question pattern, answer), after a setup script if given.
+    # Its text, the findings it returned and the questions it asked come back.
     $runner = Join-Path $work 'Invoke-WithAnswers.ps1'
     Set-Content -LiteralPath $runner -Encoding ASCII -Value @'
-param([string]$Script, [string]$Answers, [string]$Arguments)
+param([string]$Script, [string]$Answers, [string]$Arguments, [string]$Setup)
 Set-StrictMode -Version Latest
+if ($Setup) { . $Setup }
 # Windows PowerShell gives a JSON list as one object: ForEach-Object takes its items out.
 $global:TestAnswers = @(Get-Content -LiteralPath $Answers -Raw | ConvertFrom-Json | ForEach-Object { $_ })
 $global:TestQuestions = New-Object System.Collections.Generic.List[string]
@@ -338,11 +355,13 @@ function global:Get-Credential {
 }
 $parameters = @{}
 foreach ($pair in (Get-Content -LiteralPath $Arguments -Raw | ConvertFrom-Json).PSObject.Properties) { $parameters[$pair.Name] = $pair.Value }
-& $Script @parameters
+$result = @(& $Script @parameters)
+$result | Where-Object { $_ -is [string] }
+'FINDINGS: ' + (ConvertTo-Json -Compress -InputObject @($result | Where-Object { $_ -isnot [string] -and $_.PSObject.Properties['AuditFinding'] } | ForEach-Object { [pscustomobject]@{ Severity = $_.AuditFinding; Finding = $_.Finding } }))
 'QUESTIONS: ' + ($global:TestQuestions -join ' || ')
 '@
     $invoke = {
-        param([string]$Script, [object[]]$Answers, [hashtable]$Arguments)
+        param([string]$Script, [object[]]$Answers, [hashtable]$Arguments, [string]$Setup)
         # In files: a command line would lose the quotes of the JSON.
         $answersFile = Join-Path $work "answers-$(Get-Random).json"
         ConvertTo-Json -InputObject @($Answers | ForEach-Object { [pscustomobject]@{ Question = $_[0]; Answer = $_[1] } }) | Set-Content -LiteralPath $answersFile -Encoding UTF8
@@ -350,9 +369,30 @@ foreach ($pair in (Get-Content -LiteralPath $Arguments -Raw | ConvertFrom-Json).
         ConvertTo-Json -InputObject ([pscustomobject]$Arguments) | Set-Content -LiteralPath $argumentsFile -Encoding UTF8
         # Its errors are kept with its output: with Stop, the first one would end the tests.
         $ErrorActionPreference = 'Continue'
-        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -Script $Script -Answers $answersFile -Arguments $argumentsFile 2>&1 | ForEach-Object { "$_" })
+        $setupArguments = if ($Setup) { @('-Setup', $Setup) } else { @() }
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -Script $Script -Answers $answersFile -Arguments $argumentsFile @setupArguments 2>&1 | ForEach-Object { "$_" })
         $questions = @(($output | Where-Object { $_ -like 'QUESTIONS: *' } | Select-Object -Last 1) -replace '^QUESTIONS: ', '' -split ' \|\| ' | Where-Object { $_ })
-        [pscustomobject]@{ Output = $output; Questions = $questions }
+        $findingsLine = $output | Where-Object { $_ -like 'FINDINGS: *' } | Select-Object -Last 1
+        $findings = @(if ($findingsLine) { $findingsLine -replace '^FINDINGS: ', '' | ConvertFrom-Json | ForEach-Object { $_ } })
+        [pscustomobject]@{ Output = $output; Text = ($output -join "`n"); Findings = $findings; Questions = $questions }
+    }
+    # The finding of this severity whose text matches, or $null.
+    $finding = {
+        param([object[]]$Findings, [string]$Severity, [string]$Pattern)
+        @($Findings | Where-Object { $_.Severity -eq $Severity -and $_.Finding -match $Pattern }) | Select-Object -First 1
+    }
+    # A copy of a script with some of its text replaced, for a test; a replacement that no longer fits the
+    # script stops the tests, so that they never test a script other than the one meant.
+    $patch = {
+        param([string]$Source, [string]$Destination, [object[]]$Replacements)
+        $text = [IO.File]::ReadAllText($Source)
+        foreach ($pair in $Replacements) {
+            if (-not $text.Contains($pair[0])) {
+                throw "The test's patch of $(Split-Path -Leaf $Source) no longer fits: $($pair[0])"
+            }
+            $text = $text.Replace($pair[0], $pair[1])
+        }
+        [IO.File]::WriteAllText($Destination, $text)
     }
 
     Write-Section 'Inventory of this computer (DCOM)'
@@ -362,6 +402,208 @@ foreach ($pair in (Get-Content -LiteralPath $Arguments -Raw | ConvertFrom-Json).
     Test-That 'listed with its model and serial number' ($text -match "(?m)^\| $([regex]::Escape($env:COMPUTERNAME)) \|")
     Test-That 'its antivirus found' ($text -notmatch ':x: none')
     Test-That 'no question asked' ($inventoryRun.Questions.Count -eq 0) ($inventoryRun.Questions -join '; ')
+
+    Write-Section 'Why a computer was not read, in the languages of Windows'
+    $inventoryAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $work 'AuditInventory.ps1'), [ref]$null, [ref]$null)
+    . ([scriptblock]::Create($inventoryAst.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Format-ReadError' }, $false).Extent.Text))
+    $denied = 'access denied for this account'
+    Test-Value 'English' (Format-ReadError 'Access is denied.') $denied
+    Test-Value 'French' (Format-ReadError "Acc$([char]0xE8)s refus$([char]0xE9).") $denied
+    Test-Value 'Dutch' (Format-ReadError 'Toegang geweigerd.') $denied
+    Test-Value 'German' (Format-ReadError 'Zugriff verweigert') $denied
+    Test-Value 'the error code alone' (Format-ReadError 'WinRM cannot complete the operation. HRESULT 0x80070005') $denied
+    Test-Value 'RPC, English' (Format-ReadError 'The RPC server is unavailable. (Exception from HRESULT: 0x800706BA)') 'DCOM blocked by its firewall'
+    Test-Value 'RPC, French' (Format-ReadError "Le serveur RPC n'est pas disponible.") 'DCOM blocked by its firewall'
+    Test-Value 'RPC, Dutch' (Format-ReadError 'De RPC-server is niet beschikbaar.') 'DCOM blocked by its firewall'
+    Test-Value 'RPC, German' (Format-ReadError "Der RPC-Server ist nicht verf$([char]0xFC)gbar.") 'DCOM blocked by its firewall'
+    Test-Value 'TrustedHosts' (Format-ReadError 'The WinRM client cannot process the request. ... the destination machine must be added to the TrustedHosts configuration setting.') 'WinRM needs TrustedHosts for it, and DCOM did not answer'
+    $long = Format-ReadError (('An error nobody planned for. ' * 10) + "`nSecond line")
+    Test-That 'another error: its first line, cut at 120 characters' ($long.Length -eq 120 -and $long.EndsWith('...') -and $long -notmatch 'Second line') $long
+
+    Write-Section 'Start.ps1 gives the audit its options'
+    $startFolder = Join-Path $work 'start-options'
+    New-Item -ItemType Directory -Path $startFolder | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repository 'Start.ps1'), (Join-Path $repository 'updater.config.json') -Destination $startFolder
+    # A stand-in Audit.ps1 that only tells what it was given.
+    Set-Content -LiteralPath (Join-Path $startFolder 'Audit.ps1') -Encoding ASCII -Value @'
+param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [switch]$NonInteractive)
+'AUDIT GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { "$_=$(@($PSBoundParameters[$_]) -join ',')" }) -join '; ')
+'@
+    $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; Audit = $true; Client = 'Contoso'; AddSubnet = @('192.0.2.0/24', '198.51.100.0/24'); Skip = @('SpeedTest'); NonInteractive = $true }
+    Test-Value 'the options reach Audit.ps1' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.0/24; Client=Contoso; NonInteractive=True; Skip=SpeedTest'
+    $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; AddSubnet = @('192.0.2.0/24') }
+    Test-That 'an audit option without -Audit is refused' ($startRun.Text -match '-AddSubnet is an option of the IT audit: add -Audit') (($startRun.Output | Select-Object -First 4) -join ' / ')
+    Test-That 'and nothing else runs' ($startRun.Text -notmatch 'AUDIT GOT|Report')
+
+    if ($SkipGitHub) {
+        Write-Section "Update from GitHub: skipped (-SkipGitHub)"
+    }
+    else {
+        Write-Section "Update from GitHub ($Branch): a new folder, then -Audit"
+        $installFolder = Join-Path $work 'install'
+        New-Item -ItemType Directory -Path $installFolder | Out-Null
+        Copy-Item -LiteralPath (Join-Path $repository 'Start.ps1') -Destination $installFolder
+        $updateRun = & $invoke (Join-Path $installFolder 'Start.ps1') @() @{ Branch = $Branch; UpdateOnly = $true }
+        $config = if (Test-Path -LiteralPath (Join-Path $installFolder 'updater.config.json')) { Get-Content -LiteralPath (Join-Path $installFolder 'updater.config.json') -Raw | ConvertFrom-Json }
+        Test-That 'the first run downloads the files every computer has' ($config -and @($config.Files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $installFolder $_)) }).Count -eq 0) (($updateRun.Output | Select-Object -Last 6) -join ' / ')
+        Test-That 'no question asked (the repository gives its files without a token)' ($updateRun.Questions.Count -eq 0) ($updateRun.Questions -join '; ')
+        Test-That 'but not the audit scripts' (@(Get-ChildItem -LiteralPath $installFolder -Filter 'Audit*.ps1').Count -eq 0)
+        $updateRun = & $invoke (Join-Path $installFolder 'Start.ps1') @() @{ Branch = $Branch; UpdateOnly = $true; Audit = $true }
+        $auditFiles = @(if ($config) { $config.Audit })
+        Test-That "AuditInventory.ps1 is one of the audit scripts of $Branch" ($auditFiles -contains 'AuditInventory.ps1') ($auditFiles -join ', ')
+        Test-That 'with -Audit, every audit script is downloaded' ($auditFiles.Count -gt 0 -and @($auditFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $installFolder $_)) }).Count -eq 0) (($updateRun.Output | Select-Object -Last 6) -join ' / ')
+        Test-That 'and the audit did not run (-UpdateOnly)' ($updateRun.Questions.Count -eq 0 -and @(Get-ChildItem -LiteralPath $installFolder -Filter '*_Audit_*').Count -eq 0)
+        $differ = @(@($config.Files) + $auditFiles | Where-Object { (Test-Path -LiteralPath (Join-Path $installFolder $_)) -and (Test-Path -LiteralPath (Join-Path $repository $_)) -and (Get-FileHash -LiteralPath (Join-Path $installFolder $_)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $repository $_)).Hash })
+        if ($differ.Count -gt 0) {
+            Write-Host "        Not pushed yet, so GitHub's copy differs: $($differ -join ', ')" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Section 'Script Manager: the IT audit button'
+    $managerFolder = Join-Path $work 'manager'
+    New-Item -ItemType Directory -Path $managerFolder | Out-Null
+    # Start.ps1 only has to be there: the button checks it, and its process is not started.
+    Copy-Item -LiteralPath (Join-Path $repository 'updater.config.json'), (Join-Path $repository 'Start.ps1') -Destination $managerFolder
+    # The window opens out of sight, its button is clicked, and the process it would start is only kept.
+    & $patch (Join-Path $repository 'Manager.ps1') (Join-Path $managerFolder 'Manager.ps1') @(
+        , @('$job.Process = [System.Diagnostics.Process]::Start($info)', '$global:TestStarted.Add($info); $job.Process = [pscustomobject]@{ HasExited = $true; ExitCode = 0 }')
+        , @('[void]$form.ShowDialog()', @'
+$global:TestStarted = New-Object System.Collections.Generic.List[object]
+$form.StartPosition = 'Manual'
+$form.Location = New-Object System.Drawing.Point(-3000, -3000)
+$form.ShowInTaskbar = $false
+$form.Opacity = 0
+$form.Show()
+[System.Windows.Forms.Application]::DoEvents()
+'BUTTONS: ' + (@($buttons.Controls | ForEach-Object { $_.Text }) -join ' | ')
+@($buttons.Controls | Where-Object { $_.Text -eq 'IT audit' })[0].PerformClick()
+[System.Windows.Forms.Application]::DoEvents()
+foreach ($info in $global:TestStarted) { 'STARTED: ' + ([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String(($info.Arguments -split ' ')[-1])) -replace '\r?\n', ' ; ') + ' WINDOW: ' + $info.UseShellExecute }
+$form.Close()
+'@)
+    )
+    $managerRun = & $invoke (Join-Path $managerFolder 'Manager.ps1') @() @{}
+    $buttonsLine = "$($managerRun.Output | Where-Object { $_ -like 'BUTTONS: *' })"
+    Test-That 'the button is there, after Keeper import/export' ($buttonsLine -match 'Keeper import/export \| IT audit \|') $buttonsLine
+    $startedJobs = @($managerRun.Output | Where-Object { $_ -like 'STARTED: *' })
+    Test-Value 'one click starts one script' $startedJobs.Count '1'
+    Test-That 'Start.ps1 -Audit, of the Script Manager''s folder' ("$startedJobs" -match [regex]::Escape("& '$(Join-Path $managerFolder 'Start.ps1')' -Audit ")) "$startedJobs"
+    Test-That 'in its own window, for its questions' ("$startedJobs" -match 'WINDOW: True') "$startedJobs"
+
+    Write-Section 'Servers and computers: the findings of made-up computers'
+    $inventoryCopy = Join-Path $work 'AuditInventory-made-up.ps1'
+    $reading = $inventoryAst.Find({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$reachable.Count -gt 0' }, $false)
+    & $patch (Join-Path $work 'AuditInventory.ps1') $inventoryCopy @(
+        , @("`$open = Test-TcpPorts -Addresses `$names -Ports 5985, 135 -TimeoutMs 1500 -Status 'Which computers answer' -Activity 'Servers and computers' -ProgressId 40 -Percent 5", '$open = $global:TestOpen')
+        , @($reading.Extent.Text, '$results = @($global:TestResults)')
+    )
+    $setup = Join-Path $work 'made-up-computers.ps1'
+    Set-Content -LiteralPath $setup -Encoding ASCII -Value @'
+$now = Get-Date
+function global:New-TestComputer([hashtable]$Values) {
+    $computer = [ordered]@{
+        Computer = $null; Protocol = 'WinRM'; Error = $null; Warnings = @()
+        Name = $null; Kind = 'Computer'; Manufacturer = 'Dell Inc.'; Model = 'OptiPlex 7010'; Serial = 'TEST0001'; Chassis = 'Desktop'; Virtual = $false
+        Processor = 'Intel(R) Core(TM) i5-13500, 14 cores'; MemoryGB = 16
+        Disks = @([pscustomobject]@{ Name = 'NVMe SSD'; SizeGB = 512; Type = 'SSD'; Health = 'Healthy' })
+        Volumes = @([pscustomobject]@{ Drive = 'C:'; Label = ''; SizeGB = 476; FreeGB = 200; FreePercent = 42 })
+        Os = 'Windows 11 Pro'; Version = '10.0.26100'; Installed = $now.AddYears(-1); LastBoot = $now.AddDays(-2); LastUpdate = $now.AddDays(-5); User = 'CONTOSO\user'
+        Licence = [pscustomobject]@{ Channel = 'OEM'; Activated = $true; Status = 'activated'; Key = 'ABCDE' }
+        Office = @(); Roles = @(); Antivirus = @('Microsoft Defender'); Defender = $null; BitLocker = 'On'
+        Administrators = @([pscustomobject]@{ Name = 'PC\Administrator'; Sid = 'S-1-5-21-1-2-3-500' }, [pscustomobject]@{ Name = 'CONTOSO\Domain Admins'; Sid = 'S-1-5-21-4-5-6-512' })
+        Services = @(); ServicesRead = $true; Software = @(); SqlInstances = @(); UsbUps = @()
+    }
+    foreach ($key in $Values.Keys) { $computer[$key] = $Values[$key] }
+    $computer.Computer = $computer.Name
+    [pscustomobject]$computer
+}
+$global:TestOpen = @{ 'DC01' = @(5985); 'SRV01' = @(5985, 135); 'PC01' = @(135); 'PC02' = @(135); 'PC04' = @(135) }
+$global:TestResults = @(
+    New-TestComputer @{ Name = 'DC01'; Kind = 'Domain controller'; Manufacturer = 'VMware, Inc.'; Model = 'VMware Virtual Platform'; Virtual = $true; Chassis = 'Virtual'; Os = 'Windows Server 2019 Standard'; Version = '10.0.17763'; Roles = @('Active Directory Domain Services', 'DNS Server') }
+    New-TestComputer @{
+        Name = 'SRV01'; Kind = 'Server'; Model = 'PowerEdge R740'; Chassis = 'Server'; Os = 'Windows Server 2016 Standard'; Version = '10.0.14393'
+        LastUpdate = $now.AddDays(-120); Antivirus = @()
+        Disks = @([pscustomobject]@{ Name = 'PERC H730'; SizeGB = 1800; Type = 'HDD'; Health = 'Warning' })
+        Volumes = @([pscustomobject]@{ Drive = 'C:'; Label = ''; SizeGB = 120; FreeGB = 14; FreePercent = 12 }, [pscustomobject]@{ Drive = 'D:'; Label = 'Data'; SizeGB = 1700; FreeGB = 85; FreePercent = 5 })
+        Licence = [pscustomobject]@{ Channel = 'Retail'; Activated = $false; Status = 'grace period'; Key = 'FGHIJ' }
+        Services = @([pscustomobject]@{ Kind = 'Remote access'; Product = 'TeamViewer'; Running = $true }, [pscustomobject]@{ Kind = 'Database'; Product = 'SQL Server'; Running = $true })
+        SqlInstances = @([pscustomobject]@{ Instance = 'OLD'; Edition = 'Express Edition'; Version = '12.0.6024.0' }, [pscustomobject]@{ Instance = 'APP'; Edition = 'Standard Edition'; Version = '14.0.3456.2' }, [pscustomobject]@{ Instance = 'NEW'; Edition = 'Standard Edition'; Version = '16.0.1000.6' })
+        Software = @([pscustomobject]@{ Name = 'Accounting Suite'; Publisher = 'Example Software'; Version = '9.1' })
+        UsbUps = @('American Power Conversion USB UPS')
+    }
+    New-TestComputer @{
+        Name = 'PC01'; Protocol = 'DCOM'; Manufacturer = 'HP'; Model = 'HP EliteBook 840 G8'; Chassis = 'Laptop'; BitLocker = 'Off'
+        Defender = [pscustomobject]@{ Mode = 'Normal'; Enabled = $true; RealTime = $true; Signatures = $now.AddDays(-10) }
+        Administrators = @([pscustomobject]@{ Name = 'PC01\Administrator'; Sid = 'S-1-5-21-7-8-9-500' }, [pscustomobject]@{ Name = 'CONTOSO\jdoe'; Sid = 'S-1-5-21-4-5-6-1105' })
+        Services = @([pscustomobject]@{ Kind = 'Remote management'; Product = 'Datto RMM'; Running = $true })
+        Office = @([pscustomobject]@{ Name = 'Office19StandardVL_KMS_Client_AE'; Channel = 'Volume (KMS)'; Activated = $true; Status = 'activated'; Key = 'KLMNO' })
+    }
+    New-TestComputer @{ Name = 'PC02'; Protocol = 'DCOM'; BitLocker = 'Off'; Antivirus = @(); ServicesRead = $false }
+    [pscustomobject]@{ Computer = 'PC04'; Protocol = $null; Error = "Acc$([char]0xE8)s refus$([char]0xE9)." }
+)
+'@
+    $made = & $invoke $inventoryCopy @() @{ Computer = @('DC01', 'SRV01', 'PC01', 'PC02', 'PC03', 'PC04') } $setup
+    $text = $made.Text
+    Test-That 'four of six read' ($text -match '4 of 6 read \(2 over WinRM, 2 over DCOM\): 2 servers, 2 computers') (($made.Output | Select-Object -First 4) -join ' / ')
+    Test-That 'one did not answer' ($text -match '\| PC03 \| no answer on WinRM \(5985\) or RPC \(135\)')
+    Test-That 'one refused the account (French Windows)' ($text -match '\| PC04 \| access denied for this account \|')
+    Test-That 'a virtual machine named once' ($text -match '\| DC01 \| Domain controller, Active Directory Domain Services, DNS Server \| Virtual machine \(VMware Virtual Platform\) \|')
+    Test-That 'the maker without "Inc."' ($text -match '\| SRV01 \| Server \| Dell PowerEdge R740 \|')
+    Test-That 'the business software listed' ($text -match '\| Accounting Suite \| 9\.1 \| Example Software \| SRV01 \|')
+    Test-That 'the UPS on USB listed' ($text -match '\| SRV01 \| American Power Conversion USB UPS \|')
+    Test-That 'the Office key listed' ($text -match '\| PC01 \| Office19StandardVL_KMS_Client_AE \| Volume \(KMS\), activated, key \.\.\.KLMNO \|')
+    Test-That 'C: at 12% in the disk space table' ($text -match '\| SRV01 \| C: \| 120 GB \| 14 GB \(12%\) \|')
+    $noAntivirus = & $finding $made.Findings 'High' 'No antivirus found running on 1 computer'
+    Test-That 'High: no antivirus on SRV01' ($noAntivirus -and $noAntivirus.Finding -match 'SRV01')
+    Test-That 'not on PC02, whose services were not read' ($noAntivirus -and $noAntivirus.Finding -notmatch 'PC02')
+    Test-That "Medium: Defender's signatures 10 days old on PC01" ([bool](& $finding $made.Findings 'Medium' "Defender's signatures are more than a week old on PC01"))
+    Test-That 'Medium: no update for 120 days on SRV01, not PC01' ([bool](& $finding $made.Findings 'Medium' 'No update installed for more than 60 days on SRV01 \([^)]+\)\.$'))
+    Test-That 'Medium: D: at 5%, not C: at 12%' ([bool](& $finding $made.Findings 'Medium' 'Less than 10% free on SRV01 D: Data \(85 GB \(5%\)\)\.$'))
+    Test-That 'High: the disk Windows reports as failing' ([bool](& $finding $made.Findings 'High' 'failing: SRV01 PERC H730 \(Warning\)'))
+    $bitLocker = & $finding $made.Findings 'Medium' '1 laptop has no BitLocker'
+    Test-That 'Medium: the laptop without BitLocker, not the desktop' ($bitLocker -and $bitLocker.Finding -match 'PC01' -and $bitLocker.Finding -notmatch 'PC02')
+    Test-That 'Low: Windows not activated on SRV01' ([bool](& $finding $made.Findings 'Low' 'not activated on SRV01 \(grace period\)'))
+    Test-That 'Medium: a user is local administrator of PC01' ([bool](& $finding $made.Findings 'Medium' 'local administrators on 1 computer: PC01 \(CONTOSO\\jdoe\)'))
+    Test-That 'Medium: two remote access tools' ([bool](& $finding $made.Findings 'Medium' '2 remote access or management tools are installed: Datto RMM, TeamViewer'))
+    Test-That 'Low: no backup software on the two servers' ([bool](& $finding $made.Findings 'Low' 'No backup software found on the 2 servers read'))
+    Test-That 'High: SQL Server 2014, ended' ([bool](& $finding $made.Findings 'High' 'SQL Server 2014 \(12\.0\.6024\.0\) Express Edition on SRV01\\OLD: its support ended on 2024-07-09'))
+    $sql2017 = if ((Get-Date) -ge [datetime]'2027-10-12') { 'High' } else { 'Medium' }
+    Test-That "$($sql2017): SQL Server 2017, ending on 2027-10-12" ([bool](& $finding $made.Findings $sql2017 'SQL Server 2017 .* on SRV01\\APP: its support (ends|ended) on 2027-10-12'))
+    Test-That 'nothing about SQL Server 2022' (-not (@($made.Findings | Where-Object { $_.Finding -match 'SRV01\\NEW' }).Count))
+    Test-Value 'no other finding' $made.Findings.Count '12'
+    $glued = @($made.Findings | Where-Object { $_.Finding -cmatch '[a-z]:[A-Za-z]' } | ForEach-Object { $_.Finding })
+    Test-That 'no colon glued to the next word' ($glued.Count -eq 0) ($glued -join ' / ')
+
+    Write-Section 'Route to the Internet: double NAT, CGNAT, no answer'
+    $networkCopy = Join-Path $work 'AuditNetwork-route.ps1'
+    # The route comes from the test; no UPnP or WS-Discovery search is sent, and only 127.0.0.1 is scanned.
+    & $patch $network $networkCopy @(
+        , @('$hops = @(Get-InternetPath)', '$hops = @($global:TestHops)')
+        , @('$script:UpnpLocations = Get-UpnpLocations', '$script:UpnpLocations = @{}')
+        , @('$script:WsdDevices = Get-WsdDevices', '$script:WsdDevices = @{}')
+    )
+    $routes = [ordered]@{
+        'double NAT' = "@([pscustomobject]@{ Hop = 1; Address = '192.168.1.1'; Name = `$null; Kind = 'Private' }, [pscustomobject]@{ Hop = 2; Address = '172.16.0.1'; Name = `$null; Kind = 'Private' }, [pscustomobject]@{ Hop = 3; Address = '198.51.100.1'; Name = 'edge.example.net'; Kind = 'Public' })"
+        'CGNAT'      = "@([pscustomobject]@{ Hop = 1; Address = '192.168.1.1'; Name = `$null; Kind = 'Private' }, [pscustomobject]@{ Hop = 2; Address = '100.64.12.1'; Name = `$null; Kind = 'Shared' }, [pscustomobject]@{ Hop = 3; Address = '198.51.100.1'; Name = `$null; Kind = 'Public' })"
+        'no answer'  = '@()'
+    }
+    $routeRuns = @{}
+    foreach ($name in $routes.Keys) {
+        $routeSetup = Join-Path $work "route-$($name -replace ' ', '-').ps1"
+        Set-Content -LiteralPath $routeSetup -Encoding ASCII -Value "`$global:TestHops = $($routes[$name])"
+        $routeRuns[$name] = & $invoke $networkCopy @() @{ Subnet = @('127.0.0.1'); SkipSpeedTest = $true } $routeSetup
+    }
+    $run = $routeRuns['double NAT']
+    Test-That 'double NAT: an Info finding names the second router' ([bool](& $finding $run.Findings 'Info' 'another private router after the gateway \(172\.16\.0\.1\)'))
+    Test-That 'double NAT: no CGNAT finding' (-not (& $finding $run.Findings 'Low' 'CGNAT'))
+    Test-That 'double NAT: the route table' ($run.Text -match '\| 3 \| 198\.51\.100\.1 \| edge\.example\.net \| Internet \|')
+    $run = $routeRuns['CGNAT']
+    Test-That 'CGNAT: a Low finding names the shared address' ([bool](& $finding $run.Findings 'Low' "provider's shared address 100\.64\.12\.1 \(CGNAT\)"))
+    Test-That 'CGNAT: no double NAT finding' (-not (& $finding $run.Findings 'Info' 'private router'))
+    Test-That "CGNAT: shown as the provider's shared address" ($run.Text -match "\| 2 \| 100\.64\.12\.1 \|  \| provider's shared address \(CGNAT\) \|")
+    $run = $routeRuns['no answer']
+    Test-That 'no answer: said so' ($run.Text -match 'No router answered on the way to the Internet')
+    Test-That 'no answer: no route finding' (-not (@($run.Findings | Where-Object { $_.Finding -match 'CGNAT|private router' }).Count))
 
     Write-Section 'Full audit 1: questions, fake UPS on 127.0.0.1 added after the scan'
     $folder1 = Join-Path $work 'audit1'
