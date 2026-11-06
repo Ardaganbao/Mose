@@ -628,7 +628,7 @@ if ($failingDisks.Count -gt 0) {
 }
 $unencrypted = @($workstations | Where-Object { $_.Chassis -eq 'Laptop' -and $_.BitLocker -eq 'Off' })
 if ($unencrypted.Count -gt 0) {
-    New-AuditFinding -Severity Medium -Area $area -Finding "$($unencrypted.Count) $(if ($unencrypted.Count -eq 1) { 'laptop has' } else { 'laptops have' }) no BitLocker on its Windows drive:$(& $list $unencrypted). A lost or stolen one gives away its data." -Recommendation 'Turn BitLocker on (by group policy or Intune), with the recovery keys saved in Active Directory or Entra ID.'
+    New-AuditFinding -Severity Medium -Area $area -Finding "$($unencrypted.Count) $(if ($unencrypted.Count -eq 1) { 'laptop has' } else { 'laptops have' }) no BitLocker on its Windows drive: $(& $list $unencrypted). A lost or stolen one gives away its data." -Recommendation 'Turn BitLocker on (by group policy or Intune), with the recovery keys saved in Active Directory or Entra ID.'
 }
 $notActivated = @($read | Where-Object { $_.Licence -and -not $_.Licence.Activated })
 if ($notActivated.Count -gt 0) {
@@ -636,7 +636,7 @@ if ($notActivated.Count -gt 0) {
 }
 $userAdministrators = @($extraAdministrators | Where-Object { $_.Kind -eq 'Computer' })
 if ($userAdministrators.Count -gt 0) {
-    New-AuditFinding -Severity Medium -Area $area -Finding "Other accounts are local administrators on $($userAdministrators.Count) $(if ($userAdministrators.Count -eq 1) { 'computer' } else { 'computers' }):$(($userAdministrators | Select-Object -First 20 | ForEach-Object { "$($_.Computer) ($($_.Others -join ', '))" }) -join '; ')$(if ($userAdministrators.Count -gt 20) { '; ...' })." -Recommendation 'Give users a standard account; let IT install software (or use an elevation tool), so that malware run by a user cannot take the computer.'
+    New-AuditFinding -Severity Medium -Area $area -Finding "Other accounts are local administrators on $($userAdministrators.Count) $(if ($userAdministrators.Count -eq 1) { 'computer' } else { 'computers' }): $(($userAdministrators | Select-Object -First 20 | ForEach-Object { "$($_.Computer) ($($_.Others -join ', '))" }) -join '; ')$(if ($userAdministrators.Count -gt 20) { '; ...' })." -Recommendation 'Give users a standard account; let IT install software (or use an elevation tool), so that malware run by a user cannot take the computer.'
 }
 $remote = @($software | Where-Object { $_.Kind -in 'Remote access', 'Remote management' } | ForEach-Object { $_.Product } | Sort-Object -Unique)
 if ($remote.Count -gt 1) {
