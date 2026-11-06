@@ -21,7 +21,8 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `Report.ps1` | Runs every configured module and writes `<Client>_Report_<yyyy-MM-dd>.md`, with the client's report layout. Starts `Configure.ps1` when nothing is configured yet. |
 | `Manager.ps1` | Script Manager window: configure the client, turn reports on/off and run them. |
 | `Update-FromGitHub.ps1` | Manual updater (whole project, or the latest release). |
-| `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`) and reports shown in the Script Manager (`Scripts`). |
+| `updater.config.json` | Repository, files every computer updates (`Files`), module scripts updated only where the client uses them (`Modules`), the Keeper scripts, downloaded only with `-Keeper` or once present (`Keeper`), and reports shown in the Script Manager (`Scripts`). |
+| `Keeper.ps1` | Imports or exports Keeper entries over its API, independent of the report: `.\Start.ps1 -Keeper` or **Keeper import/export** in the Script Manager. Not written yet. |
 | `helper.ps1` | SecretStore helpers, the client configuration and the list of modules. |
 | `latest-versions.json` | The latest ESXi, StorMagic, DSM and Windows Server versions, for the [Physical System](#inventory-tables) check marks when they can't be read online. |
 | `iloreport.ps1`, `IDRAC.ps1`, `BMCreport.ps1` | Modules: HPE iLO, Dell iDRAC, Lenovo BMC. |
@@ -141,6 +142,7 @@ cd $HOME\Mose
 .\Start.ps1 -DebugLog    # update, then run the report with a debug log
 .\Start.ps1 -Only veeam,sql  # update, then a partial report: only these servers
 .\Start.ps1 -Choose      # update, then a partial report of servers picked from a list
+.\Start.ps1 -Keeper      # update, then import or export Keeper entries over its API (not the report)
 .\Start.ps1 -Gui         # update, then open the Script Manager
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only

@@ -26,6 +26,9 @@
         "sqlmaintenance.ps1",
         "CommvaultCloud report.ps1"
     ],
+    "Keeper": [
+        "Keeper.ps1"
+    ],
     "Scripts": [
         "Report.ps1"
     ]

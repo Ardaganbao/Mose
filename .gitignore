@@ -26,3 +26,6 @@ audit-cache/
 
 # The Subscriptions page of a Commvault Cloud, exported as CSV and kept by Report.ps1, is client data.
 Subscriptions_*.csv
+
+# Keeper exports hold passwords: they never leave the computer that made them.
+Keeper_Export_*
