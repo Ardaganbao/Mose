@@ -442,15 +442,22 @@ function Import-KeeperConnections {
     Write-Host ($preview | Format-Table -AutoSize -Wrap | Out-String).TrimEnd()
     Write-Host "$($plans.Count) connection(s) to change, $counts." -ForegroundColor Cyan
 
+    # Nothing is written before this answer. A and F, the answers of earlier versions, still work.
     $first = $plans[0]
-    $answer = "$(Read-Host -Prompt "Write to $($kcm.Url)? A: all $($plans.Count), F: only $($first.Name) [$($first.ID)] to check it in Keeper first, Enter: nothing")".Trim()
-    if ($answer -match '^a') {
-        $toWrite = $plans
-    }
-    elseif ($answer -match '^f') {
-        $toWrite = @($first)
+    if ($plans.Count -eq 1) {
+        $answer = "$(Read-Host -Prompt "Nothing is written yet. Write the change above to $($first.Name) [$($first.ID)] in Keeper now? Y: yes, Enter: no")".Trim()
+        # @() around the if: the value of an if is unrolled, one connection or none would be no list.
+        $toWrite = @(if ($answer -match '^(y|o|j|a|f)') { $first })
     }
     else {
+        Write-Host 'Nothing is written yet. Answer:'
+        Write-Host "  Y      write the changes above to the $($plans.Count) connections"
+        Write-Host "  1      write only $($first.Name) [$($first.ID)], to check it in Keeper first; import again afterwards for the others"
+        Write-Host '  Enter  write nothing'
+        $answer = "$(Read-Host -Prompt 'Your answer')".Trim()
+        $toWrite = @(if ($answer -match '^(y|o|j|a)') { $plans } elseif ($answer -match '^(1|f)') { $first })
+    }
+    if ($toWrite.Count -eq 0) {
         Write-Host 'Nothing was written.'
         return
     }
@@ -506,7 +513,7 @@ function Import-KeeperConnections {
 
     Write-Host "$($toWrite.Count - $failed) connection(s) updated, $failed failed. Backup: $backupPath" -ForegroundColor Cyan
     if ($toWrite.Count -lt $plans.Count) {
-        Write-Host "Check $($first.Name) [$($first.ID)] in Keeper, then import the CSV again and answer A: the connections already changed are left as they are." -ForegroundColor Yellow
+        Write-Host "Check $($first.Name) [$($first.ID)] in Keeper, then import the CSV again and answer Y: the connections already changed are left as they are." -ForegroundColor Yellow
     }
 }
 
