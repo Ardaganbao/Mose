@@ -29,3 +29,6 @@ Subscriptions_*.csv
 
 # Keeper exports hold passwords: they never leave the computer that made them.
 Keeper_Export_*
+
+# The RDP connections of a Keeper Connection Manager, written by Keeper.ps1, name the client's servers.
+KCM-RDP-Drive-Report_*.csv
