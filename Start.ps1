@@ -30,7 +30,7 @@ param(
     [Parameter()]
     [switch]$UpdateOnly,
 
-    # Open Manager.ps1 after updating instead of running the scripts.
+    # Open Manager.ps1 after updating instead of running the scripts; with -Keeper, the Keeper window.
     [Parameter()]
     [switch]$Gui,
 
@@ -317,6 +317,7 @@ elseif (-not $Quiet) {
     Write-Host "                           Commvault, CommvaultCloud, CommvaultOnPrem, SQL, or a server name (Tab completes)" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Choose      Pick the servers of the report from a list" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper      Import or export Keeper entries over its API" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Keeper -Gui The same in a window" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -573,7 +574,8 @@ if ($Configure) {
 }
 
 if ($Keeper) {
-    & (Join-Path $PSScriptRoot "Keeper.ps1")
+    # -Gui: its window instead of its questions.
+    & (Join-Path $PSScriptRoot "Keeper.ps1") -Gui:$Gui
     return
 }
 

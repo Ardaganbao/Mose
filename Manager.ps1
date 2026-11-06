@@ -262,9 +262,9 @@ Add-Button "Report with debug log" {
 }
 
 # Keeper entries imported or exported over its API, independent of the report: Start.ps1 downloads
-# the Keeper scripts the first time. It asks its questions in its own window.
+# the Keeper scripts the first time, then opens the Keeper window.
 Add-Button "Keeper import/export" {
-    Add-Job -Label "Keeper import/export" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-Keeper"
+    Add-Job -Label "Keeper import/export" -Path (Join-Path $PSScriptRoot "Start.ps1") -Arguments "-Keeper -Gui"
 }
 
 Add-Button "Check for updates" {
