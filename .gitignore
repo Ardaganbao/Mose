@@ -35,3 +35,6 @@ KCM-RDP-Drive-Report_*.csv
 
 # The addresses and data sources of the Keeper Connection Managers used on this computer (Keeper.ps1).
 keeper.local.json
+
+# The connections as they were before a Keeper.ps1 import, which may hold their passwords.
+KCM-RDP-Backup_*.json
