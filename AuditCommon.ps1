@@ -1,5 +1,5 @@
-# Helpers of the audit collectors (AuditNetwork.ps1, AuditDomain.ps1, AuditAD.ps1, AuditM365.ps1), which
-# dot-source this file. A collector writes Markdown lines for its section of the audit (### headings),
+# Helpers of the audit collectors (AuditNetwork.ps1, AuditDomain.ps1, AuditAD.ps1, AuditInventory.ps1,
+# AuditM365.ps1), which dot-source this file. A collector writes Markdown lines for its section of the audit (### headings),
 # findings (New-AuditFinding) and the data it read (New-AuditData), which Audit.ps1 saves as JSON.
 
 if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) {
@@ -112,6 +112,91 @@ function Get-AuditCacheFile {
     finally {
         $ProgressPreference = $progress
     }
+}
+
+# A program the audit downloads once, as a zip of a fixed version, into audit-cache\<Name>. The zip is
+# checked against its SHA-256 before it is unpacked, and the program against its own before each use,
+# so that a changed or damaged download never runs. $null when it can't be downloaded or doesn't match.
+function Get-AuditTool {
+    param(
+        [string]$Name,
+        [string]$Uri,
+        [string]$ZipSha256,
+        [string]$Program,
+        [string]$ProgramSha256
+    )
+
+    $folder = Join-Path (Join-Path $PSScriptRoot 'audit-cache') $Name
+    $path = Join-Path $folder $Program
+    $zip = "$folder.zip"
+    $progress = $ProgressPreference
+    try {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $ProgressPreference = 'SilentlyContinue'
+            New-Item -ItemType Directory -Path (Split-Path $folder) -Force | Out-Null
+            Invoke-WebRequest -Uri $Uri -OutFile $zip -UseBasicParsing -TimeoutSec 120
+            $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+            if ($hash -ne $ZipSha256) {
+                throw "the download's SHA-256 is $hash, not $ZipSha256"
+            }
+            Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $folder)
+        }
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($hash -ne $ProgramSha256) {
+            Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+            throw "$Program's SHA-256 is $hash, not $ProgramSha256; it was removed"
+        }
+        return $path
+    }
+    catch {
+        Write-Warning "$Name could not be used: $($_.Exception.Message)"
+        return $null
+    }
+    finally {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        $ProgressPreference = $progress
+    }
+}
+
+# The open TCP ports of these addresses or names: address -> ports.
+function Test-TcpPorts {
+    param(
+        [string[]]$Addresses,
+        [int[]]$Ports,
+        [int]$TimeoutMs = 1000,
+        [string]$Status = 'Ports',
+        [string]$Activity = 'Network audit',
+        [int]$ProgressId = 20,
+        [int]$Percent = 40
+    )
+
+    $open = @{}
+    $pairs = @(foreach ($address in $Addresses) { foreach ($port in $Ports) { [pscustomobject]@{ Address = $address; Port = $port } } })
+    for ($first = 0; $first -lt $pairs.Count; $first += 512) {
+        $batch = @($pairs[$first..([math]::Min($first + 511, $pairs.Count - 1))] | ForEach-Object {
+                $client = New-Object System.Net.Sockets.TcpClient
+                [pscustomobject]@{ Pair = $_; Client = $client; Task = $client.ConnectAsync($_.Address, $_.Port) }
+            })
+        try {
+            [void][System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($batch.Task), $TimeoutMs)
+        }
+        catch {
+            # Refused connections: closed ports.
+        }
+        foreach ($item in $batch) {
+            if ($item.Task.Status -eq 'RanToCompletion' -and $item.Client.Connected) {
+                if (-not $open.ContainsKey($item.Pair.Address)) {
+                    $open[$item.Pair.Address] = New-Object System.Collections.Generic.List[int]
+                }
+                $open[$item.Pair.Address].Add($item.Pair.Port)
+            }
+            $item.Client.Close()
+        }
+        Write-Progress -Id $ProgressId -Activity $Activity -Status "$($Status): $([math]::Min($first + 512, $pairs.Count)) of $($pairs.Count)" -PercentComplete $Percent
+    }
+    return $open
 }
 
 # What a web page shows without logging in: its status, server, title and redirect, and for HTTPS its
