@@ -306,7 +306,8 @@ function Import-KeeperConnections {
     if (-not $file) {
         $latest = Get-ChildItem -Path (Join-Path $PSScriptRoot 'KCM-RDP-Drive-Report_*.csv') -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        $prompt = if ($latest) { "Path of the CSV to import (Enter for $($latest.Name))" } else { 'Path of the CSV to import' }
+        # The last export, for an export edited and saved again in Excel.
+        $prompt = if ($latest) { "Path of the CSV to import (Enter for the last export, $($latest.Name))" } else { 'Path of the CSV to import' }
         $file = "$(Read-Host -Prompt $prompt)".Trim().Trim('"')
         if (-not $file -and $latest) {
             $file = $latest.FullName
@@ -318,6 +319,8 @@ function Import-KeeperConnections {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
         throw "There is no file $file."
     }
+    # A relative path is from PowerShell's folder, which .NET, reading the file, doesn't know.
+    $file = (Resolve-Path -LiteralPath $file).ProviderPath
 
     # The whole CSV is checked before Keeper is asked anything.
     $rows = @(Read-DriveCsv $file)
@@ -423,6 +426,9 @@ function Import-KeeperConnections {
     $counts = "$unchanged already as in the CSV, $skipped skipped"
     if ($plans.Count -eq 0) {
         Write-Host "Nothing to change: $counts." -ForegroundColor Green
+        if ($unchanged -gt 0) {
+            Write-Host "Keeper already has the drive settings of $file. To change them, edit its drive columns first, or give the path of the CSV you edited." -ForegroundColor Yellow
+        }
         return
     }
     $plans = @($plans | Sort-Object Name, { "$($_.ID)".PadLeft(10, '0') })
