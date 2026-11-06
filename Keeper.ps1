@@ -31,12 +31,15 @@ param(
 # report: .\Start.ps1 -Keeper (questions in the console), .\Start.ps1 -Keeper -Gui or Keeper
 # import/export in the Script Manager (a window), both running the same steps.
 # Export: the RDP connections of a Keeper Connection Manager (the REST API of Apache Guacamole) with
-# their drive settings, shown, written to KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv next to the
-# scripts and opened. It names the client's servers, so git ignores it like the report.
+# all their settings but the secrets (passwords, keys), shown, written to
+# KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv next to the scripts and opened: Name, ID, ParentID,
+# Hostname and the drive settings first, then every other parameter under Keeper's name (port...),
+# then the attributes (attr:max-connections...). It names the client's servers, so git ignores it.
 # Import: such a CSV, edited in Excel for example, written to the connections of its ID column, all of
 # them or those picked by ID (44, or 40-50,60). The ID says which connection a row is; every other
-# column is written to it: Name renames it, ParentID moves it to that folder, Hostname and the drive
-# columns are its parameters. An empty Name, ParentID or Hostname is left as it is. The values that
+# column is written to it: Name renames it, ParentID moves it to that folder, the others are its
+# parameters and attributes. An empty Name, ParentID or Hostname is left as it is, any other empty
+# value is not set. A column not named like a Keeper setting (Notes...) or holding a secret is ignored. The values that
 # differ from Keeper are shown first, then written to all connections or to the first one only, after
 # a backup of them in KCM-RDP-Backup_<yyyy-MM-dd_HHmmss>.json.
 # The API is read with the token of a session signed in in the browser, which may need a second
@@ -208,7 +211,16 @@ $OtherFields = [ordered]@{
     Hostname = @{ Parameter = 'hostname' }
 }
 
-# The RDP connections with their drive settings, in the columns of the CSV, sorted by name and ID.
+# Parameters and attributes that hold a secret, a password or a key: never written to a CSV, never read
+# from one. Writing a connection keeps them, since it sends back all the parameters Keeper gave.
+$SecretPattern = 'password|passphrase|private-key|client-key|secret|token'
+
+# The parameters the named columns of the CSV (Hostname and the drive ones) stand for.
+$NamedParameters = @(@($OtherFields.Values | Where-Object { $_.Contains('Parameter') } | ForEach-Object { $_.Parameter }) + @($DriveFields.Values | ForEach-Object { $_.Parameter }))
+
+# The RDP connections, sorted by name and ID, in the columns of the CSV: the named ones (Name, ID,
+# ParentID, Hostname and the drive ones), then every other parameter any of them has under its own
+# name (port, security...), then their attributes (attr:max-connections...), secrets left out.
 # -Progress: the window's status line, instead of a line in the console for each connection.
 function Get-KcmRows {
     param(
@@ -217,37 +229,52 @@ function Get-KcmRows {
     )
 
     $connections = Get-KcmConnectionList $Session
-    $rows = @(foreach ($property in $connections.PSObject.Properties) {
-            $summary = $property.Value
-            if ("$(Get-MoseProperty $summary 'protocol')" -ne 'rdp') {
-                continue
-            }
+    $read = New-Object System.Collections.Generic.List[object]
+    foreach ($property in $connections.PSObject.Properties) {
+        $summary = $property.Value
+        if ("$(Get-MoseProperty $summary 'protocol')" -ne 'rdp') {
+            continue
+        }
 
-            $text = "Reading $($summary.name) [$($summary.identifier)]..."
-            if ($Progress) {
-                & $Progress $text
-            }
-            else {
-                Write-Host $text -ForegroundColor DarkGray
-            }
-            try {
-                # Only the parameters, as flat properties: hostname, enable-drive...
-                $parameters = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($summary.identifier)/parameters" -Headers $Session.Headers
+        $text = "Reading $($summary.name) [$($summary.identifier)]..."
+        if ($Progress) {
+            & $Progress $text
+        }
+        else {
+            Write-Host $text -ForegroundColor DarkGray
+        }
+        try {
+            # Only the parameters, as flat properties: hostname, enable-drive...
+            $parameters = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($summary.identifier)/parameters" -Headers $Session.Headers
+            $read.Add([pscustomobject]@{ Summary = $summary; Parameters = $parameters; Attributes = Get-MoseProperty $summary 'attributes' })
+        }
+        catch {
+            Write-Warning "Failed to read $($summary.name) [$($summary.identifier)]: $($_.Exception.Message)"
+        }
+    }
 
-                $row = [ordered]@{
-                    Name     = $summary.name
-                    ID       = $summary.identifier
-                    ParentID = Get-MoseProperty $summary 'parentIdentifier'
-                    Hostname = Get-MoseProperty $parameters 'hostname'
-                }
-                foreach ($column in $DriveFields.Keys) {
-                    $row[$column] = Get-MoseProperty $parameters $DriveFields[$column].Parameter
-                }
-                [pscustomobject]$row
+    # Every row has every column, which Export-Csv takes from the first row.
+    $otherParameters = @($read | ForEach-Object { $_.Parameters.PSObject.Properties | ForEach-Object { $_.Name } } |
+        Where-Object { $NamedParameters -notcontains $_ -and $_ -notmatch $SecretPattern } | Sort-Object -Unique)
+    $attributes = @($read | Where-Object { $_.Attributes } | ForEach-Object { $_.Attributes.PSObject.Properties | ForEach-Object { $_.Name } } |
+        Where-Object { $_ -notmatch $SecretPattern } | Sort-Object -Unique)
+    $rows = @(foreach ($entry in $read) {
+            $row = [ordered]@{
+                Name     = $entry.Summary.name
+                ID       = $entry.Summary.identifier
+                ParentID = Get-MoseProperty $entry.Summary 'parentIdentifier'
+                Hostname = Get-MoseProperty $entry.Parameters 'hostname'
             }
-            catch {
-                Write-Warning "Failed to read $($summary.name) [$($summary.identifier)]: $($_.Exception.Message)"
+            foreach ($column in $DriveFields.Keys) {
+                $row[$column] = Get-MoseProperty $entry.Parameters $DriveFields[$column].Parameter
             }
+            foreach ($name in $otherParameters) {
+                $row[$name] = Get-MoseProperty $entry.Parameters $name
+            }
+            foreach ($name in $attributes) {
+                $row["attr:$name"] = Get-MoseProperty $entry.Attributes $name
+            }
+            [pscustomobject]$row
         })
     # The identifiers are numbers in text: 2 before 10.
     return @($rows | Sort-Object Name, { "$($_.ID)".PadLeft(10, '0') })
@@ -272,10 +299,11 @@ function Export-KeeperConnections {
         Write-Warning "$($kcm.Url) has no RDP connection in data source $($kcm.DataSource)."
         return
     }
-    # Write-Host, so the Script Manager shows the table too.
-    Write-Host ($rows | Format-Table -AutoSize -Wrap | Out-String).TrimEnd()
+    # Write-Host, so the Script Manager shows the table too. The first columns only: the CSV has them all.
+    Write-Host ($rows | Format-Table Name, ID, ParentID, Hostname -AutoSize | Out-String).TrimEnd()
     $path = Save-KcmExport -Rows $rows
-    Write-Host "$($rows.Count) RDP connection(s) written to $path" -ForegroundColor Green
+    $columnCount = @($rows[0].PSObject.Properties).Count
+    Write-Host "$($rows.Count) RDP connection(s) written to $path, with $columnCount columns: all their settings but the passwords and keys." -ForegroundColor Green
     if (-not $NoOpen) {
         Invoke-Item -LiteralPath $path
     }
@@ -444,10 +472,18 @@ function Read-ImportCsv {
     if ($columns -notcontains 'ID') {
         throw "$File has no ID column, which says the connection of each row: start from an export."
     }
-    $imported = @(@($OtherFields.Keys) + @($DriveFields.Keys) | Where-Object { $columns -contains $_ })
+    # The named columns, then those named like a parameter (port, security...) or an attribute
+    # (attr:max-connections) as the export writes them. Not a secret, and not a column Excel or a
+    # person added (Notes...), which are ignored.
+    $named = @(@($OtherFields.Keys) + @($DriveFields.Keys) | Where-Object { $columns -contains $_ })
+    $generic = @($columns | Where-Object {
+            ($_ -cmatch '^[a-z0-9][a-z0-9-]*$' -or $_ -cmatch '^attr:[a-z0-9][a-z0-9-]*$') -and $_ -notmatch $SecretPattern -and $NamedParameters -notcontains $_
+        })
+    $imported = @($named + $generic)
     if ($imported.Count -eq 0) {
-        throw "$File has no column to import: $(@(@($OtherFields.Keys) + @($DriveFields.Keys)) -join ', ')."
+        throw "$File has no column to import: $(@(@($OtherFields.Keys) + @($DriveFields.Keys)) -join ', '), or a Keeper parameter (port...)."
     }
+    $ignored = @($columns | Where-Object { $_ -ne 'ID' -and $imported -notcontains $_ })
     $noId = @($rows | Where-Object { -not "$($_.ID)".Trim() })
     if ($noId.Count -gt 0) {
         throw "$($noId.Count) row(s) of $File have no ID: each row must say the connection it changes."
@@ -456,11 +492,40 @@ function Read-ImportCsv {
     if ($twice.Count -gt 0) {
         throw "These IDs are on more than one row of ${File}: $($twice -join ', ')."
     }
-    return [pscustomobject]@{ File = $File; Rows = $rows; Imported = $imported }
+    return [pscustomobject]@{ File = $File; Rows = $rows; Imported = $imported; Ignored = $ignored }
 }
 
-# Each row: its values for the connection itself (Fields) and for its parameters (Values), and the
-# CSV column of each (ColumnOf), for the list of the changes.
+# The columns imported, said in a line: the first ten, then how many more.
+function Format-ColumnList {
+    param(
+        [string[]]$Columns
+    )
+
+    if ($Columns.Count -le 12) {
+        return $Columns -join ', '
+    }
+    return "$(@($Columns | Select-Object -First 10) -join ', ') and $($Columns.Count - 10) more"
+}
+
+# A value of a column named like a parameter, as Keeper keeps it: Excel turns true into TRUE (VRAI,
+# WAAR), which Keeper doesn't read as true.
+function ConvertTo-KcmValue {
+    param(
+        [string]$Value
+    )
+
+    if ($Value -match '^(true|vrai|waar)$') {
+        return 'true'
+    }
+    if ($Value -match '^(false|faux|onwaar)$') {
+        return 'false'
+    }
+    return $Value
+}
+
+# Each row: its values for the connection itself (Fields), for its parameters (Values) and for its
+# attributes (Attributes), and the CSV column of each (ColumnOf), for the list of the changes. An
+# empty value of a parameter or an attribute is not set.
 function ConvertTo-ImportItems {
     param(
         [object[]]$Rows,
@@ -471,8 +536,21 @@ function ConvertTo-ImportItems {
     $items = @(foreach ($row in $Rows) {
             $fields = [ordered]@{}
             $values = [ordered]@{}
+            $attributes = [ordered]@{}
             foreach ($column in $Imported) {
                 $value = "$($row.$column)".Trim()
+                if ($column -clike 'attr:*') {
+                    $name = $column.Substring(5)
+                    $attributes[$name] = ConvertTo-KcmValue $value
+                    $columnOf["attr:$name"] = $column
+                    continue
+                }
+                if (-not $OtherFields.Contains($column) -and -not $DriveFields.Contains($column)) {
+                    # A parameter under its own name.
+                    $values[$column] = ConvertTo-KcmValue $value
+                    $columnOf[$column] = $column
+                    continue
+                }
                 if ($OtherFields.Contains($column)) {
                     if (-not $value) {
                         continue
@@ -494,7 +572,7 @@ function ConvertTo-ImportItems {
                 $values[$DriveFields[$column].Parameter] = $value
                 $columnOf[$DriveFields[$column].Parameter] = $column
             }
-            [pscustomobject]@{ ID = "$($row.ID)".Trim(); Fields = $fields; Values = $values }
+            [pscustomobject]@{ ID = "$($row.ID)".Trim(); Fields = $fields; Values = $values; Attributes = $attributes }
         })
     return [pscustomobject]@{ Items = $items; ColumnOf = $columnOf }
 }
@@ -527,14 +605,26 @@ function Get-ImportPlans {
         if ($Progress) {
             & $Progress "Reading $($summary.name) [$($item.ID)]..."
         }
+        # Kind: what a change is of, the connection itself (Field), a parameter or an attribute.
         $changes = New-Object System.Collections.Generic.List[object]
         foreach ($field in $item.Fields.Keys) {
             $old = "$(Get-MoseProperty $summary $field)"
             if ($old -cne $item.Fields[$field]) {
-                $changes.Add([pscustomobject]@{ Column = $Import.ColumnOf[$field]; Key = $field; Field = $true; Before = $old; After = $item.Fields[$field] })
+                $changes.Add([pscustomobject]@{ Column = $Import.ColumnOf[$field]; Key = $field; Kind = 'Field'; Before = $old; After = $item.Fields[$field] })
             }
         }
         try {
+            $connection = $null
+            if ($item.Attributes.Count -gt 0) {
+                $connection = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($item.ID)" -Headers $Session.Headers
+                $current = Get-MoseProperty $connection 'attributes'
+                foreach ($name in $item.Attributes.Keys) {
+                    $old = "$(Get-MoseProperty $current $name)"
+                    if ($old -cne $item.Attributes[$name]) {
+                        $changes.Add([pscustomobject]@{ Column = $Import.ColumnOf["attr:$name"]; Key = $name; Kind = 'Attribute'; Before = $old; After = $item.Attributes[$name] })
+                    }
+                }
+            }
             $before = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($item.ID)/parameters" -Headers $Session.Headers
             # All its parameters, then the CSV's: a parameter left out of what is written is removed.
             $after = [ordered]@{}
@@ -553,13 +643,15 @@ function Get-ImportPlans {
                 else {
                     $after.Remove($parameter)
                 }
-                $changes.Add([pscustomobject]@{ Column = $Import.ColumnOf[$parameter]; Key = $parameter; Field = $false; Before = $old; After = $new })
+                $changes.Add([pscustomobject]@{ Column = $Import.ColumnOf[$parameter]; Key = $parameter; Kind = 'Parameter'; Before = $old; After = $new })
             }
             if ($changes.Count -eq 0) {
                 $unchanged++
                 continue
             }
-            $connection = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($item.ID)" -Headers $Session.Headers
+            if (-not $connection) {
+                $connection = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($item.ID)" -Headers $Session.Headers
+            }
             $plans.Add([pscustomobject]@{ ID = $item.ID; Name = "$($summary.name)"; Connection = $connection; Before = $before; After = $after; Changes = $changes.ToArray() })
         }
         catch {
@@ -625,8 +717,23 @@ function Write-ImportPlans {
             }
         }
         # Its new name and folder, if the CSV changes them.
-        foreach ($change in @($plan.Changes | Where-Object { $_.Field })) {
+        foreach ($change in @($plan.Changes | Where-Object { $_.Kind -eq 'Field' })) {
             $body[$change.Key] = $change.After
+        }
+        # Its attributes, all of them, with those the CSV changes; an empty one is not set.
+        $attributeChanges = @($plan.Changes | Where-Object { $_.Kind -eq 'Attribute' })
+        if ($attributeChanges.Count -gt 0) {
+            $attributes = [ordered]@{}
+            $current = Get-MoseProperty $plan.Connection 'attributes'
+            if ($current) {
+                foreach ($property in $current.PSObject.Properties) {
+                    $attributes[$property.Name] = $property.Value
+                }
+            }
+            foreach ($change in $attributeChanges) {
+                $attributes[$change.Key] = if ($change.After) { $change.After } else { $null }
+            }
+            $body['attributes'] = $attributes
         }
         $body['parameters'] = $plan.After
         $json = ConvertTo-Json -InputObject $body -Depth 10
@@ -635,11 +742,15 @@ function Write-ImportPlans {
                 -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
             # Read again: the values as asked, and no other parameter lost.
             $check = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($plan.ID)/parameters" -Headers $Session.Headers
-            $wrong = @($plan.Changes | Where-Object { -not $_.Field -and "$(Get-MoseProperty $check $_.Key)" -cne $_.After } | ForEach-Object { $_.Column })
-            $fieldChanges = @($plan.Changes | Where-Object { $_.Field })
-            if ($fieldChanges.Count -gt 0) {
+            $wrong = @($plan.Changes | Where-Object { $_.Kind -eq 'Parameter' -and "$(Get-MoseProperty $check $_.Key)" -cne $_.After } | ForEach-Object { $_.Column })
+            $connectionChanges = @($plan.Changes | Where-Object { $_.Kind -ne 'Parameter' })
+            if ($connectionChanges.Count -gt 0) {
                 $checkConnection = Invoke-RestMethod -Method GET -Uri "$($Session.Api)/connections/$($plan.ID)" -Headers $Session.Headers
-                $wrong += @($fieldChanges | Where-Object { "$(Get-MoseProperty $checkConnection $_.Key)" -cne $_.After } | ForEach-Object { $_.Column })
+                $checkAttributes = Get-MoseProperty $checkConnection 'attributes'
+                $wrong += @($connectionChanges | Where-Object {
+                        $now = if ($_.Kind -eq 'Field') { Get-MoseProperty $checkConnection $_.Key } else { Get-MoseProperty $checkAttributes $_.Key }
+                        "$now" -cne $_.After
+                    } | ForEach-Object { $_.Column })
             }
             $lost = @($plan.After.Keys | Where-Object { -not $check.PSObject.Properties[$_] })
             if ($wrong.Count -gt 0 -or $lost.Count -gt 0) {
@@ -680,6 +791,9 @@ function Import-KeeperConnections {
     $import = ConvertTo-ImportItems -Rows $rows -Imported $csv.Imported
     # The ID says which connection a row is; every other column of the CSV is written to it.
     Write-Host "$($rows.Count) row(s) of $($csv.File) to import. Columns imported: $($csv.Imported -join ', ')." -ForegroundColor DarkGray
+    if ($csv.Ignored.Count -gt 0) {
+        Write-Host "Columns ignored, not named like a Keeper setting, or a secret: $($csv.Ignored -join ', ')." -ForegroundColor Yellow
+    }
 
     $kcm = Connect-Kcm
     $result = Get-ImportPlans -Session $kcm -Import $import
@@ -688,12 +802,12 @@ function Import-KeeperConnections {
     if ($plans.Count -eq 0) {
         Write-Host "Nothing to change: $counts." -ForegroundColor Green
         if ($result.Unchanged -gt 0) {
-            Write-Host "Keeper already has every value of these columns for the rows picked: $($csv.Imported -join ', ')." -ForegroundColor Yellow
+            Write-Host "Keeper already has every value of these columns for the rows picked: $(Format-ColumnList $csv.Imported)." -ForegroundColor Yellow
         }
         return
     }
     Write-Host (Get-ImportPreview -Plans $plans | Format-Table -AutoSize -Wrap | Out-String).TrimEnd()
-    Write-Host "All the columns are imported ($($csv.Imported -join ', ')); only the values that differ from Keeper are listed, the others are already the same." -ForegroundColor DarkGray
+    Write-Host "All the columns are imported ($(Format-ColumnList $csv.Imported)); only the values that differ from Keeper are listed, the others are already the same." -ForegroundColor DarkGray
     Write-Host "$($plans.Count) connection(s) to change, $counts." -ForegroundColor Cyan
 
     # Nothing is written before this answer. A and F, the answers of earlier versions, still work.
@@ -1074,7 +1188,11 @@ function Show-KeeperWindow {
             & $clearPlans
             & $run {
                 $ui.Csv = Read-ImportCsv -File $ui.CsvFiles[$csvBox.SelectedIndex].FullName
-                $csvInfo.Text = "$($ui.Csv.Rows.Count) rows, IDs $(Format-IdRanges @($ui.Csv.Rows | ForEach-Object { "$($_.ID)".Trim() })). Columns imported: $($ui.Csv.Imported -join ', ')."
+                $csvInfo.Text = "$($ui.Csv.Rows.Count) rows, IDs $(Format-IdRanges @($ui.Csv.Rows | ForEach-Object { "$($_.ID)".Trim() })). $($ui.Csv.Imported.Count) columns imported: $(Format-ColumnList $ui.Csv.Imported)."
+                Write-Host "$($ui.Csv.File): columns imported: $($ui.Csv.Imported -join ', ')."
+                if ($ui.Csv.Ignored.Count -gt 0) {
+                    Write-Warning "Columns ignored, not named like a Keeper setting, or a secret: $($ui.Csv.Ignored -join ', ')."
+                }
             }
             if (-not $ui.Csv) {
                 $csvInfo.Text = 'This CSV cannot be imported: see the log.'
