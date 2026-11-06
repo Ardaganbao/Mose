@@ -31,10 +31,12 @@ param(
 # report: .\Start.ps1 -Keeper (questions in the console), .\Start.ps1 -Keeper -Gui or Keeper
 # import/export in the Script Manager (a window), both running the same steps.
 # Export: the RDP connections of a Keeper Connection Manager (the REST API of Apache Guacamole) with
-# all their settings but the secrets (passwords, keys), shown, written to
-# KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv next to the scripts and opened: Name, ID, ParentID,
-# Hostname and the drive settings first, then every other parameter under Keeper's name (port...),
-# then the attributes (attr:max-connections...). It names the client's servers, so git ignores it.
+# all their settings, shown, written to KCM-RDP-Drive-Report_<yyyy-MM-dd_HHmmss>.csv next to the
+# scripts and opened: Name, ID, ParentID, Hostname and the drive settings first, then the secrets
+# (password...) as their vault token, or "(stored here, not from the vault)" for one stored in Keeper,
+# the misconfiguration it shows and warns about, then every other parameter under Keeper's name
+# (port...), then the attributes (attr:max-connections...). It names the client's servers, so git
+# ignores it.
 # Import: such a CSV, edited in Excel for example, written to the connections of its ID column, all of
 # them or those picked by ID (44, or 40-50,60). The ID says which connection a row is; every other
 # column is written to it: Name renames it, ParentID moves it to that folder, the others are its
@@ -211,16 +213,35 @@ $OtherFields = [ordered]@{
     Hostname = @{ Parameter = 'hostname' }
 }
 
-# Parameters and attributes that hold a secret, a password or a key: never written to a CSV, never read
-# from one. Writing a connection keeps them, since it sends back all the parameters Keeper gave.
+# Parameters and attributes that hold a secret, a password or a key. The export writes such a
+# parameter only as a vault token (${KEEPER_SERVER_PASSWORD}...): a secret stored in Keeper itself is
+# the misconfiguration it shows, masked. The import never writes them; writing a connection keeps them,
+# since it sends back all the parameters Keeper gave.
 $SecretPattern = 'password|passphrase|private-key|client-key|secret|token'
+$NotFromVault = '(stored here, not from the vault)'
+
+# A secret as the export writes it: its vault token, or the mark of one stored in Keeper.
+function Format-KcmSecret {
+    param(
+        [string]$Value
+    )
+
+    if (-not $Value) {
+        return ''
+    }
+    if ($Value -match '^\s*\$\{[^}]+\}\s*$') {
+        return $Value.Trim()
+    }
+    return $NotFromVault
+}
 
 # The parameters the named columns of the CSV (Hostname and the drive ones) stand for.
 $NamedParameters = @(@($OtherFields.Values | Where-Object { $_.Contains('Parameter') } | ForEach-Object { $_.Parameter }) + @($DriveFields.Values | ForEach-Object { $_.Parameter }))
 
 # The RDP connections, sorted by name and ID, in the columns of the CSV: the named ones (Name, ID,
-# ParentID, Hostname and the drive ones), then every other parameter any of them has under its own
-# name (port, security...), then their attributes (attr:max-connections...), secrets left out.
+# ParentID, Hostname and the drive ones), then their secrets as vault tokens (password...), then every
+# other parameter any of them has under its own name (port, security...), then their attributes
+# (attr:max-connections...). A connection with a secret stored in Keeper itself is warned about.
 # -Progress: the window's status line, instead of a line in the console for each connection.
 function Get-KcmRows {
     param(
@@ -254,8 +275,10 @@ function Get-KcmRows {
     }
 
     # Every row has every column, which Export-Csv takes from the first row.
-    $otherParameters = @($read | ForEach-Object { $_.Parameters.PSObject.Properties | ForEach-Object { $_.Name } } |
-        Where-Object { $NamedParameters -notcontains $_ -and $_ -notmatch $SecretPattern } | Sort-Object -Unique)
+    $allParameters = @($read | ForEach-Object { $_.Parameters.PSObject.Properties | ForEach-Object { $_.Name } } |
+        Where-Object { $NamedParameters -notcontains $_ } | Sort-Object -Unique)
+    $secretParameters = @($allParameters | Where-Object { $_ -match $SecretPattern })
+    $otherParameters = @($allParameters | Where-Object { $_ -notmatch $SecretPattern })
     $attributes = @($read | Where-Object { $_.Attributes } | ForEach-Object { $_.Attributes.PSObject.Properties | ForEach-Object { $_.Name } } |
         Where-Object { $_ -notmatch $SecretPattern } | Sort-Object -Unique)
     $rows = @(foreach ($entry in $read) {
@@ -268,6 +291,9 @@ function Get-KcmRows {
             foreach ($column in $DriveFields.Keys) {
                 $row[$column] = Get-MoseProperty $entry.Parameters $DriveFields[$column].Parameter
             }
+            foreach ($name in $secretParameters) {
+                $row[$name] = Format-KcmSecret "$(Get-MoseProperty $entry.Parameters $name)"
+            }
             foreach ($name in $otherParameters) {
                 $row[$name] = Get-MoseProperty $entry.Parameters $name
             }
@@ -277,7 +303,16 @@ function Get-KcmRows {
             [pscustomobject]$row
         })
     # The identifiers are numbers in text: 2 before 10.
-    return @($rows | Sort-Object Name, { "$($_.ID)".PadLeft(10, '0') })
+    $rows = @($rows | Sort-Object Name, { "$($_.ID)".PadLeft(10, '0') })
+
+    # The misconfigurations: a secret stored in Keeper instead of a vault token.
+    foreach ($name in $secretParameters) {
+        $stored = @($rows | Where-Object { $_.$name -eq $NotFromVault })
+        if ($stored.Count -gt 0) {
+            Write-Warning "$($stored.Count) connection(s) have their $name stored in Keeper instead of a vault token: $(@($stored | ForEach-Object { "$($_.Name) [$($_.ID)]" }) -join ', ')."
+        }
+    }
+    return $rows
 }
 
 # Writes the export next to the scripts and returns its path. A name of its own each time: Excel
@@ -303,7 +338,7 @@ function Export-KeeperConnections {
     Write-Host ($rows | Format-Table Name, ID, ParentID, Hostname -AutoSize | Out-String).TrimEnd()
     $path = Save-KcmExport -Rows $rows
     $columnCount = @($rows[0].PSObject.Properties).Count
-    Write-Host "$($rows.Count) RDP connection(s) written to $path, with $columnCount columns: all their settings but the passwords and keys." -ForegroundColor Green
+    Write-Host "$($rows.Count) RDP connection(s) written to $path, with $columnCount columns: all their settings, the passwords and keys as their vault token, or $NotFromVault." -ForegroundColor Green
     if (-not $NoOpen) {
         Invoke-Item -LiteralPath $path
     }
@@ -493,6 +528,17 @@ function Read-ImportCsv {
         throw "These IDs are on more than one row of ${File}: $($twice -join ', ')."
     }
     return [pscustomobject]@{ File = $File; Rows = $rows; Imported = $imported; Ignored = $ignored }
+}
+
+# The columns not imported, each with why.
+function Format-IgnoredColumns {
+    param(
+        [string[]]$Columns
+    )
+
+    return @($Columns | ForEach-Object {
+            if ($_ -match $SecretPattern) { "$_ (a secret: set through the vault only)" } else { "$_ (not a Keeper setting)" }
+        }) -join ', '
 }
 
 # The columns imported, said in a line: the first ten, then how many more.
@@ -792,7 +838,7 @@ function Import-KeeperConnections {
     # The ID says which connection a row is; every other column of the CSV is written to it.
     Write-Host "$($rows.Count) row(s) of $($csv.File) to import. Columns imported: $($csv.Imported -join ', ')." -ForegroundColor DarkGray
     if ($csv.Ignored.Count -gt 0) {
-        Write-Host "Columns ignored, not named like a Keeper setting, or a secret: $($csv.Ignored -join ', ')." -ForegroundColor Yellow
+        Write-Host "Columns not imported: $(Format-IgnoredColumns $csv.Ignored)." -ForegroundColor Yellow
     }
 
     $kcm = Connect-Kcm
@@ -1191,7 +1237,7 @@ function Show-KeeperWindow {
                 $csvInfo.Text = "$($ui.Csv.Rows.Count) rows, IDs $(Format-IdRanges @($ui.Csv.Rows | ForEach-Object { "$($_.ID)".Trim() })). $($ui.Csv.Imported.Count) columns imported: $(Format-ColumnList $ui.Csv.Imported)."
                 Write-Host "$($ui.Csv.File): columns imported: $($ui.Csv.Imported -join ', ')."
                 if ($ui.Csv.Ignored.Count -gt 0) {
-                    Write-Warning "Columns ignored, not named like a Keeper setting, or a secret: $($ui.Csv.Ignored -join ', ')."
+                    Write-Host "Columns not imported: $(Format-IgnoredColumns $ui.Csv.Ignored)."
                 }
             }
             if (-not $ui.Csv) {
