@@ -23,6 +23,11 @@ param(
 # then Audit.ps1 runs in the background with them (-NonInteractive), its messages and progress shown
 # here, and its audit, diagram and folder opened from here. Nothing typed here is saved: the SNMP
 # community and the passwords stay in this window and the audit's memory only.
+#
+# The second tab is the on-site checklist of an audit (the one just run, another of the folder, or one
+# found elsewhere): each item ticked as done or skipped, with a note, saved in the audit's "To complete
+# on site" section at each change, so that the audit says what is done. Hiding what is done or skipped
+# is for this window only.
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
@@ -36,7 +41,7 @@ if (-not $OutputPath) {
 $auditScript = Join-Path $PSScriptRoot 'Audit.ps1'
 # What the window knows. A hashtable, so that the event handlers, which run in scopes of their own,
 # change it: the audit running (its PowerShell, the stream items shown), when it started, its files.
-$ui = @{ Shell = $null; Handle = $null; Shown = @{}; Started = $null; Markdown = $null; Diagram = $null }
+$ui = @{ Shell = $null; Handle = $null; Shown = @{}; Started = $null; Markdown = $null; Diagram = $null; AuditFiles = @(); Checklist = $null; Loading = $false }
 
 $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
 $inDomain = [bool]($computer -and $computer.PartOfDomain)
@@ -101,20 +106,91 @@ function New-AuditGroup {
     $group.Text = $Text
     $group.Dock = 'Top'
     $group.Height = $Height
-    $form.Controls.Add($group)
+    $auditPage.Controls.Add($group)
     return $group
 }
 
-# Controls are docked in reverse order of adding: the log fills what the others leave, and the last
-# group added is the top one.
-$log = New-Object System.Windows.Forms.TextBox
-$log.Multiline = $true
-$log.ReadOnly = $true
-$log.ScrollBars = 'Vertical'
-$log.Dock = 'Fill'
-$log.Font = New-Object System.Drawing.Font('Consolas', 9)
-$log.BackColor = [System.Drawing.SystemColors]::Window
-$form.Controls.Add($log)
+# The "To complete on site" section of an audit: its lines, where it starts, where its items start, where
+# it ends, and its items, each done, skipped or neither, with its note. $null when there is no section.
+function Read-AuditChecklist {
+    param([string]$Path)
+
+    $lines = [System.IO.File]::ReadAllLines($Path)
+    $start = [array]::IndexOf($lines, '## To complete on site')
+    if ($start -lt 0) {
+        return $null
+    }
+    $end = $lines.Count
+    for ($index = $start + 1; $index -lt $lines.Count; $index++) {
+        if ($lines[$index].StartsWith('## ')) {
+            $end = $index
+            break
+        }
+    }
+    $items = New-Object System.Collections.Generic.List[object]
+    $first = $end
+    for ($index = $start + 1; $index -lt $end; $index++) {
+        if ($lines[$index] -match '^- \[(?<mark>[ xX])\] (?<text>.*)$') {
+            $first = [math]::Min($first, $index)
+            $text = $Matches.text
+            $done = $Matches.mark -ne ' '
+            $skipped = $text -match '^~~(?<inner>.*)~~ \(skipped\)$'
+            if ($skipped) {
+                $text = $Matches.inner
+                $done = $false
+            }
+            $items.Add([pscustomobject]@{ Text = $text; Done = $done; Skipped = $skipped; Note = '' })
+        }
+        elseif ($items.Count -gt 0 -and $lines[$index] -match '^\s+- Note: (?<note>.*)$') {
+            $items[$items.Count - 1].Note = $Matches.note
+        }
+    }
+    return [pscustomobject]@{ Lines = $lines; Start = $start; First = $first; End = $end; Items = $items.ToArray() }
+}
+
+# Writes the items into the audit's section: a done item ticked, a skipped one struck through, a note
+# on a line under its item. The rest of the audit stays as it is in the file now.
+function Write-AuditChecklist {
+    param([string]$Path, [object[]]$Items)
+
+    $read = Read-AuditChecklist $Path
+    if (-not $read) {
+        throw "$(Split-Path -Leaf $Path) has no ""To complete on site"" section."
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    # The heading and its text, then the items, then a blank line before the next section.
+    for ($index = 0; $index -lt $read.First; $index++) {
+        $lines.Add($read.Lines[$index])
+    }
+    foreach ($item in $Items) {
+        $text = if ($item.Skipped) { "~~$($item.Text)~~ (skipped)" } else { $item.Text }
+        $lines.Add("- [$(if ($item.Done) { 'x' } else { ' ' })] $text")
+        if ($item.Note) {
+            $lines.Add("  - Note: $($item.Note)")
+        }
+    }
+    if ($read.End -lt $read.Lines.Count) {
+        $lines.Add('')
+    }
+    for ($index = $read.End; $index -lt $read.Lines.Count; $index++) {
+        $lines.Add($read.Lines[$index])
+    }
+    # As Audit.ps1 writes it: UTF-8 with its mark, Windows line ends.
+    [System.IO.File]::WriteAllText($Path, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding($true)))
+}
+
+# Two tabs, the audit and the on-site checklist of an audit written, over the status line. Controls
+# are docked in reverse order of adding: what fills is added first, and the last group added is the top
+# one.
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Dock = 'Fill'
+$form.Controls.Add($tabs)
+$auditPage = New-Object System.Windows.Forms.TabPage
+$auditPage.Text = 'Audit'
+$tabs.TabPages.Add($auditPage)
+$checkPage = New-Object System.Windows.Forms.TabPage
+$checkPage.Text = 'On-site checklist'
+$tabs.TabPages.Add($checkPage)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Dock = 'Bottom'
@@ -123,10 +199,19 @@ $status.TextAlign = 'MiddleLeft'
 $status.Text = 'Enter the answers, then Run the audit.'
 $form.Controls.Add($status)
 
+$log = New-Object System.Windows.Forms.TextBox
+$log.Multiline = $true
+$log.ReadOnly = $true
+$log.ScrollBars = 'Vertical'
+$log.Dock = 'Fill'
+$log.Font = New-Object System.Drawing.Font('Consolas', 9)
+$log.BackColor = [System.Drawing.SystemColors]::Window
+$auditPage.Controls.Add($log)
+
 $bar = New-Object System.Windows.Forms.Panel
 $bar.Dock = 'Top'
 $bar.Height = 40
-$form.Controls.Add($bar)
+$auditPage.Controls.Add($bar)
 $runButton = New-AuditButton $bar 'Run the audit' 8 160
 $stopButton = New-AuditButton $bar 'Stop' 176 90
 $openAudit = New-AuditButton $bar 'Open the audit' 300 140
@@ -191,6 +276,52 @@ $browse.Text = 'Browse...'
 $browse.Location = New-Object System.Drawing.Point(832, 19)
 $browse.Size = New-Object System.Drawing.Size(90, 24)
 $clientGroup.Controls.Add($browse)
+
+# The on-site checklist: an audit of the folder, its items to tick, skip and note.
+$checkGrid = New-Object System.Windows.Forms.DataGridView
+$checkGrid.Dock = 'Fill'
+$checkGrid.AllowUserToAddRows = $false
+$checkGrid.AllowUserToDeleteRows = $false
+$checkGrid.AllowUserToResizeRows = $false
+$checkGrid.RowHeadersVisible = $false
+$checkGrid.SelectionMode = 'CellSelect'
+$checkGrid.EditMode = 'EditOnEnter'
+$checkGrid.AutoSizeRowsMode = 'AllCells'
+$checkGrid.BackgroundColor = [System.Drawing.SystemColors]::Window
+$doneColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+$doneColumn.HeaderText = 'Done'
+$doneColumn.Width = 48
+$skipColumn = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+$skipColumn.HeaderText = 'Skip'
+$skipColumn.Width = 48
+$itemColumn = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$itemColumn.HeaderText = 'To complete on site'
+$itemColumn.ReadOnly = $true
+$itemColumn.AutoSizeMode = 'Fill'
+$itemColumn.DefaultCellStyle.WrapMode = 'True'
+$noteColumn = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$noteColumn.HeaderText = 'Note'
+$noteColumn.Width = 300
+$noteColumn.DefaultCellStyle.WrapMode = 'True'
+$checkGrid.Columns.AddRange([System.Windows.Forms.DataGridViewColumn[]]@($doneColumn, $skipColumn, $itemColumn, $noteColumn))
+$checkPage.Controls.Add($checkGrid)
+$checkInfo = New-AuditLabel $checkPage 'Each change is saved in the audit at once: a done item ticked, a skipped one struck through, its note on a line under it. Hide only hides them here.' 0 0 900
+$checkInfo.Dock = 'Bottom'
+$checkInfo.Height = 24
+$checkBar = New-Object System.Windows.Forms.Panel
+$checkBar.Dock = 'Top'
+$checkBar.Height = 64
+$checkPage.Controls.Add($checkBar)
+[void](New-AuditLabel $checkBar 'Audit' 8 12 50)
+$auditList = New-Object System.Windows.Forms.ComboBox
+$auditList.DropDownStyle = 'DropDownList'
+$auditList.Location = New-Object System.Drawing.Point(60, 8)
+$auditList.Width = 600
+$checkBar.Controls.Add($auditList)
+$browseAudit = New-AuditButton $checkBar 'Browse...' 670 100
+$openChecklist = New-AuditButton $checkBar 'Open in Notepad' 778 140
+$hideBox = New-AuditCheckBox $checkBar 'Hide what is done or skipped' 60 36 240 $false
+$countLabel = New-AuditLabel $checkBar '' 310 38 600
 
 $addLog = {
     param([string]$Text)
@@ -363,7 +494,10 @@ $timer.Add_Tick({
         $openAudit.Enabled = [bool]$ui.Markdown
         $openDiagram.Enabled = [bool]$ui.Diagram
         & $setRunning $false
-        $status.Text = if ($stopped) { 'Stopped.' } elseif ($ui.Markdown) { "Done in $([math]::Round(((Get-Date) - $ui.Started).TotalMinutes, 1)) minutes: $($ui.Markdown.Name)." } else { 'The audit ended without writing its file: see above.' }
+        if ($ui.Markdown) {
+            & $loadAudits $ui.Markdown.FullName
+        }
+        $status.Text = if ($stopped) { 'Stopped.' } elseif ($ui.Markdown) { "Done in $([math]::Round(((Get-Date) - $ui.Started).TotalMinutes, 1)) minutes: $($ui.Markdown.Name). Its on-site checklist is in the second tab." } else { 'The audit ended without writing its file: see above.' }
     })
 
 $runButton.Add_Click({
@@ -451,6 +585,155 @@ $browse.Add_Click({
         $dialog.SelectedPath = $folderBox.Text.Trim()
         if ("$($dialog.ShowDialog($form))" -eq 'OK') {
             $folderBox.Text = $dialog.SelectedPath
+        }
+    })
+
+# The checklist's counts: done, skipped and left.
+$countItems = {
+    if (-not $ui.Checklist) {
+        return
+    }
+    $rows = @($checkGrid.Rows)
+    $done = @($rows | Where-Object { $_.Cells[0].Value -eq $true }).Count
+    $skipped = @($rows | Where-Object { $_.Cells[1].Value -eq $true }).Count
+    $countLabel.Text = "$done of $($rows.Count) done, $skipped skipped, $($rows.Count - $done - $skipped) left."
+}
+
+$applyHide = {
+    [void]$checkGrid.EndEdit()
+    $checkGrid.CurrentCell = $null
+    foreach ($row in $checkGrid.Rows) {
+        $row.Visible = -not ($hideBox.Checked -and ($row.Cells[0].Value -eq $true -or $row.Cells[1].Value -eq $true))
+    }
+}
+
+# The items of the audit chosen, from its file.
+$showChecklist = {
+    $ui.Loading = $true
+    $checkGrid.Rows.Clear()
+    $ui.Checklist = $null
+    $countLabel.Text = ''
+    if ($auditList.SelectedIndex -ge 0) {
+        $path = $ui.AuditFiles[$auditList.SelectedIndex]
+        try {
+            $read = Read-AuditChecklist $path
+            if ($read) {
+                $ui.Checklist = $path
+                foreach ($item in $read.Items) {
+                    [void]$checkGrid.Rows.Add($item.Done, $item.Skipped, $item.Text, $item.Note)
+                }
+            }
+            else {
+                $countLabel.Text = 'This audit has no "To complete on site" section.'
+            }
+        }
+        catch {
+            & $tell "The audit could not be read: $($_.Exception.Message)"
+        }
+    }
+    $ui.Loading = $false
+    & $applyHide
+    & $countItems
+}
+
+# The audits of the folder, the newest first, and Select (an audit found elsewhere) in front.
+$loadAudits = {
+    param([string]$Select)
+    $ui.Loading = $true
+    $files = @(Get-ChildItem -LiteralPath $folderBox.Text.Trim() -Filter '*_Audit_*.md' -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime -Descending | ForEach-Object { $_.FullName })
+    if ($Select -and $files -notcontains $Select) {
+        $files = @($Select) + $files
+    }
+    $ui.AuditFiles = $files
+    $auditList.Items.Clear()
+    foreach ($file in $files) {
+        [void]$auditList.Items.Add("$(Split-Path -Leaf $file)   ($(Split-Path -Parent $file))")
+    }
+    if ($files.Count -gt 0) {
+        $auditList.SelectedIndex = [math]::Max(0, [array]::IndexOf($files, $Select))
+    }
+    $ui.Loading = $false
+    & $showChecklist
+    if ($files.Count -eq 0) {
+        $countLabel.Text = 'No audit in the folder of the Audit tab yet: run one, or Browse.'
+    }
+}
+
+$saveChecklist = {
+    if (-not $ui.Checklist) {
+        return
+    }
+    $items = @(foreach ($row in $checkGrid.Rows) {
+            [pscustomobject]@{
+                Done    = $row.Cells[0].Value -eq $true
+                Skipped = $row.Cells[1].Value -eq $true
+                Text    = "$($row.Cells[2].Value)"
+                Note    = ("$($row.Cells[3].Value)" -replace '\s*[\r\n]+\s*', ' ').Trim()
+            }
+        })
+    try {
+        Write-AuditChecklist -Path $ui.Checklist -Items $items
+        $status.Text = "Saved in $(Split-Path -Leaf $ui.Checklist) at $(Get-Date -Format 'HH:mm:ss')."
+    }
+    catch {
+        & $tell "The checklist could not be saved in the audit: $($_.Exception.Message)"
+    }
+}
+
+# A tick is saved at once, not only when its cell is left.
+$checkGrid.Add_CurrentCellDirtyStateChanged({
+        if ($checkGrid.IsCurrentCellDirty -and $checkGrid.CurrentCell -is [System.Windows.Forms.DataGridViewCheckBoxCell]) {
+            [void]$checkGrid.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
+        }
+    })
+
+$checkGrid.Add_CellValueChanged({
+        param($grid, $change)
+        if ($ui.Loading -or $change.RowIndex -lt 0) {
+            return
+        }
+        $row = $checkGrid.Rows[$change.RowIndex]
+        # Done and skipped exclude each other.
+        if ($change.ColumnIndex -le 1 -and $row.Cells[$change.ColumnIndex].Value -eq $true) {
+            $ui.Loading = $true
+            $row.Cells[1 - $change.ColumnIndex].Value = $false
+            $ui.Loading = $false
+        }
+        & $saveChecklist
+        & $countItems
+        # After the grid has ended this change: hiding the current row now would be refused.
+        if ($change.ColumnIndex -le 1 -and $hideBox.Checked) {
+            [void]$form.BeginInvoke([System.Action]$applyHide)
+        }
+    })
+
+$hideBox.Add_CheckedChanged({ & $applyHide })
+
+$auditList.Add_SelectedIndexChanged({
+        if (-not $ui.Loading) {
+            & $showChecklist
+        }
+    })
+
+$tabs.Add_SelectedIndexChanged({
+        if ($tabs.SelectedTab -eq $checkPage) {
+            & $loadAudits $ui.Checklist
+        }
+    })
+
+$browseAudit.Add_Click({
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Title = 'An audit written by MOSE'
+        $dialog.Filter = 'Audits (*_Audit_*.md)|*_Audit_*.md|Markdown (*.md)|*.md'
+        $dialog.InitialDirectory = $folderBox.Text.Trim()
+        if ("$($dialog.ShowDialog($form))" -eq 'OK') {
+            & $loadAudits $dialog.FileName
+        }
+    })
+
+$openChecklist.Add_Click({
+        if ($ui.Checklist) {
+            Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$($ui.Checklist)`""
         }
     })
 
