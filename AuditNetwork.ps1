@@ -9,6 +9,9 @@ param(
     [Parameter(HelpMessage = 'After the scan, list the other networks seen from here and ask which ones to scan too.')]
     [switch]$AskSubnet,
 
+    [Parameter(HelpMessage = 'After the scan, scan the other networks seen from here too, those of at most 1024 addresses, without asking.')]
+    [switch]$ScanOtherNetworks,
+
     [Parameter(HelpMessage = 'SNMP communities of the client''s devices, tried after "public". They are never written to the audit.')]
     [string[]]$SnmpCommunity,
 
@@ -1430,7 +1433,10 @@ function Find-Devices {
         'ConvertTo-BerInteger', 'ConvertTo-BerOid', 'Read-BerItem', 'ConvertFrom-BerOid', 'ConvertFrom-BerValue', 'Read-SnmpResponse', 'Get-UpnpDescription') {
         $state.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry($name, (Get-Item "function:$name").Definition)))
     }
-    $pool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit, $state, $Host)
+    # Not given $Host: the devices write nothing to it, and a pool given $Host where there is no console
+    # (the audit window) loses every Write-Host that comes after it.
+    $pool = [runspacefactory]::CreateRunspacePool($state)
+    [void]$pool.SetMaxRunspaces($ThrottleLimit)
     $pool.Open()
     try {
         $jobs = @(foreach ($address in $addresses) {
@@ -1869,7 +1875,22 @@ else {
     $script:Vendors = Get-MacVendors
     $devices = @(Find-Devices -Ranges $ranges)
 
-    if ($AskSubnet) {
+    if ($ScanOtherNetworks) {
+        # Once: the networks the second scan shows are listed under Other networks, not scanned.
+        $seen = @(Get-OtherNetworks -Devices $devices -Hops $hops)
+        $small = @($seen | Where-Object { [math]::Pow(2, 32 - [int]($_.Network -replace '^.*/', '')) -le 1024 })
+        $large = @($seen | Where-Object { $_ -notin $small })
+        if ($large.Count -gt 0) {
+            Write-Warning "Other networks seen but too large to scan without being named: $(($large | ForEach-Object { $_.Network }) -join ', '). Give them with -AddSubnet."
+        }
+        if ($small.Count -gt 0) {
+            Write-Host "Scanning the other networks seen: $(($small | ForEach-Object { $_.Network }) -join ', ')."
+            $more = @($small | ForEach-Object { New-ScanRange $_.Network })
+            $ranges += $more
+            $devices += @(Find-Devices -Ranges $more)
+        }
+    }
+    elseif ($AskSubnet) {
         Write-Progress -Id 20 -Activity 'Network audit' -Completed
         $other = @(Get-OtherNetworks -Devices $devices -Hops $hops)
         Write-Host ''
