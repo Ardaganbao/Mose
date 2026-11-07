@@ -38,7 +38,16 @@ param(
     [switch]$NonInteractive,
 
     [Parameter(HelpMessage = "Don't open the audit in Notepad.")]
-    [switch]$NoOpen
+    [switch]$NoOpen,
+
+    [Parameter(HelpMessage = 'After the network scan, scan the other networks seen too (those of at most 1024 addresses), instead of asking which ones.')]
+    [switch]$ScanOtherNetworks,
+
+    [Parameter(HelpMessage = 'Sign in to Microsoft 365 without asking first, also with -NonInteractive: its sign-in window opens during the audit.')]
+    [switch]$Microsoft365,
+
+    [Parameter(HelpMessage = 'Open the audit window: every answer in one place, then the audit runs there.')]
+    [switch]$Gui
 )
 
 # IT audit of a client, from nothing: run on a computer plugged into the client's network, it reads
@@ -58,6 +67,17 @@ $ErrorActionPreference = 'Stop'
 # audit expects $null for it. Off for the audit and its parts only.
 Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
+# Windows PowerShell leaves $PSScriptRoot empty in a parameter's default when run with -File.
+if (-not $OutputPath) {
+    $OutputPath = $PSScriptRoot
+}
+
+# The window asks everything first, then runs this script again with the answers (-NonInteractive).
+if ($Gui) {
+    [void]$PSBoundParameters.Remove('Gui')
+    & (Join-Path $PSScriptRoot 'AuditWindow.ps1') @PSBoundParameters
+    return
+}
 
 function Read-Answer {
     param(
@@ -150,11 +170,15 @@ else {
     if ($Subnet) {
         $parameters.Subnet = $Subnet
     }
-    # The networks seen during the scan are offered unless -AddSubnet already named the others.
+    # The networks seen during the scan are scanned with -ScanOtherNetworks, else offered, unless
+    # -AddSubnet already named the others.
     if ($AddSubnet) {
         $parameters.AddSubnet = $AddSubnet
     }
-    elseif (-not $NonInteractive) {
+    if ($ScanOtherNetworks) {
+        $parameters.ScanOtherNetworks = $true
+    }
+    elseif (-not $AddSubnet -and -not $NonInteractive) {
         $parameters.AskSubnet = $true
     }
     if (-not $SnmpCommunity -and -not $NonInteractive) {
@@ -274,11 +298,11 @@ else {
 if ($Skip -contains 'Microsoft365') {
     Skip-AuditPart 'Microsoft 365' 'skipped with -Skip.'
 }
-elseif ($NonInteractive) {
-    Skip-AuditPart 'Microsoft 365' 'its sign-in needs someone (run without -NonInteractive).'
+elseif ($NonInteractive -and -not $Microsoft365) {
+    Skip-AuditPart 'Microsoft 365' 'its sign-in needs someone (run without -NonInteractive, or with -Microsoft365).'
 }
 else {
-    $answer = if ($Tenant) { 'y' } else { Read-Answer 'Sign in to Microsoft 365 of the client now, with an administrator account (Global Reader is enough)? [Y/n]' }
+    $answer = if ($Tenant -or $Microsoft365) { 'y' } else { Read-Answer 'Sign in to Microsoft 365 of the client now, with an administrator account (Global Reader is enough)? [Y/n]' }
     if ($answer -match '^(n|no|non|nee)$') {
         Skip-AuditPart 'Microsoft 365' 'no sign-in.'
     }
