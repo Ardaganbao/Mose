@@ -516,7 +516,7 @@ Write-Host ('AUDIT GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Ob
 Write-Progress -Id 20 -Activity 'Network audit' -Status 'Ping: 10 of 254 addresses'
 Write-Warning 'A warning of the stand-in.'
 Start-Sleep -Milliseconds 900
-Set-Content -LiteralPath (Join-Path $OutputPath 'Window_test_Audit_2026-01-01.md') -Value '# Window test IT audit'
+Set-Content -LiteralPath (Join-Path $OutputPath 'Window_test_Audit_2026-01-01.md') -Encoding UTF8 -Value @('# Window test IT audit', '', '## To complete on site', 'What this audit could not read.', '', '- [ ] Network diagram: first item.', '- [ ] Internet line: second item.', '- [ ] UPS: third item.', '', '## About this audit', '- Written by the stand-in.')
 Set-Content -LiteralPath (Join-Path $OutputPath 'Window_test_Audit_2026-01-01.drawio') -Value '<mxfile/>'
 Write-Host 'Written by the stand-in.'
 '@
@@ -556,6 +556,26 @@ foreach ($message in $global:TestMessages) { 'MESSAGE: ' + $message }
 'LOG: ' + ($log.Text -replace '\r?\n', ' || ')
 'STATUS: ' + $status.Text
 'AFTER: run ' + $runButton.Enabled + ', open audit ' + $openAudit.Enabled + ', open diagram ' + $openDiagram.Enabled + ', fields ' + $net.Enabled
+$tabs.SelectedTab = $checkPage
+[System.Windows.Forms.Application]::DoEvents()
+'CHECK LOADED: ' + $checkGrid.Rows.Count + ' rows, ' + $countLabel.Text
+$checkGrid.Rows[0].Cells[0].Value = $true
+$checkGrid.Rows[0].Cells[3].Value = 'Drawn with the client'
+$checkGrid.Rows[1].Cells[1].Value = $true
+$checkGrid.Rows[1].Cells[3].Value = "No fixed`r`naddress"
+$checkGrid.Rows[2].Cells[1].Value = $true
+$checkGrid.Rows[2].Cells[0].Value = $true
+[System.Windows.Forms.Application]::DoEvents()
+'CHECK ROW 3: done ' + $checkGrid.Rows[2].Cells[0].Value + ', skipped ' + $checkGrid.Rows[2].Cells[1].Value
+'CHECK COUNT: ' + $countLabel.Text
+'CHECK VISIBLE: ' + @($checkGrid.Rows | Where-Object { $_.Visible }).Count
+$hideBox.Checked = $true
+[System.Windows.Forms.Application]::DoEvents()
+'CHECK HIDDEN: ' + @($checkGrid.Rows | Where-Object { $_.Visible }).Count
+'CHECK FILE: ' + ([System.IO.File]::ReadAllText($ui.Checklist) -replace '\r?\n', ' || ')
+$hideBox.Checked = $false
+& $showChecklist
+'CHECK READ BACK: ' + (@($checkGrid.Rows | ForEach-Object { "$($_.Cells[0].Value)/$($_.Cells[1].Value)/$($_.Cells[3].Value)" }) -join '; ')
 $form.Close()
 '@)
     )
@@ -573,8 +593,16 @@ $form.Close()
     Test-That 'the answers given as the audit''s options' ($logLine -match [regex]::Escape("AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.10-20; AdminCredential=TEST\admin with a password of 14 characters; Client=Window test; Domain=example.com,example.net; NonInteractive=True; NoOpen=True; OutputPath=$windowFolder; ScanOtherNetworks=True; Skip=SpeedTest,Microsoft365; SnmpCommunity=snmp-window-test ||")) $logLine
     Test-That 'its warnings in the log' ($logLine -match 'WARNING: A warning of the stand-in\.')
     Test-That 'its messages in the log, to the end' ($logLine -match 'Written by the stand-in\.')
-    Test-That 'done: the audit named' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_test_Audit_2026-01-01\.md\.$') (& $line 'STATUS: ')
+    Test-That 'done: the audit named' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_test_Audit_2026-01-01\.md\. Its on-site checklist is in the second tab\.$') (& $line 'STATUS: ')
     Test-Value 'then the audit and the diagram can be opened' (& $line 'AFTER: ') 'AFTER: run True, open audit True, open diagram True, fields True'
+    Test-Value 'checklist: the audit just written, its items' (& $line 'CHECK LOADED: ') 'CHECK LOADED: 3 rows, 0 of 3 done, 0 skipped, 3 left.'
+    Test-Value 'checklist: done and skipped exclude each other' (& $line 'CHECK ROW 3: ') 'CHECK ROW 3: done True, skipped False'
+    Test-Value 'checklist: counted' (& $line 'CHECK COUNT: ') 'CHECK COUNT: 2 of 3 done, 1 skipped, 0 left.'
+    Test-Value 'checklist: all shown until hidden' (& $line 'CHECK VISIBLE: ') 'CHECK VISIBLE: 3'
+    Test-Value 'checklist: what is done or skipped hidden' (& $line 'CHECK HIDDEN: ') 'CHECK HIDDEN: 0'
+    $fileLine = & $line 'CHECK FILE: '
+    Test-That 'checklist: saved in the audit, ticked, struck through, notes on one line' ($fileLine -match [regex]::Escape('## To complete on site || What this audit could not read. ||  || - [x] Network diagram: first item. ||   - Note: Drawn with the client || - [ ] ~~Internet line: second item.~~ (skipped) ||   - Note: No fixed address || - [x] UPS: third item. ||  || ## About this audit || - Written by the stand-in.')) $fileLine
+    Test-Value 'checklist: read back from the audit' (& $line 'CHECK READ BACK: ') 'CHECK READ BACK: True/False/Drawn with the client; False/True/No fixed address; True/False/'
 
     Write-Section 'The audit window runs the real audit'
     # The network part only, of this computer's own address: the audit in the window's runspace.
@@ -605,6 +633,9 @@ while (`$ui.Shell -and (Get-Date) -lt `$until) {
 }
 foreach (`$message in `$global:TestMessages) { 'MESSAGE: ' + `$message }
 'PROGRESS: ' + (@(`$statuses | Where-Object { `$_ -like 'Network audit: *' }).Count)
+`$tabs.SelectedTab = `$checkPage
+[System.Windows.Forms.Application]::DoEvents()
+'CHECKLIST: ' + `$checkGrid.Rows.Count + ' ' + `$countLabel.Text
 'LOG: ' + (`$log.Text -replace '\r?\n', ' || ')
 'STATUS: ' + `$status.Text
 `$form.Close()
@@ -613,12 +644,30 @@ foreach (`$message in `$global:TestMessages) { 'MESSAGE: ' + `$message }
     $windowRun = & $invoke (Join-Path $windowFolder 'AuditWindow.ps1') @() @{}
     $line = { param([string]$Prefix) "$(@($windowRun.Output | Where-Object { $_ -like "$Prefix*" }) -join ' / ')" }
     Test-That 'no message' (@($windowRun.Output | Where-Object { $_ -like 'MESSAGE: *' }).Count -eq 0) (& $line 'MESSAGE: ')
-    Test-That 'done, the audit written' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_audit_Audit_\d{4}-\d{2}-\d{2}\.md\.$') ((& $line 'STATUS: ') + ' ' + (& $line 'LOG: '))
+    Test-That 'done, the audit written' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_audit_Audit_\d{4}-\d{2}-\d{2}\.md\. Its on-site checklist is in the second tab\.$') ((& $line 'STATUS: ') + ' ' + (& $line 'LOG: '))
     Test-That 'its progress shown in the status line' ([int]((& $line 'PROGRESS: ') -replace '\D', '') -gt 0) (& $line 'PROGRESS: ')
     Test-That 'the parts and where the audit went, in the log' ((& $line 'LOG: ') -match '== Network' -and (& $line 'LOG: ') -match 'Active Directory skipped: skipped with -Skip' -and (& $line 'LOG: ') -match 'audit written to ')
     $windowAudit = Get-ChildItem -LiteralPath $windowFolder -Filter 'Window_audit_Audit_*.md' | Select-Object -First 1
     Test-That 'the audit has the network scanned' ($windowAudit -and (Get-Content -LiteralPath $windowAudit.FullName -Raw) -match "Scanned: $([regex]::Escape($own))\.")
     Test-That 'and its diagram' ($windowAudit -and (Test-Path -LiteralPath ($windowAudit.FullName -replace '\.md$', '.drawio')))
+    Test-Value 'its 16 on-site items in the checklist tab' (& $line 'CHECKLIST: ') 'CHECKLIST: 16 0 of 16 done, 0 skipped, 16 left.'
+    # The checklist of an audit whose section is the last one, and of one without it.
+    $windowAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repository 'AuditWindow.ps1'), [ref]$null, [ref]$null)
+    foreach ($name in 'Read-AuditChecklist', 'Write-AuditChecklist') {
+        . ([scriptblock]::Create($windowAst.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $name }, $false).Extent.Text))
+    }
+    $lastSection = Join-Path $work 'checklist-last.md'
+    [System.IO.File]::WriteAllText($lastSection, "# T`r`nText`r`n`r`n## To complete on site`r`nIntro.`r`n`r`n- [ ] A: first.`r`n- [x] B: second.`r`n  - Note: kept`r`n", (New-Object System.Text.UTF8Encoding($true)))
+    $read = Read-AuditChecklist $lastSection
+    Test-Value 'a last section read' (@($read.Items | ForEach-Object { "$($_.Text)|$($_.Done)|$($_.Skipped)|$($_.Note)" }) -join '; ') 'A: first.|False|False|; B: second.|True|False|kept'
+    Write-AuditChecklist -Path $lastSection -Items @([pscustomobject]@{ Text = 'A: first.'; Done = $false; Skipped = $true; Note = 'n/a' }, [pscustomobject]@{ Text = 'B: second.'; Done = $false; Skipped = $false; Note = '' })
+    $written = [System.IO.File]::ReadAllBytes($lastSection)
+    Test-That 'written in UTF-8 with its mark, as Audit.ps1 writes' ($written[0] -eq 0xEF -and $written[1] -eq 0xBB -and $written[2] -eq 0xBF)
+    Test-Value 'a last section written, the rest kept' ([System.IO.File]::ReadAllText($lastSection) -replace '\r?\n', ' || ') '# T || Text ||  || ## To complete on site || Intro. ||  || - [ ] ~~A: first.~~ (skipped) ||   - Note: n/a || - [ ] B: second. || '
+    $noSection = Join-Path $work 'checklist-none.md'
+    Set-Content -LiteralPath $noSection -Value '# No checklist here'
+    Test-That 'an audit without the section: none read' ($null -eq (Read-AuditChecklist $noSection))
+    Test-That 'and none written' ($(try { Write-AuditChecklist -Path $noSection -Items @(); $false } catch { $_.Exception.Message -match 'no "To complete on site" section' }))
 
     Write-Section 'The other networks seen, scanned without a question'
     $othersCopy = Join-Path $work 'AuditNetwork-others.ps1'
