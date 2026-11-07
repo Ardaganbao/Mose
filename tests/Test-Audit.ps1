@@ -18,8 +18,9 @@ param(
 # is scanned. The SNMP, UPnP and WS-Discovery devices are fakes on 127.0.0.1; the network scans cover
 # this computer's own address and 127.0.0.1; the inventory reads this computer over DCOM. Then: why a
 # computer was not read in the languages of Windows, Start.ps1 giving the audit its options, the update
-# from GitHub into a new folder, the Script Manager's IT audit button, the findings of made-up computers
-# and routes to the Internet. The full audit then runs twice in a PowerShell of its own, in strict mode
+# from GitHub into a new folder, the Script Manager's IT audit button, the audit window (with a stand-in
+# audit, then the real one), the other networks scanned without a question, the findings of made-up
+# computers and routes to the Internet. The full audit then runs twice in a PowerShell of its own, in strict mode
 # as Start.ps1 runs it, with each of its questions answered by the test: an unexpected question fails
 # it. The second run has a stand-in Active Directory, whose computers the inventory is asked to read.
 #
@@ -426,11 +427,13 @@ $result | Where-Object { $_ -is [string] }
     Copy-Item -LiteralPath (Join-Path $repository 'Start.ps1'), (Join-Path $repository 'updater.config.json') -Destination $startFolder
     # A stand-in Audit.ps1 that only tells what it was given.
     Set-Content -LiteralPath (Join-Path $startFolder 'Audit.ps1') -Encoding ASCII -Value @'
-param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [switch]$NonInteractive)
+param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [switch]$NonInteractive, [switch]$ScanOtherNetworks, [switch]$Microsoft365, [switch]$Gui)
 'AUDIT GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { "$_=$(@($PSBoundParameters[$_]) -join ',')" }) -join '; ')
 '@
     $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; Audit = $true; Client = 'Contoso'; AddSubnet = @('192.0.2.0/24', '198.51.100.0/24'); Skip = @('SpeedTest'); NonInteractive = $true }
     Test-Value 'the options reach Audit.ps1' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.0/24; Client=Contoso; NonInteractive=True; Skip=SpeedTest'
+    $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; Audit = $true; Gui = $true; ScanOtherNetworks = $true; Microsoft365 = $true }
+    Test-Value '-Gui and the switches reach Audit.ps1' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: Gui=True; Microsoft365=True; ScanOtherNetworks=True'
     $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; AddSubnet = @('192.0.2.0/24') }
     Test-That 'an audit option without -Audit is refused' ($startRun.Text -match '-AddSubnet is an option of the IT audit: add -Audit') (($startRun.Output | Select-Object -First 4) -join ' / ')
     Test-That 'and nothing else runs' ($startRun.Text -notmatch 'AUDIT GOT|Report')
@@ -487,8 +490,150 @@ $form.Close()
     Test-That 'the button is there, after Keeper import/export' ($buttonsLine -match 'Keeper import/export \| IT audit \|') $buttonsLine
     $startedJobs = @($managerRun.Output | Where-Object { $_ -like 'STARTED: *' })
     Test-Value 'one click starts one script' $startedJobs.Count '1'
-    Test-That 'Start.ps1 -Audit, of the Script Manager''s folder' ("$startedJobs" -match [regex]::Escape("& '$(Join-Path $managerFolder 'Start.ps1')' -Audit ")) "$startedJobs"
+    Test-That 'Start.ps1 -Audit -Gui, of the Script Manager''s folder: the audit window' ("$startedJobs" -match [regex]::Escape("& '$(Join-Path $managerFolder 'Start.ps1')' -Audit -Gui ")) "$startedJobs"
     Test-That 'in its own window, for its questions' ("$startedJobs" -match 'WINDOW: True') "$startedJobs"
+
+    Write-Section 'The audit window'
+    $windowFolder = Join-Path $work 'window'
+    New-Item -ItemType Directory -Path $windowFolder | Out-Null
+    # Audit.ps1 -Gui opens the window with the options given: a stand-in window tells what it got.
+    Copy-Item -LiteralPath (Join-Path $work 'Audit.ps1'), (Join-Path $work 'AuditCommon.ps1') -Destination $windowFolder
+    Set-Content -LiteralPath (Join-Path $windowFolder 'AuditWindow.ps1') -Encoding ASCII -Value @'
+param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [string]$OutputPath, [switch]$ScanOtherNetworks, [switch]$Microsoft365, [switch]$NonInteractive, [switch]$NoOpen)
+'WINDOW GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { "$_=$(@($PSBoundParameters[$_]) -join ',')" }) -join '; ')
+'@
+    $guiRun = & $invoke (Join-Path $windowFolder 'Audit.ps1') @() @{ Gui = $true; Client = 'Contoso'; AddSubnet = @('192.0.2.0/24') }
+    Test-Value 'Audit.ps1 -Gui opens the window with the options given' (@($guiRun.Output | Where-Object { $_ -like 'WINDOW GOT: *' }) -join '') 'WINDOW GOT: AddSubnet=192.0.2.0/24; Client=Contoso'
+    Test-That 'and asks nothing in the console' ($guiRun.Questions.Count -eq 0) ($guiRun.Questions -join '; ')
+    # The real window, opened out of sight and filled in by the test, runs a stand-in Audit.ps1 that
+    # tells what it got, shows progress, a warning, and writes an audit and a diagram. Its message
+    # boxes are kept instead of shown.
+    $windowFolder = Join-Path $work 'window-real'
+    New-Item -ItemType Directory -Path $windowFolder | Out-Null
+    Set-Content -LiteralPath (Join-Path $windowFolder 'Audit.ps1') -Encoding ASCII -Value @'
+param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [string]$OutputPath, [switch]$NonInteractive, [switch]$NoOpen, [switch]$ScanOtherNetworks, [switch]$Microsoft365, [switch]$Gui)
+Write-Host ('AUDIT GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { $value = $PSBoundParameters[$_]; if ($value -is [pscredential]) { $value = "$($value.UserName) with a password of $($value.GetNetworkCredential().Password.Length) characters" }; "$_=$(@($value) -join ',')" }) -join '; '))
+Write-Progress -Id 20 -Activity 'Network audit' -Status 'Ping: 10 of 254 addresses'
+Write-Warning 'A warning of the stand-in.'
+Start-Sleep -Milliseconds 900
+Set-Content -LiteralPath (Join-Path $OutputPath 'Window_test_Audit_2026-01-01.md') -Value '# Window test IT audit'
+Set-Content -LiteralPath (Join-Path $OutputPath 'Window_test_Audit_2026-01-01.drawio') -Value '<mxfile/>'
+Write-Host 'Written by the stand-in.'
+'@
+    & $patch (Join-Path $repository 'AuditWindow.ps1') (Join-Path $windowFolder 'AuditWindow.ps1') @(
+        , @("[void][System.Windows.Forms.MessageBox]::Show(`$form, `$Text, 'MOSE IT audit', 'OK', `$Icon)", '$global:TestMessages.Add($Text)')
+        , @('[void]$form.ShowDialog()', @'
+$global:TestMessages = New-Object System.Collections.Generic.List[string]
+$form.StartPosition = 'Manual'
+$form.Location = New-Object System.Drawing.Point(-3000, -3000)
+$form.ShowInTaskbar = $false
+$form.Opacity = 0
+$form.Show()
+[System.Windows.Forms.Application]::DoEvents()
+'FOLDER: ' + $folderBox.Text
+$runButton.PerformClick()
+$clientBox.Text = 'Window test'
+$addSubnetBox.Text = '192.0.2.0/24 not-a-network'
+$runButton.PerformClick()
+$addSubnetBox.Text = '192.0.2.0/24, 198.51.100.10-20'
+$adminUser.Text = 'TEST\admin'
+$runButton.PerformClick()
+$adminPassword.Text = 'not-a-real-one'
+$partSpeed.Checked = $false
+$partM365.Checked = $false
+'TENANT DISABLED: ' + (-not $tenantBox.Enabled)
+$scanOthers.Checked = $true
+$snmpBox.Text = 'snmp-window-test'
+$domainsBox.Text = 'example.com, example.net'
+$runButton.PerformClick()
+'WHILE RUNNING: run ' + $runButton.Enabled + ', stop ' + $stopButton.Enabled + ', fields ' + $net.Enabled
+$until = (Get-Date).AddSeconds(60)
+while ($ui.Shell -and (Get-Date) -lt $until) {
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 50
+}
+foreach ($message in $global:TestMessages) { 'MESSAGE: ' + $message }
+'LOG: ' + ($log.Text -replace '\r?\n', ' || ')
+'STATUS: ' + $status.Text
+'AFTER: run ' + $runButton.Enabled + ', open audit ' + $openAudit.Enabled + ', open diagram ' + $openDiagram.Enabled + ', fields ' + $net.Enabled
+$form.Close()
+'@)
+    )
+    $windowRun = & $invoke (Join-Path $windowFolder 'AuditWindow.ps1') @() @{}
+    $line = { param([string]$Prefix) "$(@($windowRun.Output | Where-Object { $_ -like "$Prefix*" }) -join ' / ')" }
+    Test-Value 'the folder: the scripts''' (& $line 'FOLDER: ') "FOLDER: $windowFolder"
+    $messages = @($windowRun.Output | Where-Object { $_ -like 'MESSAGE: *' })
+    Test-That 'no client: said, nothing run' ($messages.Count -ge 1 -and $messages[0] -like 'MESSAGE: Enter the name of the client*') ($messages -join ' / ')
+    Test-That 'a wrong network: said' ($messages.Count -ge 2 -and $messages[1] -like 'MESSAGE: Not a network, range or address: not-a-network.*') ($messages -join ' / ')
+    Test-That 'an account without password: said' ($messages.Count -ge 3 -and $messages[2] -eq 'MESSAGE: The administrator account has no password.') ($messages -join ' / ')
+    Test-Value 'then no other message' $messages.Count '3'
+    Test-Value 'the tenant is off with Microsoft 365' (& $line 'TENANT DISABLED: ') 'TENANT DISABLED: True'
+    Test-Value 'while running: only Stop' (& $line 'WHILE RUNNING: ') 'WHILE RUNNING: run False, stop True, fields False'
+    $logLine = & $line 'LOG: '
+    Test-That 'the answers given as the audit''s options' ($logLine -match [regex]::Escape("AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.10-20; AdminCredential=TEST\admin with a password of 14 characters; Client=Window test; Domain=example.com,example.net; NonInteractive=True; NoOpen=True; OutputPath=$windowFolder; ScanOtherNetworks=True; Skip=SpeedTest,Microsoft365; SnmpCommunity=snmp-window-test ||")) $logLine
+    Test-That 'its warnings in the log' ($logLine -match 'WARNING: A warning of the stand-in\.')
+    Test-That 'its messages in the log, to the end' ($logLine -match 'Written by the stand-in\.')
+    Test-That 'done: the audit named' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_test_Audit_2026-01-01\.md\.$') (& $line 'STATUS: ')
+    Test-Value 'then the audit and the diagram can be opened' (& $line 'AFTER: ') 'AFTER: run True, open audit True, open diagram True, fields True'
+
+    Write-Section 'The audit window runs the real audit'
+    # The network part only, of this computer's own address: the audit in the window's runspace.
+    $windowFolder = Join-Path $work 'window-audit'
+    New-Item -ItemType Directory -Path $windowFolder | Out-Null
+    Copy-Item -Path (Join-Path $work 'Audit*.ps1') -Destination $windowFolder
+    Remove-Item -LiteralPath (Join-Path $windowFolder 'AuditWindow.ps1')
+    & $patch (Join-Path $repository 'AuditWindow.ps1') (Join-Path $windowFolder 'AuditWindow.ps1') @(
+        , @("[void][System.Windows.Forms.MessageBox]::Show(`$form, `$Text, 'MOSE IT audit', 'OK', `$Icon)", '$global:TestMessages.Add($Text)')
+        , @('[void]$form.ShowDialog()', @"
+`$global:TestMessages = New-Object System.Collections.Generic.List[string]
+`$form.StartPosition = 'Manual'
+`$form.Location = New-Object System.Drawing.Point(-3000, -3000)
+`$form.ShowInTaskbar = `$false
+`$form.Opacity = 0
+`$form.Show()
+[System.Windows.Forms.Application]::DoEvents()
+`$clientBox.Text = 'Window audit'
+`$subnetBox.Text = '$own'
+foreach (`$box in `$partSpeed, `$partAD, `$partInventory, `$partM365, `$partDomains) { `$box.Checked = `$false }
+`$runButton.PerformClick()
+`$statuses = New-Object System.Collections.Generic.List[string]
+`$until = (Get-Date).AddSeconds(240)
+while (`$ui.Shell -and (Get-Date) -lt `$until) {
+    [System.Windows.Forms.Application]::DoEvents()
+    if (`$statuses -notcontains `$status.Text) { `$statuses.Add(`$status.Text) }
+    Start-Sleep -Milliseconds 50
+}
+foreach (`$message in `$global:TestMessages) { 'MESSAGE: ' + `$message }
+'PROGRESS: ' + (@(`$statuses | Where-Object { `$_ -like 'Network audit: *' }).Count)
+'LOG: ' + (`$log.Text -replace '\r?\n', ' || ')
+'STATUS: ' + `$status.Text
+`$form.Close()
+"@)
+    )
+    $windowRun = & $invoke (Join-Path $windowFolder 'AuditWindow.ps1') @() @{}
+    $line = { param([string]$Prefix) "$(@($windowRun.Output | Where-Object { $_ -like "$Prefix*" }) -join ' / ')" }
+    Test-That 'no message' (@($windowRun.Output | Where-Object { $_ -like 'MESSAGE: *' }).Count -eq 0) (& $line 'MESSAGE: ')
+    Test-That 'done, the audit written' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_audit_Audit_\d{4}-\d{2}-\d{2}\.md\.$') ((& $line 'STATUS: ') + ' ' + (& $line 'LOG: '))
+    Test-That 'its progress shown in the status line' ([int]((& $line 'PROGRESS: ') -replace '\D', '') -gt 0) (& $line 'PROGRESS: ')
+    Test-That 'the parts and where the audit went, in the log' ((& $line 'LOG: ') -match '== Network' -and (& $line 'LOG: ') -match 'Active Directory skipped: skipped with -Skip' -and (& $line 'LOG: ') -match 'audit written to ')
+    $windowAudit = Get-ChildItem -LiteralPath $windowFolder -Filter 'Window_audit_Audit_*.md' | Select-Object -First 1
+    Test-That 'the audit has the network scanned' ($windowAudit -and (Get-Content -LiteralPath $windowAudit.FullName -Raw) -match "Scanned: $([regex]::Escape($own))\.")
+    Test-That 'and its diagram' ($windowAudit -and (Test-Path -LiteralPath ($windowAudit.FullName -replace '\.md$', '.drawio')))
+
+    Write-Section 'The other networks seen, scanned without a question'
+    $othersCopy = Join-Path $work 'AuditNetwork-others.ps1'
+    & $patch $network $othersCopy @(
+        , @('$hops = @(Get-InternetPath)', '$hops = @()')
+        , @('$script:UpnpLocations = Get-UpnpLocations', '$script:UpnpLocations = @{}')
+        , @('$script:WsdDevices = Get-WsdDevices', '$script:WsdDevices = @{}')
+        , @('$seen = @(Get-OtherNetworks -Devices $devices -Hops $hops)', '$seen = @($global:TestOtherNetworks)')
+    )
+    $othersSetup = Join-Path $work 'other-networks.ps1'
+    Set-Content -LiteralPath $othersSetup -Encoding ASCII -Value "`$global:TestOtherNetworks = @([pscustomobject]@{ Network = '127.0.0.2/32'; Seen = @('test') }, [pscustomobject]@{ Network = '10.0.0.0/16'; Seen = @('test') })"
+    $othersRun = & $invoke $othersCopy @() @{ Subnet = @('127.0.0.1'); SkipSpeedTest = $true; ScanOtherNetworks = $true } $othersSetup
+    Test-That 'the small one scanned' ($othersRun.Text -match 'Scanning the other networks seen: 127\.0\.0\.2/32\.' -and $othersRun.Text -match 'Scanned: 127\.0\.0\.1, 127\.0\.0\.2/32\.') (($othersRun.Output | Where-Object { $_ -match 'Scann' }) -join ' / ')
+    Test-That 'the /16 named, not scanned' ($othersRun.Text -match 'too large to scan without being named: 10\.0\.0\.0/16')
+    Test-That 'no question asked' ($othersRun.Questions.Count -eq 0) ($othersRun.Questions -join '; ')
 
     Write-Section 'Servers and computers: the findings of made-up computers'
     $inventoryCopy = Join-Path $work 'AuditInventory-made-up.ps1'
