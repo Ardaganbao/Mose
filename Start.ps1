@@ -152,6 +152,10 @@ $ConfigPath = Join-Path $PSScriptRoot "updater.config.json"
 $FirstRun = -not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)
 $ModuleListPath = Join-Path $PSScriptRoot "modules.local.json"
 
+# A git clone (the developer's folder): git updates its files, and they may hold changes not yet on
+# GitHub, so only the missing ones are downloaded (e.g. a module just added to the configuration).
+$GitClone = Test-Path -LiteralPath (Join-Path $PSScriptRoot ".git")
+
 # onIT logo as pixels: T = teal, W = white, N = navy, . = background.
 # Each console line shows two pixel rows using half-block characters.
 $LogoPixels = @(
@@ -448,6 +452,9 @@ function Update-RepoFile {
 
     $repoPath = $Name -replace '\\', '/'
     $destination = Join-Path $PSScriptRoot $Name
+    if ($GitClone -and (Test-Path -LiteralPath $destination)) {
+        return $false
+    }
 
     # With the API's file hashes, skip unchanged files without downloading them.
     if ($RemoteHashes) {
@@ -529,12 +536,15 @@ if (-not $UpdatesApplied -and ($FirstRun -or -not $SkipUpdate)) {
         }
         $changed = @($files | Where-Object { Update-RepoFile -Name $_ })
 
-        if (-not $restart -and -not $configChanged -and $changed.Count -eq 0) {
+        if ($GitClone) {
+            Write-Host "This folder is a git clone: its files are not replaced by GitHub's (git pull or Sync updates them)$(if ($changed.Count -gt 0) { "; downloaded the missing $($changed -join ', ')" })." -ForegroundColor Yellow
+        }
+        elseif (-not $restart -and -not $configChanged -and $changed.Count -eq 0) {
             Write-Host "Everything is up to date."
         }
 
         # The version comes from the API, so it is only known when the API answered.
-        if ($commit) {
+        if ($commit -and -not $GitClone) {
             $date = ([datetime]$commit.commit.committer.date).ToLocalTime().ToString("yyyy-MM-dd HH:mm")
             $message = ($commit.commit.message -split "`n")[0]
             $versionText = "version $($commit.sha.Substring(0, 7)) ($date): $message"
