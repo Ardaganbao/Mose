@@ -23,7 +23,7 @@ Write no client name, server name or address here: the repository holds no clien
 
 ## IT audit
 
-`tests\Test-Audit.ps1` tests the audit on one computer, with fake devices and made-up computers (see [Test the audit](README.md#test-the-audit)): its 225 checks passed on 2026-11-09. What still needs a real client network:
+`tests\Test-Audit.ps1` tests the audit on one computer, with fake devices and made-up computers (see [Test the audit](README.md#test-the-audit)): its 230 checks passed on 2026-11-09. What still needs a real client network:
 
 | Part | Script | Status | Last tested | To check |
 |---|---|---|---|---|
@@ -48,7 +48,7 @@ What no test on one computer can show. Tick each item, note what went wrong in t
 - [ ] Computers read over DCOM from a computer outside the domain; one refusing the account says why.
 - [ ] A large domain (hundreds of computers): the inventory ends in reasonable time.
 - [ ] Active Directory read from outside the domain with `-ADServer` and a domain account.
-- [ ] Microsoft 365: the consent the first time in the tenant, then a Global Reader's sign-in; and a partner (CSP) account with the client's tenant given: the refusal before the consent explained, the client's tenant (not the partner's) read after it.
+- [ ] Microsoft 365: the consent the first time in the tenant, then a Global Reader's sign-in; and a partner (CSP) account with the client's tenant given: the refusal before the consent explained, the client's tenant (not the partner's) read after it. The sign-in window opening from the part's own PowerShell, from the console and from the audit window; a sign-in page left open for 3 minutes: only Microsoft 365 lost, the rest of the audit written.
 - [ ] The diagram opened in draw.io: readable, and a useful start to draw the real network.
 - [ ] The prompts in a console (`.\Start.ps1 -Audit`): the SNMP community typed hidden, the Get-Credential windows, each question clear.
 - [ ] The audit window (`.\Start.ps1 -Audit -Gui`, or the Script Manager's **IT audit** button): readable on this screen and its scaling, the whole audit run from it, Microsoft 365's sign-in window opening from it, and its on-site checklist completed on site (the ticks, skips and notes in the audit handed over).
