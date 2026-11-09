@@ -28,7 +28,7 @@ Write no client name, server name or address here: the repository holds no clien
 
 ## Client vaults
 
-`tests\Test-ClientVaults.ps1` tests `-MultiClientMode` with a stand-in vault: its 34 checks passed on 2026-11-09. What it cannot show, to check once with the real SecretStore on a technician's computer:
+`tests\Test-ClientVaults.ps1` tests `-MultiClientMode` with a stand-in vault: its 37 checks passed on 2026-11-09. What it cannot show, to check once with the real SecretStore on a technician's computer:
 
 - [ ] `.\Start.ps1 -MultiClientMode`: the client vaults listed with their client, the default one first; a new one created, configured with `-Configure`, then its report.
 - [ ] The configuration and logins of the new one under `MOSE:<name>:` (`Get-SecretInfo -Vault SecretStore1`), the default one unchanged, and `P` listing only those of the client vault in use.

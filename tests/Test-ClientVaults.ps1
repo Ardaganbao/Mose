@@ -368,6 +368,15 @@ Write-Host ('CHOSEN HAS: ' + (@($names | ForEach-Object { "$_=$(Test-MoseClientV
     Test-That 'the configuration of that client vault, not asked again' ($run.Text -match "Saved in the client vault 'Westwind'" -and @($run.Questions -match '^Number of the client vault').Count -eq 1) ($run.Questions -join ' | ')
     Test-That 'nothing saved: no report' ($run.Failed -match 'No client configuration was saved' -and -not (& $readVault).ContainsKey('MOSE:Westwind:Config')) $run.Failed
 
+    Write-Section 'Report.ps1 -MultiClientMode: a client vault whose configuration has no server'
+    $entries = @(Get-Content -LiteralPath $env:MOSE_TEST_VAULT -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+    $entries += [pscustomobject]@{ Name = 'MOSE:Zeta:Config'; Type = 'String'; Value = ([pscustomobject]@{ Client = 'Zeta'; Targets = @(); Layout = $null; Software = @(); Machines = @() } | ConvertTo-Json -Depth 10); Secure = @() }
+    ConvertTo-Json -Depth 10 -InputObject $entries | Set-Content -LiteralPath $env:MOSE_TEST_VAULT -Encoding UTF8
+    $run = & $invoke 'Report.ps1' @($password, @('^Number of the client vault', '4'), @('^Module number', 'Q')) @{ MultiClientMode = $true; NoOpen = $true }
+    Test-That 'every answer used' (-not $run.Left) "left: $($run.Left)"
+    Test-That 'said, then its configuration opened' ($run.Text -match 'The client vault Zeta has no server in the configuration of Zeta yet\.' -and $run.Text -match 'Modules for Zeta') (($run.Output | Select-Object -Last 6) -join ' / ')
+    Test-That 'still none: what to do' ($run.Failed -match 'The configuration of Zeta has no server, so there is nothing to report\. Add them with \.\\Start\.ps1 -Configure -MultiClientMode\.') $run.Failed
+
     Write-Section 'Start.ps1 -MultiClientMode'
     $run = & $invoke 'Start.ps1' @($password, @('^Number of the client vault', '3')) @{ SkipUpdate = $true; MultiClientMode = $true; DryRun = $true }
     Test-That 'every answer used' (-not $run.Left -and -not $run.Failed) "left: $($run.Left); failed: $($run.Failed)"

@@ -88,12 +88,16 @@ else {
         Write-Host "This computer has no client configuration yet: the sample report uses one server per module." -ForegroundColor Yellow
         $config = Get-SampleConfig
     }
-    elseif (-not $config) {
-        Write-Host "This computer has no client configuration yet." -ForegroundColor Yellow
+    elseif (-not $config -or @(Get-MoseProperty $config 'Targets' | Where-Object { $_ }).Count -eq 0) {
+        $where = if ($MoseClientVault) { "The client vault $MoseClientVault" } else { 'This computer' }
+        Write-Host "$where has $(if ($config) { "no server in the configuration of $($config.Client)" } else { 'no client configuration' }) yet." -ForegroundColor Yellow
         & (Join-Path $PSScriptRoot 'Configure.ps1') -VaultUnlocked -ClientVault $MoseClientVault
         $config = Get-MoseConfig
         if (-not $config) {
             throw "No client configuration was saved, so there is nothing to report. Run .\Start.ps1 -Configure."
+        }
+        if (@(Get-MoseProperty $config 'Targets' | Where-Object { $_ }).Count -eq 0) {
+            throw "The configuration of $($config.Client) has no server, so there is nothing to report. Add them with .\Start.ps1 -Configure$(if ($MultiClientMode) { ' -MultiClientMode' })."
         }
     }
 }
