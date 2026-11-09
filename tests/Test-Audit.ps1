@@ -20,7 +20,8 @@ param(
 # computer was not read in the languages of Windows, Start.ps1 giving the audit its options, the update
 # from GitHub into a new folder, the Script Manager's IT audit button, the audit window (with a stand-in
 # audit, then the real one), the other networks scanned without a question, the findings of made-up
-# computers and routes to the Internet. The full audit then runs twice in a PowerShell of its own, in strict mode
+# computers and routes to the Internet, and the Microsoft 365 sign-in refused or ending its PowerShell (with a
+# stand-in of the Graph module: no test signs in to a tenant). The full audit then runs twice in a PowerShell of its own, in strict mode
 # as Start.ps1 runs it, with each of its questions answered by the test: an unexpected question fails
 # it. The second run has a stand-in Active Directory, whose computers the inventory is asked to read.
 #
@@ -90,6 +91,49 @@ if (-not $own) {
 }
 $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem
 $inDomain = [bool]$computerSystem.PartOfDomain
+
+# A stand-in of Microsoft.Graph.Authentication, first in the module path of this PowerShell and of every
+# PowerShell the tests start (the audit runs its Microsoft 365 part in one of its own): no test can sign
+# in to a tenant. $env:MOSE_TEST_SIGN_IN picks how its sign-in fails.
+$fakeGraph = Join-Path $work 'modules\Microsoft.Graph.Authentication'
+New-Item -ItemType Directory -Path $fakeGraph | Out-Null
+Set-Content -LiteralPath (Join-Path $fakeGraph 'Microsoft.Graph.Authentication.psm1') -Encoding ASCII -Value @'
+function Connect-MgGraph {
+    param([string[]]$Scopes, [string]$TenantId, [switch]$NoWelcome, [string]$ContextScope, [switch]$UseDeviceCode)
+    switch ($env:MOSE_TEST_SIGN_IN) {
+        'NotAuthorized' {
+            $inner = New-Object System.Exception("AADSTS90099: The application 'Microsoft Graph Command Line Tools' (14d82eec-204b-4c2f-b7e8-296a70dab67e) has not been authorized in the tenant '$TenantId'. Applications must be authorized to access the customer tenant before partner delegated administrators can use them.")
+            throw (New-Object System.Exception('InteractiveBrowserCredential authentication failed.', $inner))
+        }
+        # As the Graph module ends Windows PowerShell when its sign-in times out.
+        'Crash' { [Environment]::Exit(-532462766) }
+        default { throw 'The tests never sign in to Microsoft 365.' }
+    }
+}
+function Disconnect-MgGraph { }
+function Get-MgContext { }
+function Invoke-MgGraphRequest { throw 'The tests never call Microsoft Graph.' }
+'@
+New-ModuleManifest -Path (Join-Path $fakeGraph 'Microsoft.Graph.Authentication.psd1') -ModuleVersion '99.0.0' -RootModule 'Microsoft.Graph.Authentication.psm1' -FunctionsToExport 'Connect-MgGraph', 'Disconnect-MgGraph', 'Get-MgContext', 'Invoke-MgGraphRequest'
+$modulePath = $env:PSModulePath
+$env:PSModulePath = "$(Split-Path $fakeGraph);$modulePath"
+# Not -EncodedCommand: on one computer, PowerShell started with this command encoded started itself
+# again and again. Given a minute at most.
+$start = New-Object System.Diagnostics.ProcessStartInfo
+$start.FileName = (Get-Process -Id $PID).Path
+$start.Arguments = '-NoProfile -Command "(Import-Module Microsoft.Graph.Authentication -PassThru).Version.ToString()"'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$checking = [System.Diagnostics.Process]::Start($start)
+$reading = $checking.StandardOutput.ReadToEndAsync()
+if (-not $checking.WaitForExit(60000)) {
+    $checking.Kill()
+}
+$loaded = if ($reading.Wait(5000)) { $reading.Result.Trim() } else { 'none' }
+if ($loaded -ne '99.0.0') {
+    $env:PSModulePath = $modulePath
+    throw "A PowerShell started by the tests loads Microsoft.Graph.Authentication $loaded, not the stand-in: the tests could sign in to a tenant, so they stop."
+}
 
 # The functions and tables of AuditNetwork.ps1, without running it.
 . (Join-Path $work 'AuditCommon.ps1')
@@ -437,39 +481,39 @@ $result | Where-Object { $_ -is [string] }
     Test-Value 'no such tenant' (Format-SignInError -Message 'AADSTS90002: Tenant not found.' -Tenant 'nowhere.example') 'No Microsoft 365 tenant nowhere.example: give one of its verified domains, or its ID.'
     $said = Format-SignInError -Message 'AADSTS50105: Your administrator has configured the application to block users unless they are specifically granted access.'
     Test-That 'only the users assigned to the app' ($said -match '^In this tenant, only the users assigned to Microsoft Graph Command Line Tools may use it') $said
+    $said = Format-SignInError -Message 'InteractiveBrowserCredential authentication failed: A window handle must be configured. See https://aka.ms/msal-net-wam#parent-window-handles' -Tenant 'contoso.example'
+    Test-That 'no window to open the sign-in over' ($said -match '^The sign-in window found no PowerShell window to open over: .*-Tenant contoso\.example\)\.$') $said
     Test-Value 'another error: its first message' (Format-SignInError -Message @('Authentication timed out.', 'An inner error.')) 'Authentication timed out.'
 
+    # Microsoft 365 alone, in the PowerShell of its own where the audit runs it, signing in with the
+    # stand-in module: once refused as Entra ID refuses a partner account when the app is not authorized
+    # in the client's tenant (its code in the inner error), once ending that PowerShell as the Graph
+    # module does when its sign-in times out.
+    $m365Runs = @{}
+    foreach ($signIn in 'NotAuthorized', 'Crash') {
+        $folder = Join-Path $work "m365-$signIn"
+        New-Item -ItemType Directory -Path $folder | Out-Null
+        Copy-Item -Path (Join-Path $work 'Audit*.ps1') -Destination $folder
+        $env:MOSE_TEST_SIGN_IN = $signIn
+        $run = & $invoke (Join-Path $folder 'Audit.ps1') @(@('^Sign in to Microsoft 365', 'y'), @('^Microsoft 365 tenant of the client', 'contoso.example')) @{ Client = "Test $signIn"; Skip = @('Network', 'ActiveDirectory', 'Inventory', 'Domains'); OutputPath = $folder; NoOpen = $true }
+        Remove-Item -Path Env:\MOSE_TEST_SIGN_IN
+        $markdownFile = Get-ChildItem -Path $folder -Filter "Test_$($signIn)_Audit_*.md" | Select-Object -First 1
+        $markdown = if ($markdownFile) { Get-Content -LiteralPath $markdownFile.FullName -Raw -Encoding UTF8 } else { '' }
+        $m365Runs[$signIn] = [pscustomobject]@{ Run = $run; Written = [bool]$markdownFile; NotRead = (([regex]::Matches($markdown, ':warning: Not read: [^\n]*') | ForEach-Object { $_.Value }) -join ' / ') }
+    }
+
     Write-Section 'Microsoft 365 with a partner account: the tenant asked, the refusal explained'
-    # The stand-in sign-in refuses as Entra ID refuses a partner account when the app is not authorized
-    # in the client's tenant, its code in the inner error.
-    $signInSetup = Join-Path $work 'sign-in-not-authorized.ps1'
-    Set-Content -LiteralPath $signInSetup -Encoding ASCII -Value @'
-function global:Connect-MgGraph {
-    param([string[]]$Scopes, [string]$TenantId, [switch]$NoWelcome, [string]$ContextScope, [switch]$UseDeviceCode)
-    $inner = New-Object System.Exception("AADSTS90099: The application 'Microsoft Graph Command Line Tools' (14d82eec-204b-4c2f-b7e8-296a70dab67e) has not been authorized in the tenant '$TenantId'. Applications must be authorized to access the customer tenant before partner delegated administrators can use them.")
-    throw (New-Object System.Exception('InteractiveBrowserCredential authentication failed.', $inner))
-}
-'@
-    $folder3 = Join-Path $work 'audit3'
-    New-Item -ItemType Directory -Path $folder3 | Out-Null
-    Copy-Item -Path (Join-Path $work 'Audit*.ps1') -Destination $folder3
-    $answers = @(
-        , @('^Sign in to Microsoft 365', 'y')
-        , @('^Microsoft 365 tenant of the client', 'contoso.example')
-        , @('^Microsoft 365 is read with', 'n')
-    )
-    $run = & $invoke (Join-Path $folder3 'Audit.ps1') $answers @{ Client = 'Test client 3'; Skip = @('Network', 'ActiveDirectory', 'Inventory', 'Domains'); OutputPath = $folder3; NoOpen = $true } $signInSetup
-    $markdownFile = Get-ChildItem -Path $folder3 -Filter 'Test_client_3_Audit_*.md' | Select-Object -First 1
-    $markdown = if ($markdownFile) { Get-Content -LiteralPath $markdownFile.FullName -Raw -Encoding UTF8 } else { '' }
-    $notRead = ([regex]::Matches($markdown, ':warning: Not read: [^\n]*') | ForEach-Object { $_.Value }) -join ' / '
-    Test-That 'audit written' ([bool]$markdownFile) (($run.Output | Select-Object -Last 8) -join ' / ')
-    Test-That 'the tenant asked after "y"' (($run.Questions -join ' | ') -match 'Microsoft 365 tenant of the client') ($run.Questions -join ' | ')
-    if (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication) {
-        Test-That 'the refusal explained in the audit, for the tenant given' ($notRead -match "Not read: Microsoft Graph Command Line Tools, the app the audit signs in with, is not authorized in the tenant of the client.* -Tenant contoso\.example and ticks") $notRead
-    }
-    else {
-        Write-Host '  (Microsoft.Graph.Authentication is not installed here: the refusal is checked above only)' -ForegroundColor Yellow
-    }
+    $m365 = $m365Runs['NotAuthorized']
+    Test-That 'audit written' $m365.Written (($m365.Run.Output | Select-Object -Last 8) -join ' / ')
+    Test-That 'the tenant asked after "y"' (($m365.Run.Questions -join ' | ') -match 'Microsoft 365 tenant of the client') ($m365.Run.Questions -join ' | ')
+    Test-That 'the lines of its own PowerShell shown here' ($m365.Run.Text -match 'Sign in to Microsoft 365 with an administrator account of the client') (($m365.Run.Output | Select-Object -Last 8) -join ' / ')
+    Test-That 'as text, not as XML' ($m365.Run.Text -notmatch '#< CLIXML')
+    Test-That 'the refusal explained in the audit, for the tenant given' ($m365.NotRead -match "Not read: Microsoft Graph Command Line Tools, the app the audit signs in with, is not authorized in the tenant of the client.* -Tenant contoso\.example and ticks") $m365.NotRead
+
+    Write-Section 'Microsoft 365: its PowerShell ended by the sign-in'
+    $m365 = $m365Runs['Crash']
+    Test-That 'the audit still written' $m365.Written (($m365.Run.Output | Select-Object -Last 8) -join ' / ')
+    Test-That 'why it was not read, and what to do' ($m365.NotRead -match "Not read: its PowerShell ended without finishing \(exit code -532462766\): the Graph module ends Windows PowerShell when its sign-in page is closed, or not completed within about 2 minutes\. .*AADSTS90099.* -Tenant contoso\.example and ticks") $m365.NotRead
 
     Write-Section 'Start.ps1 gives the audit its options'
     $startFolder = Join-Path $work 'start-options'
@@ -953,6 +997,8 @@ finally {
     }
     Stop-Job -Job $agent -ErrorAction SilentlyContinue
     Remove-Job -Job $agent -Force -ErrorAction SilentlyContinue
+    $env:PSModulePath = $modulePath
+    Remove-Item -Path Env:\MOSE_TEST_SIGN_IN -ErrorAction SilentlyContinue
 }
 
 Write-Host "`n$($script:Passed) passed, $($script:Failures.Count) failed, in $([math]::Round(((Get-Date) - $started).TotalMinutes, 1)) minutes." -ForegroundColor $(if ($script:Failures.Count) { 'Red' } else { 'Green' })

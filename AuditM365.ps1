@@ -121,6 +121,10 @@ function Format-SignInError {
     if ($text -match 'AADSTS50105') {
         return 'In this tenant, only the users assigned to Microsoft Graph Command Line Tools may use it: assign the account to it in Entra ID (Enterprise applications), or sign in with another one.'
     }
+    # The sign-in window of Windows (WAM) opens over a console window, and found none.
+    if ($text -match 'window handle must be configured') {
+        return "The sign-in window found no PowerShell window to open over: run the audit in a PowerShell window, or this part alone there (.\AuditM365.ps1 -Tenant $where)."
+    }
     return @($Message)[0]
 }
 

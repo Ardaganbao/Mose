@@ -111,20 +111,107 @@ $script:Findings = New-Object System.Collections.Generic.List[object]
 $script:Data = [ordered]@{}
 $script:Log = New-Object System.Collections.Generic.List[string]
 
+# What a part run in a PowerShell of its own runs there: the part, then its output, warnings and error
+# serialized on one line of its standard output. The script and its parameters come in Base64.
+$partProcessCode = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+function Read-Base64([string]$Text) { [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Text)) }
+[hashtable]$parameters = [System.Management.Automation.PSSerializer]::Deserialize((Read-Base64 '<<PARAMETERS>>'))
+$result = [pscustomobject]@{ Output = @(); Warnings = @(); Error = $null }
+try {
+    $result.Output = @(& (Read-Base64 '<<SCRIPT>>') @parameters -WarningVariable warnings)
+    $result.Warnings = @($warnings | ForEach-Object { "$_" })
+}
+catch {
+    $result.Error = "$($_.Exception.Message)"
+}
+[Console]::Out.WriteLine('AUDIT PART RESULT: ' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([System.Management.Automation.PSSerializer]::Serialize($result, 20))))
+[Console]::Out.Flush()
+'@
+
+# Runs a part in a PowerShell of its own, which shares this console: a module that ends its process
+# ends only that part. Its lines are shown as they come; its output, warnings and error come back.
+function Invoke-AuditPartProcess {
+    param(
+        [string]$Path,
+        [hashtable]$Parameters,
+        [string]$WhenEnded
+    )
+
+    # Switches go as booleans, which come back as booleans.
+    $plain = @{}
+    foreach ($key in $Parameters.Keys) {
+        $plain[$key] = if ($Parameters[$key] -is [switch]) { [bool]$Parameters[$key] } else { $Parameters[$key] }
+    }
+    $code = $partProcessCode.Replace('<<PARAMETERS>>', [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([System.Management.Automation.PSSerializer]::Serialize($plain)))).Replace('<<SCRIPT>>', [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Path)))
+    # Not -EncodedCommand, after which PowerShell writes its messages to the console as XML.
+    $bootstrap = "& ([scriptblock]::Create([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{0}'))))" -f [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($code))
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = (Get-Process -Id $PID).Path
+    $start.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$bootstrap`""
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $process = [System.Diagnostics.Process]::Start($start)
+    $result = $null
+    try {
+        # Read in steps, so that Stop (the window's, or Ctrl+C) can end the wait.
+        $line = $process.StandardOutput.ReadLineAsync()
+        while ($true) {
+            if (-not $line.Wait(300)) {
+                continue
+            }
+            if ($null -eq $line.Result) {
+                break
+            }
+            if ($line.Result.StartsWith('AUDIT PART RESULT: ')) {
+                $result = [System.Management.Automation.PSSerializer]::Deserialize([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line.Result.Substring(19))))
+            }
+            else {
+                Write-Host $line.Result
+            }
+            $line = $process.StandardOutput.ReadLineAsync()
+        }
+        $process.WaitForExit()
+    }
+    finally {
+        if (-not $process.HasExited) {
+            $process.Kill()
+        }
+    }
+    if (-not $result) {
+        throw "its PowerShell ended without finishing (exit code $($process.ExitCode))$WhenEnded"
+    }
+    if ($result.Error) {
+        throw $result.Error
+    }
+    return $result
+}
+
 # Runs one part: its Markdown goes under its own heading, its findings and data are kept, and a part
-# that fails says why without stopping the others.
+# that fails says why without stopping the others. -OwnProcess: in a PowerShell of its own (see
+# Invoke-AuditPartProcess), with -WhenEnded added to the reason when that PowerShell ends.
 function Invoke-AuditPart {
     param(
         [string]$Title,
         [string]$Script,
-        [hashtable]$Parameters = @{}
+        [hashtable]$Parameters = @{},
+        [switch]$OwnProcess,
+        [string]$WhenEnded
     )
 
     Write-Host "`n== $Title" -ForegroundColor Cyan
     $partStarted = Get-Date
     $warnings = $null
     try {
-        $output = @(& (Join-Path $PSScriptRoot $Script) @Parameters -WarningVariable warnings)
+        if ($OwnProcess) {
+            $result = Invoke-AuditPartProcess -Path (Join-Path $PSScriptRoot $Script) -Parameters $Parameters -WhenEnded $WhenEnded
+            $output = @($result.Output)
+            $warnings = @($result.Warnings)
+        }
+        else {
+            $output = @(& (Join-Path $PSScriptRoot $Script) @Parameters -WarningVariable warnings)
+        }
         foreach ($item in $output) {
             if ($item -is [string]) {
                 continue
@@ -303,8 +390,20 @@ elseif ($NonInteractive -and -not $Microsoft365) {
 }
 else {
     $answer = if ($Tenant -or $Microsoft365) { 'y' } else { Read-Answer 'Sign in to Microsoft 365 of the client now, with an administrator account (Global Reader is enough)? [Y/n]' }
+    # Its module is installed here, from where its question can be answered: the part runs in a
+    # PowerShell of its own.
+    $graphMissing = -not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)
+    if ($answer -notmatch '^(n|no|non|nee)$' -and $graphMissing -and -not $NonInteractive) {
+        if ((Read-Answer 'Microsoft 365 is read with the Microsoft Graph PowerShell module (Microsoft.Graph.Authentication), not installed here. Install it for this Windows user from the PowerShell Gallery? [Y/n]') -notmatch '^(n|no|non|nee)$') {
+            Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force -AllowClobber
+            $graphMissing = $false
+        }
+    }
     if ($answer -match '^(n|no|non|nee)$') {
         Skip-AuditPart 'Microsoft 365' 'no sign-in.'
+    }
+    elseif ($graphMissing) {
+        Skip-AuditPart 'Microsoft 365' 'the module Microsoft.Graph.Authentication is not installed (Install-Module Microsoft.Graph.Authentication -Scope CurrentUser).'
     }
     else {
         $parameters = @{}
@@ -315,7 +414,10 @@ else {
         if ($Tenant) {
             $parameters.Tenant = $Tenant
         }
-        Invoke-AuditPart -Title 'Microsoft 365' -Script 'AuditM365.ps1' -Parameters $parameters
+        # In Windows PowerShell, the Graph module ends the whole process when its sign-in times out:
+        # in a PowerShell of its own, that loses only this part.
+        $where = if ($Tenant) { $Tenant } else { '<its domain>' }
+        Invoke-AuditPart -Title 'Microsoft 365' -Script 'AuditM365.ps1' -Parameters $parameters -OwnProcess -WhenEnded ": the Graph module ends Windows PowerShell when its sign-in page is closed, or not completed within about 2 minutes. With a partner (CSP) account, that page shows AADSTS90099 until the client has consented: a Global Administrator of the client signs in once with .\AuditM365.ps1 -Tenant $where and ticks 'Consent on behalf of your organization'."
     }
 }
 
