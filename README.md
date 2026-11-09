@@ -111,7 +111,7 @@ After the vault password, it lists the client vaults found, with their client, a
 - The Script Manager uses the default client vault.
 - An older `Start.ps1` doesn't know the option (`A parameter cannot be found that matches parameter name 'MultiClientMode'`): update it first with `.\Start.ps1 -UpdateOnly`.
 
-After a change, `powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ClientVaults.ps1` tests the client vaults in a few seconds: those found, the names refused for a new one, a new one configured (its configuration, login and modules), the logins `P` lists in each, the report of the one picked, and `Start.ps1` with and without `-MultiClientMode`. Its vault is a stand-in of SecretManagement and SecretStore, a file of its test folder, first in the module path of every PowerShell it starts: this user's SecretStore is never read or changed, and it stops if a PowerShell it starts would load the real modules.
+After a change, `powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ClientVaults.ps1` tests the client vaults in a few seconds: those found, the names refused for a new one, a new one configured (its configuration, login and modules), one with spaces in its name and Commvault Cloud with new tokens, the logins `P` lists in each, the report of the one picked, and `Start.ps1` with and without `-MultiClientMode`. Its vault is a stand-in of SecretManagement and SecretStore, a file of its test folder, first in the module path of every PowerShell it starts: this user's SecretStore is never read or changed, and it stops if a PowerShell it starts would load the real modules. Its module scripts are stand-ins too, so no server is contacted.
 
 ### Hyper-V
 

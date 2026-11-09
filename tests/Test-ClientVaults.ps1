@@ -60,6 +60,10 @@ New-Item -ItemType Directory -Path $work | Out-Null
 Copy-Item -Path (Join-Path $repository '*.ps1'), (Join-Path $repository 'updater.config.json'), (Join-Path $repository 'latest-versions.json') -Destination $work
 $moduleScripts = @((Get-Content -LiteralPath (Join-Path $work 'updater.config.json') -Raw | ConvertFrom-Json).Modules | ForEach-Object { $_ })
 ConvertTo-Json -InputObject $moduleScripts | Set-Content -LiteralPath (Join-Path $work 'modules.local.json') -Encoding UTF8
+# The modules are stand-ins that contact nothing: a report that is not a dry run fails its servers.
+foreach ($name in $moduleScripts) {
+    Set-Content -LiteralPath (Join-Path $work $name) -Encoding ASCII -Value "throw 'The tests contact no server: $name is a stand-in.'"
+}
 
 # The stand-in modules, version 99.0.0: the secrets are in the JSON file $env:MOSE_TEST_VAULT, in plain
 # text (test values only), and the vault password is the one below.
@@ -387,6 +391,19 @@ Write-Host ('CHOSEN HAS: ' + (@($names | ForEach-Object { "$_=$(Test-MoseClientV
     Test-That 'with -Gui: refused, before anything' ($run.Failed -match '-MultiClientMode goes with the report .* not with -Gui\.' -and $run.Questions.Count -eq 0) "$($run.Failed) / asked: $($run.Questions -join ' | ')"
     $run = & $invoke 'Start.ps1' @(, $password) @{ SkipUpdate = $true; DryRun = $true }
     Test-That 'without it: the default client vault, nothing asked about it' (-not $run.Left -and -not $run.Failed -and ($run.Questions -notmatch 'client vault') -and (Test-Path -LiteralPath (Join-Path $work "Contoso_Report_$($today)_sample.md"))) "left: $($run.Left); failed: $($run.Failed); asked: $($run.Questions -join ' | ')"
+
+    Write-Section 'Configure.ps1 -MultiClientMode: a new client vault with spaces, Commvault Cloud with new tokens'
+    $commvault = 1 + [array]::IndexOf(@('iLO', 'iDRAC', 'BMC', 'NAS', 'StorMagic', 'VMware', 'HyperV', 'Veeam', 'VeeamApi', 'CommvaultCloud', 'CommvaultOnPrem', 'SqlMaint'), 'CommvaultCloud')
+    $run = & $invoke 'Configure.ps1' @($password, @('^Number of the client vault', 'N'), @('^Name of the new client vault', 'Pension Fund One'),
+        @('^Client name', ''), @('^Module number', "$commvault"), @('^How many', ''),
+        @('^Commvault Cloud ACCESS token', $standIn), @('^Commvault Cloud REFRESH token', $standIn), @('^Commvault Cloud ring ID', 'm1'),
+        @('^Module number', 'S')) @{ MultiClientMode = $true }
+    $vault = & $readVault
+    Test-That 'every answer used, nothing else asked' (-not $run.Left -and -not $run.Failed) "left: $($run.Left); failed: $($run.Failed); asked: $($run.Questions -join ' | ')"
+    $config = if ($vault.ContainsKey('MOSE:Pension Fund One:Config')) { $vault['MOSE:Pension Fund One:Config'].Value | ConvertFrom-Json }
+    Test-Value 'its configuration has the Commvault Cloud' "$($config.Client) $(@($config.Targets).Count) $(@($config.Targets)[0].Module) $(@($config.Targets)[0].Secret)" 'Pension Fund One 1 CommvaultCloud MOSE:Pension Fund One:CommvaultCloud:1'
+    Test-Value 'its tokens saved in it' "$($vault['MOSE:Pension Fund One:CommvaultCloud:1'].Type) $($vault['MOSE:Pension Fund One:CommvaultCloud:1'].Value.Type) $($vault['MOSE:Pension Fund One:CommvaultCloud:1'].Value.Ring)" 'Hashtable Cloud m1'
+    Test-That 'the tokens of the others not offered' (@($run.Questions -match 'already saved').Count -eq 0) ($run.Questions -join ' | ')
 }
 finally {
     $env:PSModulePath = $modulePath
