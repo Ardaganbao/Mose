@@ -56,6 +56,52 @@ function Write-StorageDebugSnapshot {
     }
 }
 
+# Why the iLO could not be read, without the .NET call stack: no answer, an old TLS version, no REST
+# API (-NoRestApi: /redfish/v1 already answered 404), a refused login, or else the error and its inner ones.
+function Format-HpConnectionError {
+    param (
+        [System.Exception]$Exception,
+        [string]$Ip,
+        [string]$Path,
+        [string]$UserName,
+        [switch]$NoRestApi
+    )
+
+    $messages = @()
+    for ($inner = $Exception; $null -ne $inner; $inner = $inner.InnerException) {
+        $messages += $inner.Message.Trim()
+    }
+    $status = if ($Exception -is [System.Net.WebException]) { "$($Exception.Status)" } else { '' }
+    $statusCode = $null
+    if ($Exception -is [System.Net.WebException] -and $null -ne $Exception.Response -and $null -ne $Exception.Response.PSObject.Properties['StatusCode']) {
+        $statusCode = [int]$Exception.Response.StatusCode
+    }
+
+    if ($status -eq 'NameResolutionFailure') {
+        return "The name $Ip does not resolve from this computer: check it, or configure the iLO by its IP address."
+    }
+    if ($status -eq 'ConnectFailure') {
+        return "No connection to the iLO at $Ip on port 443 (HTTPS): it is off, or this computer cannot reach it (another network or VLAN, a firewall, no VPN). To check: Test-NetConnection $Ip -Port 443"
+    }
+    if ($status -eq 'Timeout') {
+        return "The iLO at $Ip did not answer $Path within 30 seconds: it is busy (reset it from its web page if it stays so), or the network to it is too slow."
+    }
+    # An iLO that only speaks TLS 1.0 or older ends the handshake that Windows starts.
+    if ($status -in 'SecureChannelFailure', 'SendFailure', 'ReceiveFailure' -or ($status -eq 'UnknownError' -and $messages -match 'SSL|TLS')) {
+        return "The secure connection to the iLO at $Ip failed ($($messages[-1])) with the TLS versions this computer allows ($([System.Net.ServicePointManager]::SecurityProtocol)). An old iLO (iLO 2, iLO 3, or iLO 4 before firmware 2.00) speaks only TLS 1.0 or older: update its firmware. This module reads iLO 4 from firmware 2.00, and the later iLOs."
+    }
+    if ($statusCode -in 401, 403) {
+        return "The iLO at $Ip refused the login $UserName (HTTP $statusCode): check its user name and password, and that the account may log in to the iLO."
+    }
+    if ($statusCode -eq 404 -and $NoRestApi) {
+        return "The iLO at $Ip has no REST API (HTTP 404 for /redfish/v1 and /rest/v1): iLO 2, iLO 3, or iLO 4 before firmware 2.00. This module reads iLO 4 from firmware 2.00, and the later iLOs: update its firmware."
+    }
+    if ($null -ne $statusCode) {
+        return "The iLO at $Ip answered HTTP $statusCode for $Path`: $($messages -join ' ')"
+    }
+    return "The iLO at $Ip could not be read ($Path): $($messages -join ' ')"
+}
+
 function New-HpSession {
     param (
         [Parameter(Mandatory = $true, HelpMessage = 'ILO admin credential')]
@@ -120,8 +166,7 @@ function New-HpSession {
                 $statusCode = [int]$response.StatusCode
             }
             if ($statusCode -notin @(404, 405)) {
-                $tlsProtocols = [System.Net.ServicePointManager]::SecurityProtocol
-                throw "Failed to discover the iLO Redfish session endpoint at https://$ip/redfish/v1. Enabled TLS protocols: $tlsProtocols. Details: $($_.Exception.ToString())"
+                throw (Format-HpConnectionError -Exception $_.Exception -Ip $ip -Path '/redfish/v1' -UserName $credential.UserName)
             }
 
             $entrypoint = $null
@@ -206,8 +251,9 @@ function New-HpSession {
             return $session
         }
         catch {
-            Write-Host "Error creating session: $_" -ForegroundColor Red
-            throw "Failed to establish a session with iLO at https://$ip. Enabled TLS protocols: $([System.Net.ServicePointManager]::SecurityProtocol). Details: $($_.Exception.ToString())"
+            $reason = Format-HpConnectionError -Exception $_.Exception -Ip $ip -Path ([Uri]$sessionUri).AbsolutePath -UserName $credential.UserName -NoRestApi:($sessionVersion -eq 4)
+            Write-Host "Error creating session: $reason" -ForegroundColor Red
+            throw $reason
         }
     }
     finally {
