@@ -308,6 +308,10 @@ else {
     }
     else {
         $parameters = @{}
+        # Without it, a partner (CSP) account would sign in to the partner's own tenant.
+        if (-not $Tenant) {
+            $Tenant = Read-Answer 'Microsoft 365 tenant of the client: one of its domains, e.g. contoso.be, needed with a partner (CSP) account (Enter: the tenant of the account you sign in with)'
+        }
         if ($Tenant) {
             $parameters.Tenant = $Tenant
         }

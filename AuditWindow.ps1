@@ -224,7 +224,7 @@ $openDiagram.Enabled = $false
 $cloud = New-AuditGroup 'Microsoft 365 and public domains' 82
 $tenantLabel = New-AuditLabel $cloud 'Tenant (optional)' 12 24
 $tenantBox = New-AuditTextBox $cloud 140 20 260 $Tenant
-[void](New-AuditLabel $cloud 'Its sign-in window opens during the audit: a Global Reader is enough.' 412 24 520)
+[void](New-AuditLabel $cloud 'Its domain; needed with a partner (CSP) account. Global Reader is enough.' 412 24 520)
 $domainsLabel = New-AuditLabel $cloud 'Public domains' 12 52
 $domainsBox = New-AuditTextBox $cloud 140 48 260 (@($Domain) -join ', ')
 [void](New-AuditLabel $cloud 'Comma-separated; those of Active Directory and Microsoft 365 are added.' 412 52 520)

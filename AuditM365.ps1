@@ -95,7 +95,36 @@ function Format-Date {
     return 'never'
 }
 
-$connect = @{ Scopes = @('Organization.Read.All', 'Directory.Read.All', 'User.Read.All', 'Policy.Read.All', 'AuditLog.Read.All', 'UserAuthenticationMethod.Read.All', 'RoleManagement.Read.Directory'); NoWelcome = $true; ContextScope = 'Process' }
+# Why the sign-in failed and what to do, from the AADSTS code of Microsoft Entra ID in the messages of
+# the error and its inner errors; another error: its first message.
+function Format-SignInError {
+    param(
+        [string[]]$Message,
+        [string]$Tenant
+    )
+
+    $text = $Message -join ' '
+    $where = if ($Tenant) { $Tenant } else { '<its domain>' }
+    $consent = "A Global Administrator of the client signs in once with .\AuditM365.ps1 -Tenant $where and ticks 'Consent on behalf of your organization'"
+    if ($text -match 'AADSTS90099') {
+        return "Microsoft Graph Command Line Tools, the app the audit signs in with, is not authorized in the tenant of the client, and a partner (CSP) account cannot authorize it. $consent; after that, the partner account can read the tenant."
+    }
+    if ($text -match 'AADSTS(65001|65004|90094)') {
+        return "The read permissions of Microsoft Graph Command Line Tools are not consented in the tenant, and only a Global Administrator can consent. $consent."
+    }
+    if ($text -match 'AADSTS(50020|50034|90072)') {
+        return "This account is not in the tenant $where. A partner (CSP) account needs an active GDAP relationship with the client that gives Global Reader to a security group of the account; otherwise sign in with an account of the client."
+    }
+    if ($text -match 'AADSTS90002') {
+        return "No Microsoft 365 tenant $where`: give one of its verified domains, or its ID."
+    }
+    if ($text -match 'AADSTS50105') {
+        return 'In this tenant, only the users assigned to Microsoft Graph Command Line Tools may use it: assign the account to it in Entra ID (Enterprise applications), or sign in with another one.'
+    }
+    return @($Message)[0]
+}
+
+$connect = @{ Scopes =@('Organization.Read.All', 'Directory.Read.All', 'User.Read.All', 'Policy.Read.All', 'AuditLog.Read.All', 'UserAuthenticationMethod.Read.All', 'RoleManagement.Read.Directory'); NoWelcome = $true; ContextScope = 'Process' }
 if ($Tenant) {
     $connect.TenantId = $Tenant
 }
@@ -103,11 +132,22 @@ if ($UseDeviceCode) {
     $connect.UseDeviceCode = $true
 }
 Write-Host 'Sign in to Microsoft 365 with an administrator account of the client (Global Reader is enough)...' -ForegroundColor Cyan
-Connect-MgGraph @connect
+try {
+    Connect-MgGraph @connect
+}
+catch {
+    $messages = @()
+    for ($exception = $_.Exception; $exception; $exception = $exception.InnerException) {
+        $messages += "$($exception.Message)"
+    }
+    throw (Format-SignInError -Message $messages -Tenant $Tenant)
+}
 try {
     $context = Get-MgContext
     Write-Progress -Id 50 -Activity 'Microsoft 365 audit' -Status 'Tenant' -PercentComplete 0
     $organization = @(Get-Graph '/v1.0/organization')[0]
+    # A partner account without -Tenant reads the partner's own tenant: said here, so it shows.
+    Write-Host "Signed in to $($organization.displayName) as $($context.Account)."
     $domains = @(Get-Graph '/v1.0/domains')
     $securityDefaults = Get-GraphOptional '/v1.0/policies/identitySecurityDefaultsEnforcementPolicy' 'Security defaults'
     $conditionalAccess = Get-GraphOptional '/v1.0/identity/conditionalAccess/policies' 'Conditional Access'
