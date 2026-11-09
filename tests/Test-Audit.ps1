@@ -330,6 +330,9 @@ try {
     Set-Content -LiteralPath $runner -Encoding ASCII -Value @'
 param([string]$Script, [string]$Answers, [string]$Arguments, [string]$Setup)
 Set-StrictMode -Version Latest
+# Never a real sign-in to a tenant from the tests, whatever the answers; a setup may only replace it
+# with another stand-in.
+function global:Connect-MgGraph { throw 'The tests never sign in to Microsoft 365.' }
 if ($Setup) { . $Setup }
 # Windows PowerShell gives a JSON list as one object: ForEach-Object takes its items out.
 $global:TestAnswers = @(Get-Content -LiteralPath $Answers -Raw | ConvertFrom-Json | ForEach-Object { $_ })
@@ -347,8 +350,6 @@ function global:Read-Host {
     if ($AsSecureString) { return New-TestSecret "$($match.Answer)" }
     return "$($match.Answer)"
 }
-# Never a real sign-in to a tenant from the tests, whatever the answers.
-function global:Connect-MgGraph { throw 'The tests never sign in to Microsoft 365.' }
 function global:Get-Credential {
     param([string]$Message, [string]$UserName)
     $global:TestQuestions.Add("Get-Credential: $Message")
@@ -420,6 +421,55 @@ $result | Where-Object { $_ -is [string] }
     Test-Value 'TrustedHosts' (Format-ReadError 'The WinRM client cannot process the request. ... the destination machine must be added to the TrustedHosts configuration setting.') 'WinRM needs TrustedHosts for it, and DCOM did not answer'
     $long = Format-ReadError (('An error nobody planned for. ' * 10) + "`nSecond line")
     Test-That 'another error: its first line, cut at 120 characters' ($long.Length -eq 120 -and $long.EndsWith('...') -and $long -notmatch 'Second line') $long
+
+    Write-Section 'Why the Microsoft 365 sign-in failed'
+    $m365Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $work 'AuditM365.ps1'), [ref]$null, [ref]$null)
+    . ([scriptblock]::Create($m365Ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Format-SignInError' }, $false).Extent.Text))
+    $notAuthorized = "AADSTS90099: The application 'Microsoft Graph Command Line Tools' (14d82eec-204b-4c2f-b7e8-296a70dab67e) has not been authorized in the tenant '00000000-0000-0000-0000-000000000000'. Applications must be authorized to access the customer tenant before partner delegated administrators can use them."
+    $said = Format-SignInError -Message @('InteractiveBrowserCredential authentication failed.', $notAuthorized) -Tenant 'contoso.example'
+    Test-That 'a partner account, the app not authorized (its code in an inner error): the client consents once' ($said -match "a partner \(CSP\) account cannot authorize it\. A Global Administrator of the client signs in once with \.\\AuditM365\.ps1 -Tenant contoso\.example and ticks 'Consent on behalf of your organization'; after that, the partner account can read the tenant\.$") $said
+    $said = Format-SignInError -Message 'AADSTS65001: The user or administrator has not consented to use the application.' -Tenant 'contoso.example'
+    Test-That 'no consent: a Global Administrator consents' ($said -match '^The read permissions of Microsoft Graph Command Line Tools are not consented in the tenant, and only a Global Administrator can consent\. A Global') $said
+    $said = Format-SignInError -Message 'AADSTS65004: User declined to consent to access the app.'
+    Test-That 'the consent declined, without a tenant: the same, with a place for it' ($said -match 'not consented.*-Tenant <its domain> and ticks') $said
+    $said = Format-SignInError -Message 'AADSTS50020: User account from identity provider does not exist in tenant.' -Tenant 'contoso.example'
+    Test-That 'an account not in the tenant: the GDAP relationship' ($said -match '^This account is not in the tenant contoso\.example\. A partner \(CSP\) account needs an active GDAP relationship with the client that gives Global Reader') $said
+    Test-Value 'no such tenant' (Format-SignInError -Message 'AADSTS90002: Tenant not found.' -Tenant 'nowhere.example') 'No Microsoft 365 tenant nowhere.example: give one of its verified domains, or its ID.'
+    $said = Format-SignInError -Message 'AADSTS50105: Your administrator has configured the application to block users unless they are specifically granted access.'
+    Test-That 'only the users assigned to the app' ($said -match '^In this tenant, only the users assigned to Microsoft Graph Command Line Tools may use it') $said
+    Test-Value 'another error: its first message' (Format-SignInError -Message @('Authentication timed out.', 'An inner error.')) 'Authentication timed out.'
+
+    Write-Section 'Microsoft 365 with a partner account: the tenant asked, the refusal explained'
+    # The stand-in sign-in refuses as Entra ID refuses a partner account when the app is not authorized
+    # in the client's tenant, its code in the inner error.
+    $signInSetup = Join-Path $work 'sign-in-not-authorized.ps1'
+    Set-Content -LiteralPath $signInSetup -Encoding ASCII -Value @'
+function global:Connect-MgGraph {
+    param([string[]]$Scopes, [string]$TenantId, [switch]$NoWelcome, [string]$ContextScope, [switch]$UseDeviceCode)
+    $inner = New-Object System.Exception("AADSTS90099: The application 'Microsoft Graph Command Line Tools' (14d82eec-204b-4c2f-b7e8-296a70dab67e) has not been authorized in the tenant '$TenantId'. Applications must be authorized to access the customer tenant before partner delegated administrators can use them.")
+    throw (New-Object System.Exception('InteractiveBrowserCredential authentication failed.', $inner))
+}
+'@
+    $folder3 = Join-Path $work 'audit3'
+    New-Item -ItemType Directory -Path $folder3 | Out-Null
+    Copy-Item -Path (Join-Path $work 'Audit*.ps1') -Destination $folder3
+    $answers = @(
+        , @('^Sign in to Microsoft 365', 'y')
+        , @('^Microsoft 365 tenant of the client', 'contoso.example')
+        , @('^Microsoft 365 is read with', 'n')
+    )
+    $run = & $invoke (Join-Path $folder3 'Audit.ps1') $answers @{ Client = 'Test client 3'; Skip = @('Network', 'ActiveDirectory', 'Inventory', 'Domains'); OutputPath = $folder3; NoOpen = $true } $signInSetup
+    $markdownFile = Get-ChildItem -Path $folder3 -Filter 'Test_client_3_Audit_*.md' | Select-Object -First 1
+    $markdown = if ($markdownFile) { Get-Content -LiteralPath $markdownFile.FullName -Raw -Encoding UTF8 } else { '' }
+    $notRead = ([regex]::Matches($markdown, ':warning: Not read: [^\n]*') | ForEach-Object { $_.Value }) -join ' / '
+    Test-That 'audit written' ([bool]$markdownFile) (($run.Output | Select-Object -Last 8) -join ' / ')
+    Test-That 'the tenant asked after "y"' (($run.Questions -join ' | ') -match 'Microsoft 365 tenant of the client') ($run.Questions -join ' | ')
+    if (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication) {
+        Test-That 'the refusal explained in the audit, for the tenant given' ($notRead -match "Not read: Microsoft Graph Command Line Tools, the app the audit signs in with, is not authorized in the tenant of the client.* -Tenant contoso\.example and ticks") $notRead
+    }
+    else {
+        Write-Host '  (Microsoft.Graph.Authentication is not installed here: the refusal is checked above only)' -ForegroundColor Yellow
+    }
 
     Write-Section 'Start.ps1 gives the audit its options'
     $startFolder = Join-Path $work 'start-options'
