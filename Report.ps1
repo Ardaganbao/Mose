@@ -28,6 +28,9 @@ param(
     [Parameter(HelpMessage = 'Pick the servers of the report from the list of configured servers.')]
     [switch]$Choose,
 
+    [Parameter(HelpMessage = 'Several clients on this computer: pick the client vault of the report, or create an empty one and configure it.')]
+    [switch]$MultiClientMode,
+
     # Set by Configure.ps1 to preview a configuration it has not saved yet.
     [Parameter(DontShow)]
     [object]$Config,
@@ -46,6 +49,8 @@ param(
 # -DebugLog also writes <Client>_Debug_<yyyy-MM-dd_HHmmss>.log: for each server how long it took and
 # its warnings and, when it failed, the error, the script line where it stopped and the call stack,
 # then a summary. It contains the client's server names and addresses, so git ignores it like the report.
+# -MultiClientMode first asks which client vault to report on, of a computer with several clients
+# (see Select-MoseClientVault in helper.ps1).
 
 $ErrorActionPreference = 'Stop'
 # Start.ps1 hides progress bars to download faster; the modules show theirs.
@@ -75,6 +80,9 @@ if ($Config) {
 }
 else {
     Open-MoseVault
+    if ($MultiClientMode) {
+        Select-MoseClientVault
+    }
     $config = Get-MoseConfig
     if (-not $config -and $DryRun) {
         Write-Host "This computer has no client configuration yet: the sample report uses one server per module." -ForegroundColor Yellow
@@ -82,7 +90,7 @@ else {
     }
     elseif (-not $config) {
         Write-Host "This computer has no client configuration yet." -ForegroundColor Yellow
-        & (Join-Path $PSScriptRoot 'Configure.ps1') -VaultUnlocked
+        & (Join-Path $PSScriptRoot 'Configure.ps1') -VaultUnlocked -ClientVault $MoseClientVault
         $config = Get-MoseConfig
         if (-not $config) {
             throw "No client configuration was saved, so there is nothing to report. Run .\Start.ps1 -Configure."
@@ -1157,7 +1165,7 @@ function Save-TargetLogin {
     if (-not $credential) {
         return $false
     }
-    $secretName = "MOSE:$($Target.Module):$server"
+    $secretName = "$($MoseSecretPrefix)$($Target.Module):$server"
     Set-Secret -Vault $MoseVaultName -Name $secretName -Secret $credential
     if ($Target.PSObject.Properties['Secret']) {
         $Target.Secret = $secretName

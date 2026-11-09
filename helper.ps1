@@ -96,6 +96,13 @@ function Get-AppCredential {
 $MoseVaultName = 'SecretStore1'
 $MoseConfigSecretName = 'MOSE:Config'
 
+# Several clients on one computer (-MultiClientMode, e.g. a technician's laptop): each has a client
+# vault of its own in that vault, whose secrets start with MOSE:<name>: (its configuration is
+# MOSE:<name>:Config). The default client vault, '', is that of a computer with one client. They
+# share the password of the SecretStore, which keeps one store per Windows user.
+$MoseClientVault = ''
+$MoseSecretPrefix = 'MOSE:'
+
 # Modules a client configuration can use, in report order.
 # DropTitle: the module starts its Markdown with a heading that only repeats the report section title.
 $MoseModules = [ordered]@{
@@ -129,6 +136,103 @@ function Open-MoseVault {
     }
     Unlock-SecretVaultIfNeeded -VaultName $MoseVaultName -Password $Password
     $script:MoseVaultPassword = $Password
+}
+
+# Uses this client vault ('' for the default one) for the configuration and the new secrets.
+function Use-MoseClientVault {
+    param(
+        [string]$Name
+    )
+
+    $script:MoseClientVault = $Name
+    $script:MoseSecretPrefix = if ($Name) { "MOSE:${Name}:" } else { 'MOSE:' }
+    $script:MoseConfigSecretName = "$($script:MoseSecretPrefix)Config"
+}
+
+# The client vaults of this computer: their name ('' for the default one), client and configuration secret.
+function Get-MoseClientVaults {
+    foreach ($info in @(Get-SecretInfo -Vault $MoseVaultName -Name 'MOSE:*' | Where-Object { "$($_.Type)" -eq 'String' })) {
+        if ($info.Name -eq 'MOSE:Config') {
+            $name = ''
+        }
+        elseif ($info.Name -match '^MOSE:([^:]+):Config$') {
+            $name = $Matches[1]
+        }
+        else {
+            continue
+        }
+        $client = ''
+        try {
+            $client = Get-MoseProperty (Get-Secret -Vault $MoseVaultName -Name $info.Name -AsPlainText | ConvertFrom-Json) 'Client'
+        }
+        catch {
+            Write-Verbose "$($info.Name) is not a configuration: $($_.Exception.Message)"
+        }
+        [pscustomobject]@{ Name = $name; Client = "$client"; Secret = $info.Name }
+    }
+}
+
+# Whether a secret is of the client vault in use: for a named one, its prefix; for the default one,
+# not the prefix of another. $Others: the names of the named client vaults (Get-MoseClientVaults).
+function Test-MoseClientVaultSecret {
+    param(
+        [string]$Name,
+        [string[]]$Others = @()
+    )
+
+    if ($MoseClientVault) {
+        return $Name.StartsWith($MoseSecretPrefix, [StringComparison]::OrdinalIgnoreCase)
+    }
+    foreach ($other in $Others) {
+        if ($Name.StartsWith("MOSE:${other}:", [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+# -MultiClientMode: asks which client vault to use, or the name of a new empty one, and uses it.
+function Select-MoseClientVault {
+    $vaults = @(Get-MoseClientVaults | Sort-Object -Property @{ Expression = { [bool]$_.Name } }, Name)
+    Write-Host ""
+    Write-Host "Client vaults in the SecretStore vault '$MoseVaultName' of $env:USERNAME on this computer" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $vaults.Count; $i++) {
+        $name = if ($vaults[$i].Name) { $vaults[$i].Name } else { '(default)' }
+        Write-Host ("  {0,2}. {1,-24} {2}" -f ($i + 1), $name, $vaults[$i].Client)
+    }
+    Write-Host "   N. A new empty client vault"
+    Write-Host ""
+
+    while ($true) {
+        $answer = "$(Read-Host -Prompt 'Number of the client vault, or N for a new one')".Trim()
+        $number = 0
+        if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $vaults.Count) {
+            Use-MoseClientVault $vaults[$number - 1].Name
+            $label = if ($MoseClientVault) { $MoseClientVault } else { 'the default one' }
+            Write-Host "Client vault $label$(if ($vaults[$number - 1].Client) { " ($($vaults[$number - 1].Client))" })." -ForegroundColor Green
+            return
+        }
+        if ($answer -notmatch '^[Nn]$') {
+            continue
+        }
+
+        $name = "$(Read-Host -Prompt 'Name of the new client vault, e.g. the client (letters, digits, spaces, . _ -)')".Trim()
+        if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]*$') {
+            Write-Host "Not a name for a client vault: letters, digits, spaces, . _ and - only." -ForegroundColor Yellow
+        }
+        # Not a module's name, whose secrets are MOSE:<module>:<server> in the default client vault.
+        elseif ($name -eq 'Config' -or @($MoseModules.Keys | Where-Object { $_ -eq $name }).Count -gt 0) {
+            Write-Host "'$name' is a name MOSE uses for its own secrets: choose another." -ForegroundColor Yellow
+        }
+        elseif (@($vaults | Where-Object { $_.Name -eq $name }).Count -gt 0) {
+            Write-Host "The client vault '$name' already exists: type its number to use it." -ForegroundColor Yellow
+        }
+        else {
+            Use-MoseClientVault $name
+            Write-Host "New client vault ${name}: empty until its configuration is saved." -ForegroundColor Green
+            return
+        }
+    }
 }
 
 # Returns $null when this computer has no client configuration yet.
@@ -412,6 +516,11 @@ function Save-MoseModuleList {
     if (Test-Path -LiteralPath $MoseModuleListPath) {
         # Inner parentheses: Windows PowerShell returns a JSON array as one object.
         $previous = @((Get-Content -LiteralPath $MoseModuleListPath -Raw | ConvertFrom-Json))
+    }
+    # With several client vaults (-MultiClientMode), the modules of the others too.
+    foreach ($vault in @(Get-MoseClientVaults | Where-Object { $_.Secret -ne $MoseConfigSecretName })) {
+        $other = Get-Secret -Vault $MoseVaultName -Name $vault.Secret -AsPlainText | ConvertFrom-Json
+        $Targets = @($Targets) + @(Get-MoseProperty $other 'Targets' | Where-Object { $_ })
     }
     # With the other scripts a module runs (Uses).
     $scripts = @($Targets | Where-Object { $MoseModules.Contains($_.Module) } |

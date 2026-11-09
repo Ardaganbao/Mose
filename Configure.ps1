@@ -1,8 +1,15 @@
 [CmdletBinding()]
 param(
+    [Parameter(HelpMessage = 'Several clients on this computer: pick the client vault to configure, or create an empty one.')]
+    [switch]$MultiClientMode,
+
     # Set by Report.ps1, which has already unlocked the vault.
     [Parameter(DontShow)]
-    [switch]$VaultUnlocked
+    [switch]$VaultUnlocked,
+
+    # Set by Report.ps1: the client vault it uses ('' for the default one).
+    [Parameter(DontShow)]
+    [string]$ClientVault
 )
 
 # Asks for the client of this computer: its name, then the servers of each module and their
@@ -13,6 +20,12 @@ $ErrorActionPreference = 'Stop'
 
 if (-not $VaultUnlocked) {
     Open-MoseVault
+}
+if ($PSBoundParameters.ContainsKey('ClientVault')) {
+    Use-MoseClientVault $ClientVault
+}
+elseif ($MultiClientMode) {
+    Select-MoseClientVault
 }
 
 function Read-Answer {
@@ -44,7 +57,7 @@ function Read-TargetCredential {
         return $previous[0].Secret
     }
 
-    $secretName = "MOSE:${Module}:$Server"
+    $secretName = "$($MoseSecretPrefix)${Module}:$Server"
     if (Get-SecretInfo -Vault $MoseVaultName -Name $secretName -ErrorAction SilentlyContinue) {
         $saved = Get-Secret -Vault $MoseVaultName -Name $secretName
         if ($saved -is [pscredential] -and (Read-YesNo "Use the login already saved for $Server ($($saved.UserName))?")) {
@@ -70,14 +83,15 @@ function Read-CommvaultSecret {
     # Tokens already in the vault (e.g. saved by an older report script) are reused,
     # which keeps a Cloud token chain and its weekly renewal going.
     $used = @($targets | ForEach-Object { $_.Secret })
-    foreach ($name in @(Get-CommvaultSecretNames -Mode $Mode | Where-Object { $used -notcontains $_ })) {
+    $others = @(Get-MoseClientVaults | Where-Object { $_.Name } | ForEach-Object { $_.Name })
+    foreach ($name in @(Get-CommvaultSecretNames -Mode $Mode | Where-Object { $used -notcontains $_ -and (Test-MoseClientVaultSecret $_ $others) })) {
         if (Read-YesNo "Use the Commvault $Mode tokens already saved in '$name'?") {
             return $name
         }
     }
 
     $count = @($targets | Where-Object { $_.Module -eq "Commvault$Mode" }).Count
-    $secretName = "MOSE:Commvault${Mode}:$($count + 1)"
+    $secretName = "$($MoseSecretPrefix)Commvault${Mode}:$($count + 1)"
 
     if ($Mode -eq 'Cloud') {
         $accessToken = Read-Host -Prompt 'Commvault Cloud ACCESS token' -AsSecureString
@@ -623,9 +637,10 @@ function Edit-ReportLayout {
 }
 
 # Every login and token in the vault but the configuration, with the servers of this configuration
-# that use it.
+# that use it. With several client vaults, only those of the one in use.
 function Get-SavedSecretList {
-    foreach ($info in @(Get-SecretInfo -Vault $MoseVaultName | Where-Object { $_.Name -ne $MoseConfigSecretName } | Sort-Object -Property Name)) {
+    $others = @(Get-MoseClientVaults | Where-Object { $_.Name } | ForEach-Object { $_.Name })
+    foreach ($info in @(Get-SecretInfo -Vault $MoseVaultName | Where-Object { $_.Name -ne $MoseConfigSecretName -and (Test-MoseClientVaultSecret $_.Name $others) } | Sort-Object -Property Name)) {
         $name = $info.Name
         $usedBy = @($targets | Where-Object { (Get-MoseProperty $_ 'Secret') -eq $name } |
             ForEach-Object { "$($MoseModules[$_.Module].Label) $(Get-MoseTargetName $_)" })
@@ -716,7 +731,7 @@ function Edit-SavedSecrets {
     while ($true) {
         $secrets = @(Get-SavedSecretList)
         Write-Host ""
-        Write-Host "Saved logins and tokens (vault $MoseVaultName)" -ForegroundColor Cyan
+        Write-Host "Saved logins and tokens (vault $MoseVaultName$(if ($MoseClientVault) { ", client vault $MoseClientVault" }))" -ForegroundColor Cyan
         if ($secrets.Count -eq 0) {
             Write-Host "  None."
             return
@@ -772,7 +787,7 @@ function Edit-SavedSecrets {
 function Set-MoseVaultPassword {
     Write-Host ""
     Write-Host "Password of the SecretStore vault '$MoseVaultName'" -ForegroundColor Cyan
-    Write-Host "It changes at once, for every vault of $env:USERNAME on this computer. The saved logins, tokens and configuration stay."
+    Write-Host "It changes at once, for every vault and client vault of $env:USERNAME on this computer. The saved logins, tokens and configuration stay."
     $current = Read-Host -Prompt 'Current password (Enter to cancel)' -AsSecureString
     if ($current.Length -eq 0) {
         return
@@ -962,12 +977,13 @@ if ($config) {
 
 Write-Host ""
 Write-Host "MOSE client configuration" -ForegroundColor Cyan
-Write-Host "Saved in the SecretStore vault '$MoseVaultName' of $env:USERNAME on this computer, never in the scripts."
+$where = if ($MoseClientVault) { "the client vault '$MoseClientVault' of " } else { '' }
+Write-Host "Saved in $($where)the SecretStore vault '$MoseVaultName' of $env:USERNAME on this computer, never in the scripts."
 Write-Host ""
 
-# Asked once; C in the menu changes it.
+# Asked once; C in the menu changes it. A new client vault is often named after its client.
 while (-not $client) {
-    $client = Read-Answer 'Client name (report title and file name)'
+    $client = Read-Answer 'Client name (report title and file name)' $MoseClientVault
 }
 
 $moduleKeys = @($MoseModules.Keys)

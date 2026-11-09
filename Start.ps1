@@ -62,6 +62,11 @@ param(
     [Parameter()]
     [switch]$Choose,
 
+    # Several clients on this computer, e.g. a technician's laptop: before the report or -Configure,
+    # pick a client vault of the SecretStore, or create an empty one.
+    [Parameter()]
+    [switch]$MultiClientMode,
+
     # Import or export Keeper entries over its API (Keeper.ps1) after updating, instead of the report.
     # The Keeper scripts are downloaded the first time.
     [Parameter()]
@@ -79,6 +84,12 @@ param(
     [Parameter(DontShow)]
     [switch]$Quiet
 )
+
+# Before the update, so that nothing runs for a mistake.
+if ($MultiClientMode -and ($Gui -or $Keeper -or $UpdateOnly)) {
+    $with = @('Gui', 'Keeper', 'UpdateOnly' | Where-Object { $PSBoundParameters.ContainsKey($_) } | ForEach-Object { "-$_" }) -join ', '
+    throw "-MultiClientMode goes with the report (alone, or with -DryRun, -DebugLog, -Only or -Choose) and with -Configure, not with $with."
+}
 
 # GitHub requires TLS 1.2; Windows PowerShell 5.1 may not enable it by default. SystemDefault (0, the
 # versions Windows allows, TLS 1.3 included) is kept: adding TLS 1.2 to it would turn the others off,
@@ -316,6 +327,8 @@ elseif (-not $Quiet) {
     Write-Host "                           iLO, iDRAC, BMC, NAS, StorMagic, VMware, HyperV, Veeam, VeeamApi," -ForegroundColor DarkGray
     Write-Host "                           Commvault, CommvaultCloud, CommvaultOnPrem, SQL, or a server name (Tab completes)" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Choose      Pick the servers of the report from a list" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -MultiClientMode  Several clients here: pick a client vault (or create an empty one)," -ForegroundColor DarkGray
+    Write-Host "                           then its report; with -Configure, its configuration" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper      Import or export Keeper entries over its API" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper -Gui The same in a window" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
@@ -569,7 +582,7 @@ if ($UpdateOnly) {
 }
 
 if ($Configure) {
-    & (Join-Path $PSScriptRoot "Configure.ps1")
+    & (Join-Path $PSScriptRoot "Configure.ps1") -MultiClientMode:$MultiClientMode
     return
 }
 
@@ -586,6 +599,10 @@ if ($Only) {
 }
 if ($Choose) {
     $reportParameters.Choose = $true
+}
+# Runs the report of the client vault picked, even when the report is turned off in the Script Manager.
+if ($MultiClientMode) {
+    $reportParameters.MultiClientMode = $true
 }
 
 if ($DryRun) {

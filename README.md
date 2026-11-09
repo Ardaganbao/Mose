@@ -35,6 +35,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
 | `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the last 16 days, from msdb), and the SQL Server version. |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
+| `tests\Test-ClientVaults.ps1` | [Tests of the client vaults](#several-clients-on-one-computer) (`-MultiClientMode`), with a stand-in vault. Not copied to the client computers. |
 | `TESTING.md` | Which modules were tested against a real server, and when. Not copied to the client computers. |
 
 ## Install on a computer
@@ -91,6 +92,27 @@ A computer only downloads the module scripts its client uses. Saving downloads t
 
 Commvault tokens already in the vault (for example saved by an older report script) are offered for reuse, so a Commvault Cloud token chain keeps going.
 
+### Several clients on one computer
+
+A computer usually has one client. A technician's laptop can keep several, each in a client vault of its own: add `-MultiClientMode` to the report or the configuration.
+
+```powershell
+.\Start.ps1 -MultiClientMode              # pick a client vault, then its report
+.\Start.ps1 -MultiClientMode -Configure   # pick a client vault, then its configuration
+.\Start.ps1 -MultiClientMode -DryRun      # also with -DebugLog, -Only and -Choose
+```
+
+After the vault password, it lists the client vaults found, with their client, and `N` for a new empty one, named for example after the client (letters, digits, spaces, `.`, `_` and `-`). A new one is empty until its configuration is saved; its report starts with its configuration. The client vault picked is used for that run only: the next run asks again.
+
+- The client vault without a name, `(default)`, is that of a computer with one client: `MOSE:Config` and `MOSE:<module>:<server>`, as without `-MultiClientMode`. A named one keeps its configuration as `MOSE:<name>:Config` and its logins and tokens as `MOSE:<name>:<module>:<server>`.
+- They are all in the vault `SecretStore1`, so they share its password: SecretStore keeps one store per Windows user. `P` in the menu lists only the logins and tokens of the client vault in use.
+- The modules of every client vault are downloaded and kept up to date.
+- The weekly Commvault token renewal renews the tokens of every client vault.
+- The Script Manager uses the default client vault.
+- An older `Start.ps1` doesn't know the option (`A parameter cannot be found that matches parameter name 'MultiClientMode'`): update it first with `.\Start.ps1 -UpdateOnly`.
+
+After a change, `powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ClientVaults.ps1` tests the client vaults in a few seconds: those found, the names refused for a new one, a new one configured (its configuration, login and modules), the logins `P` lists in each, the report of the one picked, and `Start.ps1` with and without `-MultiClientMode`. Its vault is a stand-in of SecretManagement and SecretStore, a file of its test folder, first in the module path of every PowerShell it starts: this user's SecretStore is never read or changed, and it stops if a PowerShell it starts would load the real modules.
+
 ### Hyper-V
 
 Enter a Hyper-V host, or a failover cluster name to report every node of the cluster. The report connects over PowerShell remoting (WinRM) as the current Windows user, or as another account when asked. On the hosts, PowerShell remoting must be enabled (`Enable-PSRemoting`), and an IP address or a host outside the domain must be in this computer's TrustedHosts. Hyper-V cannot see the free space inside a VM, so the VM disks show how full each virtual disk file is.
@@ -142,6 +164,7 @@ cd $HOME\Mose
 .\Start.ps1 -DebugLog    # update, then run the report with a debug log
 .\Start.ps1 -Only veeam,sql  # update, then a partial report: only these servers
 .\Start.ps1 -Choose      # update, then a partial report of servers picked from a list
+.\Start.ps1 -MultiClientMode  # update, then pick a client vault and run its report (several clients here)
 .\Start.ps1 -Keeper      # update, then import or export Keeper entries over its API (not the report)
 .\Start.ps1 -Keeper -Gui # the same in a window, also opened by Keeper import/export in the Script Manager
 .\Start.ps1 -Gui         # update, then open the Script Manager
