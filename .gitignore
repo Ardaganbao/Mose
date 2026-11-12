@@ -38,3 +38,12 @@ keeper.local.json
 
 # The connections as they were before a Keeper.ps1 import, which may hold their passwords.
 KCM-RDP-Backup_*.json
+
+
+# ignore audit logs and reports from the audit scripts, which contain client data
+*_Audit_*.md
+*_Audit_*.log
+*_Audit_*.csv
+*_Audit_*.json
+*_Audit_*.xml
+*_Audit_*.drawio
