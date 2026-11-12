@@ -83,9 +83,16 @@ function Get-ShortOsName {
 #Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true
 $connected = $false
 try {
-Write-Progress -Id 10 -Activity "VMware report: $Site" -Status 'Connecting to vCenter' -PercentComplete 0
-Connect-VIServer -Server $server -User $user -Password $pass -Force
+Write-Progress -Id 10 -Activity "VMware report: $Site" -Status 'Connecting' -PercentComplete 0
+# A standalone ESXi host (and many vCenters) presents a self-signed certificate: accept it for this
+# session only, without changing the saved PowerCLI configuration. Guarded so an older PowerCLI that
+# does not know the setting cannot stop the report.
+try { Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -Confirm:$false | Out-Null } catch { }
+$viServer = Connect-VIServer -Server $server -User $user -Password $pass -Force
 $connected = $true
+# The report runs against a vCenter ('vpx') or a single ESXi host ('embeddedEsx'). Everything it reads
+# works on both; on a standalone host it adds a note that there is no vCenter (no VM folders).
+$isStandaloneEsx = ("$($viServer.ProductLine)" -eq 'embeddedEsx')
 Write-Progress -Id 10 -Activity "VMware report: $Site" -Status 'Loading inventory' -PercentComplete 5
 #Import-Module -Name ImportExcel #-Scope CurrentUser -Force 
 
@@ -104,6 +111,9 @@ $vInfoList = Get-VM| Sort-Object -Property "Name"
  
 
 $Body = "### VMware`n"
+if ($isStandaloneEsx) {
+  $Body += "`n> Read directly from the ESXi host, without a vCenter: there are no VM folders, so every VM is listed under the host.`n"
+}
 #$Body += "> :warning: You are running HPE Customized Image ESXi 6.0.0 Update 2 version 600.9.5.0.48 released on April 2016 and based on ESXi 6.0.0 Update 2 Vmkernel Release Build 3620759.`n"
 
 
@@ -240,9 +250,18 @@ foreach ($vInfo in $vInfoList) {
   if ( $vInfo.Powerstate -eq "poweredOn") { 
     $Powerstate = "ON"
     # $vMemory = Get-Stat -Entity  $vInfo   -Memory   -IntervalMins 148  | Select-Object * -first 1
-    $usage = ($vInfo | Get-Stat      -Realtime -MaxSamples 1 -Stat "mem.usage.average").Value
-    $active = ($vInfo | Get-Stat      -Realtime -MaxSamples 1 -Stat "mem.active.average").Value
-    $granted = ($vInfo | Get-Stat      -Realtime -MaxSamples 1 -Stat "mem.granted.average").Value
+    # Realtime memory stats come from the host itself. Guard them so a VM or host that does not serve
+    # them (seen on some standalone ESXi hosts) leaves the figures at 0 instead of stopping the report.
+    try {
+      $usage = ($vInfo | Get-Stat -Realtime -MaxSamples 1 -Stat "mem.usage.average" -ErrorAction Stop).Value
+      $active = ($vInfo | Get-Stat -Realtime -MaxSamples 1 -Stat "mem.active.average" -ErrorAction Stop).Value
+      $granted = ($vInfo | Get-Stat -Realtime -MaxSamples 1 -Stat "mem.granted.average" -ErrorAction Stop).Value
+    }
+    catch {
+      $usage = 0
+      $active = 0
+      $granted = 0
+    }
   }
   else {
     $usage = 0

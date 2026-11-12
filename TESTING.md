@@ -13,7 +13,7 @@ Write no client name, server name or address here: the repository holds no clien
 | Lenovo BMC | `BMCreport.ps1` | ⬜ | | Health; the server in Physical System. |
 | Synology NAS | `nas2.ps1` | ✅ | 2026-11-04 | Volumes, disks and the DSM version mark; the NAS in Physical System. With a 2-step verification account: the code asked once, then the next reports sign in without it. |
 | StorMagic SvSAN | `stormagicHealth.ps1` | ⬜ | | VSA and witness state; the VSAs and the witness in Physical System. |
-| VMware vCenter | `vmwarereport.ps1` | ⬜ | | Hosts and VMs; the hosts in Physical System, the VMs in Virtual System. |
+| VMware vCenter / ESXi | `vmwarereport.ps1` | ⬜ | | Hosts and VMs; the hosts in Physical System, the VMs in Virtual System. Both a vCenter and a standalone ESXi host (no vCenter): the host's self-signed certificate is accepted, VMs are listed under the host, and the memory figures fill in or stay 0 without failing. |
 | Microsoft Hyper-V | `hypervreport.ps1` | ✅ | 2026-11-04 | Hosts or cluster nodes and VMs; the hosts in Physical System, the VMs in Virtual System. |
 | Veeam (PowerShell module) | `VeeamReport.ps1` | ⬜ | | Jobs, Backup Copy, SureBackup and licence; Veeam in Software. |
 | Veeam (REST API) | `VeeamRestReport.ps1` | 🔁 | 2026-11-04 | Passed: licence, backup jobs, Backup Copy with the restore points counted, repositories; Veeam in Software. To fix: a failover cluster agent job, refused by the API, is not shown ("no session of it was found"); an Azure Blob repository shows -1,024.00 MB for its capacity and free space instead of n/a. |
