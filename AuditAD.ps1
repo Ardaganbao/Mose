@@ -120,20 +120,23 @@ function Format-Date {
 
 $levels = @{ 0 = '2000'; 1 = '2003 interim'; 2 = '2003'; 3 = '2008'; 4 = '2008 R2'; 5 = '2012'; 6 = '2012 R2'; 7 = '2016'; 10 = '2025' }
 
-Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Domain' -PercentComplete 0
-try {
-    $rootDse = New-LdapEntry 'RootDSE'
-    $defaultNC = "$($rootDse.Properties['defaultNamingContext'].Value)"
-    $configNC = "$($rootDse.Properties['configurationNamingContext'].Value)"
-    $rootNC = "$($rootDse.Properties['rootDomainNamingContext'].Value)"
-    $domainLevel = [int]"$($rootDse.Properties['domainFunctionality'].Value)"
-    $forestLevel = [int]"$($rootDse.Properties['forestFunctionality'].Value)"
-    $answeringDc = "$($rootDse.Properties['dnsHostName'].Value)"
-}
-catch {
+# Any failure below is reported with the step it was reading, so an opaque error (for example
+# "Cannot index into a null array" from one odd record) points at where to look. $adStep names the
+# current step; steps that may fail on their own (the Recycle Bin) handle it themselves.
+$script:adStep = 'the domain'
+trap {
     $where = if ($Server) { $Server } else { "the domain of $env:COMPUTERNAME" }
-    throw "Active Directory of $where could not be read: $($_.Exception.Message.Trim())"
+    throw "Active Directory of $where could not be read while reading $($script:adStep): $("$($_.Exception.Message)".Trim())"
 }
+
+Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Domain' -PercentComplete 0
+$rootDse = New-LdapEntry 'RootDSE'
+$defaultNC = "$($rootDse.Properties['defaultNamingContext'].Value)"
+$configNC = "$($rootDse.Properties['configurationNamingContext'].Value)"
+$rootNC = "$($rootDse.Properties['rootDomainNamingContext'].Value)"
+$domainLevel = [int]"$($rootDse.Properties['domainFunctionality'].Value)"
+$forestLevel = [int]"$($rootDse.Properties['forestFunctionality'].Value)"
+$answeringDc = "$($rootDse.Properties['dnsHostName'].Value)"
 if (-not $defaultNC) {
     throw "No Active Directory domain answered$(if ($Server) { " at $Server" })."
 }
@@ -154,6 +157,7 @@ catch {
     # Before Windows Server 2008 R2 there is no Recycle Bin.
 }
 
+$script:adStep = 'the domain controllers'
 Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Domain controllers' -PercentComplete 10
 $controllers = @(Find-LdapObject -Base $defaultNC -Filter '(&(objectCategory=computer)(|(userAccountControl:1.2.840.113556.1.4.803:=8192)(userAccountControl:1.2.840.113556.1.4.803:=67108864)))' -Properties name, dNSHostName, operatingSystem, operatingSystemVersion, lastLogonTimestamp, userAccountControl |
         Sort-Object -Property name | ForEach-Object {
@@ -168,6 +172,7 @@ $controllers = @(Find-LdapObject -Base $defaultNC -Filter '(&(objectCategory=com
             }
         })
 
+$script:adStep = 'the users'
 Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Users' -PercentComplete 25
 $users = @(Find-LdapObject -Base $defaultNC -Filter '(&(objectCategory=person)(objectClass=user))' -Properties sAMAccountName, displayName, userPrincipalName, userAccountControl, lastLogonTimestamp, pwdLastSet, whenCreated, description, servicePrincipalName, objectSid, mail |
         ForEach-Object {
@@ -195,6 +200,7 @@ $users = @(Find-LdapObject -Base $defaultNC -Filter '(&(objectCategory=person)(o
         } | Sort-Object -Property Login)
 
 # The privileged groups, by their well-known SIDs (their names depend on the language of the domain).
+$script:adStep = 'the privileged groups'
 Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Privileged groups' -PercentComplete 45
 $privilegedSids = [ordered]@{
     "$domainSid-512" = 'Domain Admins'
@@ -223,6 +229,7 @@ $privileged = @(foreach ($sid in $privilegedSids.Keys) {
     })
 $adminLogins = @($privileged | Where-Object { $_.Group -in 'Domain Admins', 'Enterprise Admins', 'Administrators' } | ForEach-Object { $_.Members } | Select-Object -Unique)
 
+$script:adStep = 'the computers'
 Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Computers' -PercentComplete 60
 $computers = @(Find-LdapObject -Base $defaultNC -Filter '(objectCategory=computer)' -Properties name, dNSHostName, operatingSystem, operatingSystemVersion, lastLogonTimestamp, userAccountControl, whenCreated, 'ms-Mcs-AdmPwdExpirationTime', 'msLAPS-PasswordExpirationTime' |
         ForEach-Object {
@@ -239,6 +246,7 @@ $computers = @(Find-LdapObject -Base $defaultNC -Filter '(objectCategory=compute
             }
         } | Sort-Object -Property Name)
 
+$script:adStep = 'the group policies'
 Write-Progress -Id 30 -Activity 'Active Directory audit' -Status 'Group policies' -PercentComplete 80
 $policies = @(Find-LdapObject -Base "CN=Policies,CN=System,$defaultNC" -Filter '(objectClass=groupPolicyContainer)' -Properties displayName, whenChanged, flags |
         ForEach-Object { [pscustomobject]@{ Name = $_.displayName; Changed = $_.whenChanged; Disabled = [int]$_.flags -eq 3 } } | Sort-Object -Property Name)
@@ -246,6 +254,7 @@ $krbtgt = $users | Where-Object { $_.Rid -eq 502 } | Select-Object -First 1
 $builtinAdmin = $users | Where-Object { $_.Rid -eq 500 } | Select-Object -First 1
 $guest = $users | Where-Object { $_.Rid -eq 501 } | Select-Object -First 1
 $syncAccounts = @($users | Where-Object { $_.Login -match '^(MSOL_|Sync_|AAD_|provAgentgMSA)' })
+$script:adStep = 'the results'
 Write-Progress -Id 30 -Activity 'Active Directory audit' -Completed
 
 # The people's accounts: not krbtgt, Guest or the sync accounts.
