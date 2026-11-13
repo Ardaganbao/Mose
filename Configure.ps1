@@ -116,6 +116,80 @@ function Read-CommvaultSecret {
 }
 
 # Asks for one server of a module; returns $null when it is skipped.
+# Lists the maintenance plans on a SQL Server (sqlmaintenance.ps1 -ListPlans), lets the user tick which
+# to show on the report and over how many days, and returns @{ Plans = <names, empty for all>; Days }.
+# $null only when the plans could not be read and the user does not keep the server.
+function Read-SqlMaintenancePlans {
+    param(
+        [string]$Server,
+        [pscredential]$Credential
+    )
+
+    $scriptPath = Join-Path $PSScriptRoot 'sqlmaintenance.ps1'
+    Write-Host "Reading the maintenance plans of $Server..." -ForegroundColor DarkGray
+    try {
+        $listParameters = @{ Server = $Server; ListPlans = $true }
+        if ($Credential) {
+            $listParameters.Credential = $Credential
+        }
+        $available = @(& $scriptPath @listParameters | ForEach-Object { "$_" } | Where-Object { $_.Trim() })
+    }
+    catch {
+        Write-Host "Could not read the maintenance plans: $($_.Exception.Message)" -ForegroundColor Yellow
+        if (-not (Read-YesNo 'Keep this SQL Server anyway (the report then shows every plan, 16 days)?')) {
+            return $null
+        }
+        return @{ Plans = @(); Days = 16 }
+    }
+
+    $days = 16
+    [void][int]::TryParse((Read-Answer 'Days of maintenance plan history to show in the report' '16'), [ref]$days)
+    if ($days -lt 1 -or $days -gt 365) {
+        $days = 16
+    }
+    if ($available.Count -eq 0) {
+        Write-Host "No maintenance plan on $Server`: the report will say so." -ForegroundColor Yellow
+        return @{ Plans = @(); Days = $days }
+    }
+
+    Write-Host "Maintenance plans on $Server`:" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $available.Count; $i++) {
+        Write-Host ("  {0}. {1}" -f ($i + 1), $available[$i])
+    }
+    $answer = Read-Answer 'Numbers to show on the report (e.g. 1,3), A for all, Enter for all'
+    if (-not $answer -or $answer -match '^[Aa]$') {
+        return @{ Plans = @(); Days = $days }
+    }
+    $picked = New-Object System.Collections.Generic.List[string]
+    foreach ($part in @($answer -split '[,;\s]+' | Where-Object { $_ })) {
+        $number = 0
+        if ([int]::TryParse($part, [ref]$number) -and $number -ge 1 -and $number -le $available.Count -and -not $picked.Contains($available[$number - 1])) {
+            $picked.Add($available[$number - 1])
+        }
+    }
+    if ($picked.Count -eq 0) {
+        Write-Host 'No valid number: the report shows every plan.' -ForegroundColor Yellow
+        return @{ Plans = @(); Days = $days }
+    }
+    return @{ Plans = $picked.ToArray(); Days = $days }
+}
+
+# Sets a property on a target, adding it when it is not there yet.
+function Set-TargetProperty {
+    param(
+        [object]$Target,
+        [string]$Name,
+        $Value
+    )
+
+    if ($Target.PSObject.Properties[$Name]) {
+        $Target.$Name = $Value
+    }
+    else {
+        $Target | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+    }
+}
+
 function Read-Target {
     param(
         [string]$Module,
@@ -138,8 +212,21 @@ function Read-Target {
     if (-not $server) {
         return $null
     }
-    if (@($targets | Where-Object { $_.Module -eq $Module -and $_.Server -eq $server }).Count -gt 0) {
-        Write-Host "Skipped: $label $server is already configured." -ForegroundColor Yellow
+    $existing = @($targets | Where-Object { $_.Module -eq $Module -and $_.Server -eq $server })
+    if ($existing.Count -gt 0) {
+        # SQL Server: re-check its maintenance plans (the only way to change them after the first time).
+        if ($Module -eq 'SqlMaint' -and (Read-YesNo "$label $server is already configured. Re-check its maintenance plans?")) {
+            $sqlCredential = if ($existing[0].Secret) { Get-Secret -Vault $MoseVaultName -Name $existing[0].Secret } else { $null }
+            $selection = Read-SqlMaintenancePlans -Server $server -Credential $sqlCredential
+            if ($selection) {
+                Set-TargetProperty -Target $existing[0] -Name 'Plans' -Value @($selection.Plans)
+                Set-TargetProperty -Target $existing[0] -Name 'Days' -Value $selection.Days
+                Write-Host "Updated the maintenance plans of $server ($(if ($selection.Plans.Count) { "$($selection.Plans.Count) plan(s)" } else { 'all plans' }), $($selection.Days) days)." -ForegroundColor Green
+            }
+        }
+        else {
+            Write-Host "Skipped: $label $server is already configured." -ForegroundColor Yellow
+        }
         return $null
     }
 
@@ -177,6 +264,17 @@ function Read-Target {
     }
     elseif ($Module -in 'VMware', 'HyperV') {
         $target | Add-Member -NotePropertyName Site -NotePropertyValue (Read-Answer 'Site name shown in the report' 'main')
+    }
+    elseif ($Module -eq 'SqlMaint') {
+        # List the maintenance plans and tick the ones to show; stored with the target, re-checked only here.
+        $sqlCredential = if ($target.Secret) { Get-Secret -Vault $MoseVaultName -Name $target.Secret } else { $null }
+        $selection = Read-SqlMaintenancePlans -Server $server -Credential $sqlCredential
+        if (-not $selection) {
+            Write-Host "Skipped: $label $server." -ForegroundColor Yellow
+            return $null
+        }
+        $target | Add-Member -NotePropertyName Plans -NotePropertyValue @($selection.Plans)
+        $target | Add-Member -NotePropertyName Days -NotePropertyValue $selection.Days
     }
 
     return $target

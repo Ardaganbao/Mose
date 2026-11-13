@@ -8,7 +8,13 @@ param (
 
     [Parameter(HelpMessage = 'Days of maintenance plan history in the report.')]
     [ValidateRange(1, 365)]
-    [int]$Days = 16
+    [int]$Days = 16,
+
+    [Parameter(HelpMessage = 'Only these maintenance plans are shown (chosen in the configuration). Empty: all of them.')]
+    [string[]]$Plans,
+
+    [Parameter(HelpMessage = 'List the maintenance plans on the server and return (for the configuration), instead of the report.')]
+    [switch]$ListPlans
 )
 
 # SQL Server maintenance plans: their runs of the last $Days days, read from msdb (the Maintenance
@@ -52,6 +58,16 @@ ORDER BY l.start_time DESC;
                 ProductUpdateLevel = [string]$reader['ProductUpdateLevel']
                 AlwaysOn           = ($reader['IsHadrEnabled'] -isnot [System.DBNull]) -and [int]$reader['IsHadrEnabled'] -eq 1
             }
+        }
+        $reader.Close()
+
+        # The maintenance plans on the server, for the configuration to list and the report to keep to.
+        $plansQuery = "SELECT name AS PlanName FROM msdb.dbo.sysmaintplan_plans WHERE name IS NOT NULL AND LEN(name) > 0 ORDER BY name;"
+        $command = $connection.CreateCommand()
+        $command.CommandText = $plansQuery
+        $reader = $command.ExecuteReader()
+        while ($reader.Read()) {
+            [pscustomobject]@{ AvailablePlan = [string]$reader['PlanName'] }
         }
         $reader.Close()
 
@@ -168,10 +184,22 @@ try {
         $builder['Integrated Security'] = $true
         $results = @(& $readMaintenanceLog $builder.ConnectionString $Days)
     }
+    # The plans on the server. -ListPlans (the configuration) wants only these, to pick from.
+    $availablePlans = @($results | Where-Object { $_.PSObject.Properties['AvailablePlan'] } | ForEach-Object { "$($_.AvailablePlan)" } | Where-Object { $_ } | Sort-Object -Unique)
+    if ($ListPlans) {
+        Write-Progress -Id 10 -Activity $progressActivity -Completed
+        return $availablePlans
+    }
+
     # Typed again: from the process of another account they come back deserialized.
     $runs = @($results | Where-Object { $_.PSObject.Properties['PlanName'] } | ForEach-Object {
             [pscustomobject]@{ PlanName = $_.PlanName; SubPlanName = $_.SubPlanName; StartTime = [datetime]$_.StartTime; Finished = [bool]$_.Finished; Succeeded = [bool]$_.Succeeded }
         })
+    # Only the plans chosen in the configuration, when some were; empty means all of them.
+    $chosenPlans = @($Plans | Where-Object { $_ })
+    if ($chosenPlans.Count) {
+        $runs = @($runs | Where-Object { $chosenPlans -contains $_.PlanName })
+    }
 
     # For the report's Software table (Report.ps1).
     $info = $results | Where-Object { $_.PSObject.Properties['ProductVersion'] } | Select-Object -First 1
@@ -183,8 +211,11 @@ try {
     Write-Progress -Id 10 -Activity $progressActivity -Status 'Building the report' -PercentComplete 80
     $rows = @(ConvertTo-MaintenanceRows -Runs $runs)
     $Body = "## Maintenance plan - $Days Days:`n"
+    if ($chosenPlans.Count) {
+        $Body += "Plans shown (chosen in the configuration): $(($chosenPlans | Sort-Object) -join ', ').`n"
+    }
     if ($rows.Count -eq 0) {
-        $Body += "No maintenance plan ran in the last $Days days.`n"
+        $Body += "$(if ($chosenPlans.Count) { 'The chosen maintenance plans have no run' } else { 'No maintenance plan ran' }) in the last $Days days.`n"
     }
     else {
         $Body += "| Date       | Severity | Plan Name |`n"

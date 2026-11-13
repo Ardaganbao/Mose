@@ -19,7 +19,7 @@ Write no client name, server name or address here: the repository holds no clien
 | Veeam (REST API) | `VeeamRestReport.ps1` | 🔁 | 2026-11-04 | Passed: licence, backup jobs, Backup Copy with the restore points counted, repositories; Veeam in Software. To fix: a failover cluster agent job, refused by the API, is not shown ("no session of it was found"); an Azure Blob repository shows -1,024.00 MB for its capacity and free space instead of n/a. |
 | Commvault Cloud | `CommvaultCloud report.ps1` | ✅ | 2026-11-04 | The licenses from the Subscriptions CSV (asked once, then reused), SLA and job history; its lines and `Commvault API time:` on screen and in the debug log. |
 | Commvault on-premises | `CommvaultCloud report.ps1` | ⬜ | | The same report with a Command Center access token. |
-| SQL Server maintenance plans | `sqlmaintenance.ps1` | ⬜ | | The plan runs of the last 16 days; SQL Server in Software. |
+| SQL Server maintenance plans | `sqlmaintenance.ps1` | ⬜ | | Configuring it lists the server's maintenance plans; ticking some (and a number of days) saves the choice in the vault; the report shows only those plans over those days; re-adding the server in `.\Start.ps1 -Configure` re-checks the plans; a server with no plan, and one unreachable (kept with "all plans"). SQL Server in Software. |
 
 ## To do
 

@@ -33,7 +33,7 @@ Keep it that way: never commit a client name, IP address, host name or user name
 | `VeeamReport.ps1` | Module: Veeam Backup & Replication, with the Veeam PowerShell module (on the Veeam server, or there over PowerShell remoting). |
 | `VeeamRestReport.ps1` | Module: Veeam Backup & Replication over its REST API; SureBackup through `VeeamReport.ps1`. |
 | `CommvaultCloud report.ps1` | Module: Commvault Cloud and on-premises. |
-| `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the last 16 days, from msdb), and the SQL Server version. |
+| `sqlmaintenance.ps1` | Module: SQL Server maintenance plans (the runs of the plans chosen in the configuration, over the chosen number of days, from msdb), and the SQL Server version. |
 | `Renew-CommvaultToken.ps1` | Weekly renewal of the Commvault Cloud tokens (scheduled task). |
 | `tests\Test-ClientVaults.ps1` | [Tests of the client vaults](#several-clients-on-one-computer) (`-MultiClientMode`), with a stand-in vault. Not copied to the client computers. |
 | `TESTING.md` | Which modules were tested against a real server, and when. Not copied to the client computers. |
@@ -123,7 +123,9 @@ PowerShell remoting only connects to an IP address that is in this computer's Tr
 
 ### SQL Server maintenance plans
 
-Enter the SQL Server: the cluster or host name, `HOST\INSTANCE` for a named instance, with `,port` if it is not the default one. The report reads the maintenance plan runs of the last 16 days from `msdb` (the Maintenance Plans log of the Management Studio log viewer): one row per plan and day, `Success` when every run of the plan that day succeeded, else one `error` row per failed subplan (`plan - subplan`). A subplan that runs every few hours adds no rows while it succeeds.
+Enter the SQL Server: the cluster or host name, `HOST\INSTANCE` for a named instance, with `,port` if it is not the default one. The configuration then lists the maintenance plans on the server, and you tick the ones to show on the report (numbers like `1,3`, or `A`/Enter for all) and over how many days (16 by default). The choice is saved with the client configuration in the vault, so the report shows only those plans without asking again. The report reads the chosen plans' runs from `msdb` (the Maintenance Plans log of the Management Studio log viewer): one row per plan and day, `Success` when every run of the plan that day succeeded, else one `error` row per failed subplan (`plan - subplan`). A subplan that runs every few hours adds no rows while it succeeds.
+
+To change the plans or the period later, run `.\Start.ps1 -Configure`, pick the SQL Server module and enter the same server: it offers to re-check its maintenance plans. (That is the only place they are re-read; a report run never re-lists them.)
 
 It connects as the Windows account running the report, or with a SQL Server login, or as another Windows account (`DOMAIN\user`, the query then runs in a process of that account). The account needs to read `msdb`, for example through its `db_datareader` role.
 

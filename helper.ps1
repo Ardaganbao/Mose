@@ -613,6 +613,16 @@ function Invoke-MoseModule {
             if ($Credential) {
                 $sqlParameters.Credential = $Credential
             }
+            # The maintenance plans and the period chosen in the configuration (Configure.ps1); empty Plans
+            # means all of them.
+            $sqlPlans = @(Get-MoseProperty $Target 'Plans' | Where-Object { $_ })
+            if ($sqlPlans.Count) {
+                $sqlParameters.Plans = $sqlPlans
+            }
+            $sqlDays = Get-MoseProperty $Target 'Days'
+            if ($sqlDays) {
+                $sqlParameters.Days = [int]$sqlDays
+            }
             & $scriptPath @sqlParameters
         }
         'VeeamApi' {
