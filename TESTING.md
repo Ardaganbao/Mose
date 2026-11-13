@@ -23,7 +23,7 @@ Write no client name, server name or address here: the repository holds no clien
 
 ## IT audit
 
-`tests\Test-Audit.ps1` tests the audit on one computer, with fake devices and made-up computers (see [Test the audit](README.md#test-the-audit)): its 230 checks passed on 2026-11-09. What still needs a real client network:
+`tests\Test-Audit.ps1` tests the audit on one computer, with fake devices and made-up computers (see [Test the audit](README.md#test-the-audit)): its 232 checks passed on 2026-11-13. What still needs a real client network:
 
 | Part | Script | Status | Last tested | To check |
 |---|---|---|---|---|

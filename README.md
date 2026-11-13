@@ -173,8 +173,8 @@ cd $HOME\Mose
 .\Start.ps1 -MultiClientMode  # update, then pick a client vault and run its report (several clients here)
 .\Start.ps1 -Keeper      # update, then import or export Keeper entries over its API (not the report)
 .\Start.ps1 -Keeper -Gui # the same in a window, also opened by Keeper import/export in the Script Manager
-.\Start.ps1 -Audit       # update, then the IT audit of a client (see IT audit)
-.\Start.ps1 -Audit -Gui  # the same in a window
+.\Start.ps1 -Audit       # update, then the IT audit of a client in a window (see IT audit)
+.\Start.ps1 -Audit -Console  # the same in the terminal instead of the window
 .\Start.ps1 -Gui         # update, then open the Script Manager
 .\Manager.ps1            # open the Script Manager without updating
 .\Start.ps1 -UpdateOnly  # update only
@@ -283,20 +283,21 @@ The text of their section (`W`) goes before them, e.g. a schema of the network. 
 `Audit.ps1` audits a client from nothing, for example a new client. It is independent of the monthly report: no configuration, no vault. Run it on a computer plugged into the client's network:
 
 ```powershell
-.\Start.ps1 -Audit                                  # update, then audit: asks for the client and the logins
-.\Audit.ps1 -Client Contoso -Domain contoso.be      # the same without updating
+.\Start.ps1 -Audit                                  # update, then audit in a window (the default): the client and logins are entered there
+.\Start.ps1 -Audit -Console                         # the same in the terminal instead of the window
+.\Audit.ps1 -Client Contoso -Domain contoso.be      # the same without updating (Audit.ps1 runs in the terminal; -Gui for the window)
 .\Audit.ps1 -Client Contoso -Subnet 192.0.2.0/24 -ADServer 192.0.2.10 -Skip Microsoft365
 .\Audit.ps1 -Client Contoso -AddSubnet 10.0.20.0/24, 10.0.30.0/24 -Skip SpeedTest
 .\Start.ps1 -Audit -AddSubnet 10.0.20.0/24 -Skip SpeedTest   # the audit's options also work after -Audit
 ```
 
-The speed test runs unless `-Skip SpeedTest`; there is no option to turn it on. An older `Start.ps1` doesn't know the audit's options (`A parameter cannot be found that matches parameter name 'AddSubnet'`): update it first with `.\Start.ps1 -UpdateOnly`.
+`.\Start.ps1 -Audit` opens the audit window; add `-Console` to run it in the terminal. The speed test runs unless `-Skip SpeedTest`; there is no option to turn it on. An older `Start.ps1` doesn't know the audit's options (`A parameter cannot be found that matches parameter name 'AddSubnet'`): update it first with `.\Start.ps1 -UpdateOnly`.
 
 Or click **IT audit** in the Script Manager. The first `-Audit` downloads the audit scripts; later runs of `Start.ps1` keep them up to date.
 
 ### The audit window
 
-`.\Start.ps1 -Audit -Gui` (or `.\Audit.ps1 -Gui`, or **IT audit** in the Script Manager) opens the audit in a window, like Keeper's. Every answer is entered first: the client and the folder, the parts to run, the networks (instead of or as well as this computer's, and whether to scan the other networks seen), the SNMP community, the domain controller, a domain account and an administrator account, the Microsoft 365 tenant and the public domains. **Run the audit** then runs `Audit.ps1` in the background with these answers (`-NonInteractive`, `-ScanOtherNetworks`, `-Microsoft365`), so it asks nothing more; its messages go to the window's log, its progress to the status line, and **Stop** stops it. Once it is done, **Open the audit**, **Open the diagram** and **Open the folder**. The audit's options given with `-Gui` fill the window in. Nothing typed in the window is saved; the passwords and the community stay in its memory. Microsoft 365's sign-in window opens during the audit (it may open behind the audit window); when the Graph module is missing, the window offers to install it first.
+`.\Start.ps1 -Audit` opens the audit in a window by default (also `.\Audit.ps1 -Gui`, or **IT audit** in the Script Manager); `.\Start.ps1 -Audit -Console` runs it in the terminal instead. The window is like Keeper's. Every answer is entered first: the client and the folder, the parts to run, the networks (instead of or as well as this computer's, and whether to scan the other networks seen), the SNMP community, the domain controller, a domain account and an administrator account, the Microsoft 365 tenant and the public domains. **Run the audit** then runs `Audit.ps1` in the background with these answers (`-NonInteractive`, `-ScanOtherNetworks`, `-Microsoft365`), so it asks nothing more; its messages go to the window's log, its progress to the status line, and **Stop** stops it. Once it is done, **Open the audit**, **Open the diagram** and **Open the folder**. The audit's options given with `-Gui` fill the window in. Nothing typed in the window is saved; the passwords and the community stay in its memory. Microsoft 365's sign-in window opens during the audit (it may open behind the audit window); when the Graph module is missing, the window offers to install it first.
 
 Its second tab, **On-site checklist**, is the "To complete on site" list of an audit: the one just run, another of the folder, or one found with **Browse...**, so that it can be completed on site over several days. Each item is ticked **Done** or **Skip** (not for this client), with a **Note**. Each change is saved in the audit at once: a done item becomes `- [x]`, a skipped one is struck through with `(skipped)`, and its note goes on a line under it (`  - Note: ...`), so that the audit handed over says what is done. **Hide what is done or skipped** only hides them in the window; the counts say how many are done, skipped and left. Close the audit in Notepad before ticking in the window: saving it in Notepad afterwards would write back the old list.
 

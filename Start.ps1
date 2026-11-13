@@ -74,9 +74,13 @@ param(
     [switch]$Keeper,
 
     # Run the IT audit of a client (Audit.ps1) after updating, instead of the report. The audit scripts
-    # are downloaded the first time.
+    # are downloaded the first time. The audit opens in a window by default; -Console runs it in the terminal.
     [Parameter()]
     [switch]$Audit,
+
+    # Run the audit in the terminal instead of its window (the window is the default with -Audit).
+    [Parameter()]
+    [switch]$Console,
 
     # The audit's own options, passed on to Audit.ps1 with -Audit (Audit.ps1 says what each one does),
     # e.g. .\Start.ps1 -Audit -AddSubnet 10.0.20.0/24 -Skip SpeedTest.
@@ -389,9 +393,9 @@ elseif (-not $Quiet) {
     Write-Host "                           then its report; with -Configure, its configuration" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper      Import or export Keeper entries over its API" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Keeper -Gui The same in a window" -ForegroundColor DarkGray
-    Write-Host "  .\Start.ps1 -Audit       Audit a client's network, Active Directory, servers and computers, Microsoft 365 and domains" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Audit       Audit a client's network, AD, servers, Microsoft 365 and domains (opens the audit window)" -ForegroundColor DarkGray
+    Write-Host "  .\Start.ps1 -Audit -Console  The same in the terminal instead of the window" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Audit -AddSubnet 10.0.20.0/24  The audit's options (see Audit.ps1) work here too" -ForegroundColor DarkGray
-    Write-Host "  .\Start.ps1 -Audit -Gui  The same in a window" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -Gui         Open the Script Manager to turn reports on/off and run them" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -UpdateOnly  Update without running anything" -ForegroundColor DarkGray
     Write-Host "  .\Start.ps1 -SkipUpdate  Run without checking GitHub" -ForegroundColor DarkGray
@@ -664,14 +668,16 @@ if ($Keeper) {
 }
 
 if ($Audit) {
-    # The audit's options given to Start.ps1 go on to it; -Gui: its window instead of its questions.
+    # The audit's options given to Start.ps1 go on to it.
     $auditParameters = @{}
     foreach ($name in $auditOptions) {
         if ($PSBoundParameters.ContainsKey($name)) {
             $auditParameters[$name] = $PSBoundParameters[$name]
         }
     }
-    if ($Gui) {
+    # The window is the default; -Console runs it in the terminal, and -NonInteractive always runs
+    # headless (the window needs someone), so it stays in the terminal too.
+    if ($Gui -or (-not $Console -and -not $NonInteractive)) {
         $auditParameters.Gui = $true
     }
     & (Join-Path $PSScriptRoot "Audit.ps1") @auditParameters
