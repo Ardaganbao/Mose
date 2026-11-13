@@ -57,6 +57,42 @@ What no test on one computer can show. Tick each item, note what went wrong in t
 - [ ] The audit read by a technician: each finding true, its severity fair, nothing important missing.
 - [ ] Once on a French or Dutch Windows: the Wi-Fi labels read, and a refused computer says "access denied".
 
+## IT audit
+
+`tests\Test-Audit.ps1` tests the audit on one computer, with fake devices and made-up computers, and `tests\Test-AuditDevices.ps1` the device-reading engine with stand-in modules (see [Test the audit](README.md#test-the-audit)): their 233 + 31 checks passed on 2026-11-13. What still needs a real client network:
+
+| Part | Script | Status | Last tested | To check |
+|---|---|---|---|---|
+| Network | `AuditNetwork.ps1` | ⬜ | | A full scan of a client network; real switches, UPS and printers over SNMP (models, VLANs, LLDP/CDP neighbours, battery); UPnP and WS-Discovery devices (printers, cameras); the other networks offered and scanned behind the firewall; the diagram opened in draw.io. |
+| Device details | `AuditDevices.ps1` | ⬜ | | A real iLO, iDRAC, Lenovo BMC, Synology NAS, standalone ESXi, vCenter and Veeam read in depth with their module, from the console and from the window's Devices tab (logins by type and by address, a mix); a Hyper-V host and a SQL Server added by hand; a wrong login or a missing component (PowerCLI, the Veeam module) loses only that device. |
+| Speed test | `AuditNetwork.ps1` | ⬜ | | `librespeed-cli` downloaded, checked and run (`-RunSpeedTest` of the tests, or a real audit); not blocked by the antivirus. |
+| Active Directory | `AuditAD.ps1` | ⬜ | | A real domain, from a computer in it and from one outside it (`-ADServer`). |
+| Servers and computers | `AuditInventory.ps1` | 🔁 | 2026-11-07 | Read this computer over DCOM; its findings checked with made-up computers. To check: servers over WinRM (roles, software, SQL Server, a UPS on USB), computers over DCOM from outside the domain, and a computer refusing the account. |
+| Microsoft 365 | `AuditM365.ps1` | ⬜ | | A real tenant with a Global Reader of the client; and with a partner (CSP) account through GDAP: refused with `AADSTS90099` (and the audit saying what to do) before the client's consent, then reading the client's tenant after it. |
+| Domains and e-mail | `AuditDomain.ps1` | ✅ | 2026-11-03 | Public domains. |
+
+### The first audit on a real client network
+
+What no test on one computer can show. Tick each item, note what went wrong in the To do list below, and write no client name or address here.
+
+- [ ] Agreed on the scan with the client beforehand; its firewall or intrusion detection said nothing, or what it said is noted.
+- [ ] A network of a few hundred devices: how long the scan took, and no device missed that is known to be there.
+- [ ] Switches, UPS and printers of several makers over SNMP: their model, serial number, firmware, VLANs, LLDP/CDP neighbours and UPS battery are right (compare with their web page). Note the makers that gave nothing.
+- [ ] UPnP and WS-Discovery answered through this computer's firewall: printers and cameras show their maker and model.
+- [ ] The other networks offered after the scan are the client's VLANs (not this computer's VPN), and scanning one behind the firewall finds its devices.
+- [ ] The speed test ran: not blocked by the antivirus or SmartScreen, through the client's proxy if any, and close to the line's speed when this computer is wired.
+- [ ] Servers read over WinRM with a domain administrator: roles, installed software, SQL Server and a UPS on USB are right.
+- [ ] Computers read over DCOM from a computer outside the domain; one refusing the account says why.
+- [ ] A large domain (hundreds of computers): the inventory ends in reasonable time.
+- [ ] Device details: a real iLO, iDRAC, Lenovo BMC, Synology NAS, standalone ESXi, vCenter and Veeam read in depth with their module, from the console (a login asked per device) and from the window's **Devices** tab (logins by type and by address, a mix); a Hyper-V host and a SQL Server added by hand with an address; the module's section appears in the audit, and a wrong login or a missing component (PowerCLI, the Veeam module) loses only that device, not the audit.
+- [ ] Active Directory read from outside the domain with `-ADServer` and a domain account.
+- [ ] Microsoft 365: the consent the first time in the tenant, then a Global Reader's sign-in; and a partner (CSP) account with the client's tenant given: the refusal before the consent explained, the client's tenant (not the partner's) read after it. The sign-in window opening from the part's own PowerShell, from the console and from the audit window; a sign-in page left open for 3 minutes: only Microsoft 365 lost, the rest of the audit written.
+- [ ] The diagram opened in draw.io: readable, and a useful start to draw the real network.
+- [ ] The prompts in a console (`.\Start.ps1 -Audit`): the SNMP community typed hidden, the Get-Credential windows, each question clear.
+- [ ] The audit window (`.\Start.ps1 -Audit`, the default now, or the Script Manager's **IT audit** button; `-Console` for the terminal): readable on this screen and its scaling, the whole audit run from it, the Devices tab's logins used, Microsoft 365's sign-in window opening from it, and its on-site checklist completed on site (the ticks, skips and notes in the audit handed over).
+- [ ] The audit read by a technician: each finding true, its severity fair, nothing important missing.
+- [ ] Once on a French or Dutch Windows: the Wi-Fi labels read, and a refused computer says "access denied".
+
 ## To do
 
 - Commvault Cloud: how the storage used evolved over one year.
