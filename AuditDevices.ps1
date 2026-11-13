@@ -73,6 +73,56 @@ function ConvertTo-AuditModuleParameters {
     throw "No module is known for '$Key'."
 }
 
+# The devices to read in depth, from the scan and the logins given by hand. Each scanned device whose
+# type a module reads becomes a target; each given login for an address the scan did not surface (a
+# Hyper-V host, a vCenter by name, a SQL Server) is added too. One target per address, in that order.
+# $Devices: the scan's device objects (Address, Name, Type). $DeviceLogin: @{ Key; Address; Credential }.
+function Get-AuditDeviceTargets {
+    param(
+        [object[]]$Devices = @(),
+        [object[]]$DeviceLogin = @()
+    )
+
+    $targets = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($device in @($Devices)) {
+        $key = Get-AuditDeviceModule "$($device.Type)"
+        $address = "$($device.Address)"
+        if ($key -and $address -and -not $seen[$address]) {
+            $targets.Add([pscustomobject]@{ Key = $key; Address = $address; Name = "$($device.Name)"; Label = $auditDeviceModules[$key].Label })
+            $seen[$address] = $true
+        }
+    }
+    foreach ($login in @($DeviceLogin)) {
+        $key = "$($login.Key)"
+        $address = "$($login.Address)"
+        if ($address -and -not $seen[$address] -and $auditDeviceModules.Contains($key)) {
+            $targets.Add([pscustomobject]@{ Key = $key; Address = $address; Name = ''; Label = $auditDeviceModules[$key].Label })
+            $seen[$address] = $true
+        }
+    }
+    # .ToArray(), not @($targets): Windows PowerShell throws on @() around a List[object].
+    return $targets.ToArray()
+}
+
+# The login for a target among those given by hand: the one for its address, else the one for its module
+# type with no address, else $null (the console then asks).
+function Get-AuditDeviceLogin {
+    param(
+        [object]$Target,
+        [object[]]$DeviceLogin = @()
+    )
+
+    $match = @($DeviceLogin | Where-Object { "$($_.Address)" -eq "$($Target.Address)" -and $_.Credential }) | Select-Object -First 1
+    if (-not $match) {
+        $match = @($DeviceLogin | Where-Object { "$($_.Key)" -eq "$($Target.Key)" -and -not "$($_.Address)" -and $_.Credential }) | Select-Object -First 1
+    }
+    if ($match) {
+        return $match.Credential
+    }
+    return $null
+}
+
 # What a child PowerShell runs: it imports the module path and the splat (which carries the login, as
 # an encrypted same-user CLIXML file), runs the module, and writes only its Markdown (the strings it
 # returns; the inventory objects are left out). <<SCRIPT>> and <<PARAMS>> are replaced with the paths.

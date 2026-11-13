@@ -33,6 +33,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Off
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+. (Join-Path $PSScriptRoot 'AuditDevices.ps1')
 # Windows PowerShell leaves $PSScriptRoot empty in a parameter's default when run with -File.
 if (-not $OutputPath) {
     $OutputPath = $PSScriptRoot
@@ -190,7 +191,47 @@ $auditPage.Text = 'Audit'
 $tabs.TabPages.Add($auditPage)
 $checkPage = New-Object System.Windows.Forms.TabPage
 $checkPage.Text = 'On-site checklist'
+
+# The Devices tab: logins to read iLO/iDRAC/NAS/ESXi... in depth. One row per login. Added before the
+# checklist so the tabs read Audit, Devices, On-site checklist (Insert before the handle is unreliable).
+$devicePage = New-Object System.Windows.Forms.TabPage
+$devicePage.Text = 'Devices'
+$tabs.TabPages.Add($devicePage)
 $tabs.TabPages.Add($checkPage)
+$deviceGrid = New-Object System.Windows.Forms.DataGridView
+$deviceGrid.Dock = 'Fill'
+$deviceGrid.AllowUserToAddRows = $true
+$deviceGrid.RowHeadersVisible = $false
+$deviceGrid.AutoSizeColumnsMode = 'Fill'
+$deviceGrid.BackgroundColor = [System.Drawing.SystemColors]::Window
+$moduleColumn = New-Object System.Windows.Forms.DataGridViewComboBoxColumn
+$moduleColumn.Name = 'Module'
+$moduleColumn.HeaderText = 'Module'
+$moduleColumn.FillWeight = 26
+$moduleColumn.FlatStyle = 'Flat'
+foreach ($deviceKey in $auditDeviceModules.Keys) {
+    [void]$moduleColumn.Items.Add($auditDeviceModules[$deviceKey].Label)
+}
+$addressColumn = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$addressColumn.Name = 'Address'
+$addressColumn.HeaderText = 'Address (optional)'
+$addressColumn.FillWeight = 22
+$userColumn = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$userColumn.Name = 'User'
+$userColumn.HeaderText = 'User'
+$userColumn.FillWeight = 26
+$passwordColumn = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+$passwordColumn.Name = 'Password'
+$passwordColumn.HeaderText = 'Password'
+$passwordColumn.FillWeight = 26
+[void]$deviceGrid.Columns.AddRange($moduleColumn, $addressColumn, $userColumn, $passwordColumn)
+$devicePage.Controls.Add($deviceGrid)
+$deviceInfo = New-Object System.Windows.Forms.Label
+$deviceInfo.Dock = 'Top'
+$deviceInfo.Height = 60
+$deviceInfo.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
+$deviceInfo.Text = "After the scan, the audit reads a device in depth with its MOSE module. One row per login. Module, then a user and password; an empty address reads every device of that type the scan finds, an address reads one device. Hyper-V, SQL and a vCenter by name need an address. The passwords are shown here and kept in memory only, never saved."
+$devicePage.Controls.Add($deviceInfo)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Dock = 'Bottom'
@@ -426,6 +467,29 @@ $getParameters = {
     }
     if ($partDomains.Checked -and $domainsBox.Text.Trim()) {
         $parameters.Domain = & $split $domainsBox.Text
+    }
+    # The device logins: one per filled-in row (a module, a user and a password). The module label maps
+    # back to its key; the password stays in memory. A row missing one of the three is left out.
+    $deviceLogins = @()
+    foreach ($row in $deviceGrid.Rows) {
+        if ($row.IsNewRow) {
+            continue
+        }
+        $label = "$($row.Cells['Module'].Value)".Trim()
+        $deviceKey = @($auditDeviceModules.Keys | Where-Object { $auditDeviceModules[$_].Label -eq $label }) | Select-Object -First 1
+        $deviceUser = "$($row.Cells['User'].Value)".Trim()
+        $devicePassword = "$($row.Cells['Password'].Value)"
+        if (-not $deviceKey -or -not $deviceUser -or -not $devicePassword) {
+            continue
+        }
+        $secure = New-Object System.Security.SecureString
+        foreach ($character in $devicePassword.ToCharArray()) {
+            $secure.AppendChar($character)
+        }
+        $deviceLogins += [pscustomobject]@{ Key = $deviceKey; Address = "$($row.Cells['Address'].Value)".Trim(); Credential = (New-Object System.Management.Automation.PSCredential($deviceUser, $secure)) }
+    }
+    if ($deviceLogins.Count) {
+        $parameters.DeviceLogin = $deviceLogins
     }
     return $parameters
 }

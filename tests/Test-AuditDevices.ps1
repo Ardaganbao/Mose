@@ -95,6 +95,29 @@ try {
     $p = ConvertTo-AuditModuleParameters -Key 'Veeam' -Server 'veeam01' -Credential $cred
     Test-Value 'Veeam: server and credential' "$($p.Server) $($p.Credential.UserName)" 'veeam01 CONTOSO\svc'
 
+    Write-Section 'Choosing which devices to read'
+    $devs = @(
+        [pscustomobject]@{ Address = '192.0.2.5'; Name = 'ILO5'; Type = 'Server management (iLO)' }
+        [pscustomobject]@{ Address = '192.0.2.9'; Name = 'PR'; Type = 'Printer' }
+        [pscustomobject]@{ Address = '192.0.2.10'; Name = 'NAS'; Type = 'NAS (Synology)' }
+    )
+    $logins = @(
+        [pscustomobject]@{ Key = 'iLO'; Address = ''; Credential = $cred }         # every iLO found
+        [pscustomobject]@{ Key = 'HyperV'; Address = 'HV01'; Credential = $cred }   # a host given by hand
+    )
+    $targets = @(Get-AuditDeviceTargets -Devices $devs -DeviceLogin $logins)
+    Test-Value 'the scanned readable devices and the manual host; the printer is left out' (@($targets | ForEach-Object { "$($_.Key)@$($_.Address)" }) -join ', ') 'iLO@192.0.2.5, NAS@192.0.2.10, HyperV@HV01'
+    Test-Value 'the iLO gets the login given for every iLO' "$((Get-AuditDeviceLogin -Target $targets[0] -DeviceLogin $logins).UserName)" 'CONTOSO\svc'
+    Test-That 'the NAS has no login (none was given for it)' ($null -eq (Get-AuditDeviceLogin -Target $targets[1] -DeviceLogin $logins))
+    Test-Value 'the manual host gets the login for its address' "$((Get-AuditDeviceLogin -Target $targets[2] -DeviceLogin $logins).UserName)" 'CONTOSO\svc'
+    $logins2 = @(
+        [pscustomobject]@{ Key = 'iLO'; Address = ''; Credential = (New-Object System.Management.Automation.PSCredential('by-type', (ConvertTo-SecureString $standIn -AsPlainText -Force))) }
+        [pscustomobject]@{ Key = 'iLO'; Address = '192.0.2.5'; Credential = (New-Object System.Management.Automation.PSCredential('by-address', (ConvertTo-SecureString $standIn -AsPlainText -Force))) }
+    )
+    Test-Value 'a login for the address wins over one for the type' "$((Get-AuditDeviceLogin -Target $targets[0] -DeviceLogin $logins2).UserName)" 'by-address'
+    Test-That 'no devices and no logins: no targets' (@(Get-AuditDeviceTargets).Count -eq 0)
+    Test-Value 'a manual Hyper-V login is kept even without a scan' ((@(Get-AuditDeviceTargets -DeviceLogin @([pscustomobject]@{ Key = 'HyperV'; Address = 'HV02'; Credential = $cred })) | ForEach-Object { "$($_.Key)@$($_.Address)" }) -join ',') 'HyperV@HV02'
+
     Write-Section 'Reading a device in a PowerShell of its own'
     $r = Invoke-AuditDeviceModule -Key 'iLO' -Server '192.0.2.5' -Credential $cred -ScriptRoot $work
     Test-That 'iLO: the module ran and its Markdown came back' (($r.Markdown -join ' | ') -match '### iLO 192\.0\.2\.5') ($r.Markdown -join ' | ')
