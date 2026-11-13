@@ -528,6 +528,10 @@ param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubne
     Test-Value 'the options reach Audit.ps1' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.0/24; Client=Contoso; NonInteractive=True; Skip=SpeedTest'
     $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; Audit = $true; Gui = $true; ScanOtherNetworks = $true; Microsoft365 = $true }
     Test-Value '-Gui and the switches reach Audit.ps1' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: Gui=True; Microsoft365=True; ScanOtherNetworks=True'
+    $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; Audit = $true }
+    Test-Value '-Audit alone opens the window (the window is the default)' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: Gui=True'
+    $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; Audit = $true; Console = $true }
+    Test-Value '-Audit -Console runs in the terminal (no window)' (@($startRun.Output | Where-Object { $_ -like 'AUDIT GOT: *' }) -join '') 'AUDIT GOT: '
     $startRun = & $invoke (Join-Path $startFolder 'Start.ps1') @() @{ SkipUpdate = $true; AddSubnet = @('192.0.2.0/24') }
     Test-That 'an audit option without -Audit is refused' ($startRun.Text -match '-AddSubnet is an option of the IT audit: add -Audit') (($startRun.Output | Select-Object -First 4) -join ' / ')
     Test-That 'and nothing else runs' ($startRun.Text -notmatch 'AUDIT GOT|Report')
