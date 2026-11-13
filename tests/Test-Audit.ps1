@@ -595,7 +595,7 @@ $form.Close()
     $windowFolder = Join-Path $work 'window'
     New-Item -ItemType Directory -Path $windowFolder | Out-Null
     # Audit.ps1 -Gui opens the window with the options given: a stand-in window tells what it got.
-    Copy-Item -LiteralPath (Join-Path $work 'Audit.ps1'), (Join-Path $work 'AuditCommon.ps1') -Destination $windowFolder
+    Copy-Item -LiteralPath (Join-Path $work 'Audit.ps1'), (Join-Path $work 'AuditCommon.ps1'), (Join-Path $work 'AuditDevices.ps1') -Destination $windowFolder
     Set-Content -LiteralPath (Join-Path $windowFolder 'AuditWindow.ps1') -Encoding ASCII -Value @'
 param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [string]$OutputPath, [switch]$ScanOtherNetworks, [switch]$Microsoft365, [switch]$NonInteractive, [switch]$NoOpen)
 'WINDOW GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { "$_=$(@($PSBoundParameters[$_]) -join ',')" }) -join '; ')
@@ -608,9 +608,11 @@ param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubne
     # boxes are kept instead of shown.
     $windowFolder = Join-Path $work 'window-real'
     New-Item -ItemType Directory -Path $windowFolder | Out-Null
+    # The real AuditWindow.ps1 dot-sources AuditDevices.ps1 (for the Devices tab).
+    Copy-Item -LiteralPath (Join-Path $work 'AuditDevices.ps1') -Destination $windowFolder
     Set-Content -LiteralPath (Join-Path $windowFolder 'Audit.ps1') -Encoding ASCII -Value @'
-param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [string]$OutputPath, [switch]$NonInteractive, [switch]$NoOpen, [switch]$ScanOtherNetworks, [switch]$Microsoft365, [switch]$Gui)
-Write-Host ('AUDIT GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { $value = $PSBoundParameters[$_]; if ($value -is [pscredential]) { $value = "$($value.UserName) with a password of $($value.GetNetworkCredential().Password.Length) characters" }; "$_=$(@($value) -join ',')" }) -join '; '))
+param([string]$Client, [string[]]$Domain, [string[]]$Subnet, [string[]]$AddSubnet, [string[]]$SnmpCommunity, [string[]]$Skip, [string]$ADServer, [pscredential]$ADCredential, [pscredential]$AdminCredential, [string]$Tenant, [string]$OutputPath, [switch]$NonInteractive, [switch]$NoOpen, [switch]$ScanOtherNetworks, [switch]$Microsoft365, [switch]$Gui, [object[]]$DeviceLogin)
+Write-Host ('AUDIT GOT: ' + (($PSBoundParameters.Keys | Sort-Object | ForEach-Object { $value = $PSBoundParameters[$_]; if ($value -is [pscredential]) { $value = "$($value.UserName) with a password of $($value.GetNetworkCredential().Password.Length) characters" } elseif ($_ -eq 'DeviceLogin') { $value = (@($value | ForEach-Object { "$($_.Key)@$($_.Address)($($_.Credential.UserName)/$($_.Credential.GetNetworkCredential().Password.Length))" }) -join ',') }; "$_=$(@($value) -join ',')" }) -join '; '))
 Write-Progress -Id 20 -Activity 'Network audit' -Status 'Ping: 10 of 254 addresses'
 Write-Warning 'A warning of the stand-in.'
 Start-Sleep -Milliseconds 900
@@ -643,6 +645,9 @@ $partM365.Checked = $false
 $scanOthers.Checked = $true
 $snmpBox.Text = 'snmp-window-test'
 $domainsBox.Text = 'example.com, example.net'
+[void]$deviceGrid.Rows.Add('HPE iLO', '', 'ILOADMIN', 'ilo-pass')
+[void]$deviceGrid.Rows.Add('Microsoft Hyper-V host', 'HV01', 'TEST\admin', 'hv-pass-1')
+'DEVICE TAB: ' + $tabs.TabPages[1].Text + ', columns ' + (@($deviceGrid.Columns | ForEach-Object { $_.HeaderText }) -join '/')
 $runButton.PerformClick()
 'WHILE RUNNING: run ' + $runButton.Enabled + ', stop ' + $stopButton.Enabled + ', fields ' + $net.Enabled
 $until = (Get-Date).AddSeconds(60)
@@ -688,7 +693,8 @@ $form.Close()
     Test-Value 'the tenant is off with Microsoft 365' (& $line 'TENANT DISABLED: ') 'TENANT DISABLED: True'
     Test-Value 'while running: only Stop' (& $line 'WHILE RUNNING: ') 'WHILE RUNNING: run False, stop True, fields False'
     $logLine = & $line 'LOG: '
-    Test-That 'the answers given as the audit''s options' ($logLine -match [regex]::Escape("AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.10-20; AdminCredential=TEST\admin with a password of 14 characters; Client=Window test; Domain=example.com,example.net; NonInteractive=True; NoOpen=True; OutputPath=$windowFolder; ScanOtherNetworks=True; Skip=SpeedTest,Microsoft365; SnmpCommunity=snmp-window-test ||")) $logLine
+    Test-That 'the answers given as the audit''s options' ($logLine -match [regex]::Escape("AUDIT GOT: AddSubnet=192.0.2.0/24,198.51.100.10-20; AdminCredential=TEST\admin with a password of 14 characters; Client=Window test; DeviceLogin=iLO@(ILOADMIN/8),HyperV@HV01(TEST\admin/9); Domain=example.com,example.net; NonInteractive=True; NoOpen=True; OutputPath=$windowFolder; ScanOtherNetworks=True; Skip=SpeedTest,Microsoft365; SnmpCommunity=snmp-window-test ||")) $logLine
+    Test-Value 'the Devices tab is second, with its columns' (& $line 'DEVICE TAB: ') 'DEVICE TAB: Devices, columns Module/Address (optional)/User/Password'
     Test-That 'its warnings in the log' ($logLine -match 'WARNING: A warning of the stand-in\.')
     Test-That 'its messages in the log, to the end' ($logLine -match 'Written by the stand-in\.')
     Test-That 'done: the audit named' ((& $line 'STATUS: ') -match '^STATUS: Done in [\d.]+ minutes: Window_test_Audit_2026-01-01\.md\. Its on-site checklist is in the second tab\.$') (& $line 'STATUS: ')

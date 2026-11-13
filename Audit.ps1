@@ -15,8 +15,8 @@ param(
     [Parameter(HelpMessage = 'SNMP communities of the client''s devices, from the password manager, tried after "public". Never written to the audit.')]
     [string[]]$SnmpCommunity,
 
-    [Parameter(HelpMessage = 'Parts of the audit not to run. SpeedTest: no speed test of the Internet line.')]
-    [ValidateSet('Network', 'SpeedTest', 'ActiveDirectory', 'Inventory', 'Microsoft365', 'Domains')]
+    [Parameter(HelpMessage = 'Parts of the audit not to run. SpeedTest: no speed test. Devices: no reading of iLO/iDRAC/NAS... in depth.')]
+    [ValidateSet('Network', 'SpeedTest', 'ActiveDirectory', 'Inventory', 'Devices', 'Microsoft365', 'Domains')]
     [string[]]$Skip,
 
     [Parameter(HelpMessage = 'A domain controller or the domain name, when this computer is not in the domain.')]
@@ -47,7 +47,13 @@ param(
     [switch]$Microsoft365,
 
     [Parameter(HelpMessage = 'Open the audit window: every answer in one place, then the audit runs there.')]
-    [switch]$Gui
+    [switch]$Gui,
+
+    # Set by the audit window: logins to read discovered devices in depth, each @{ Key; Address; Credential }.
+    # Key is a module (iLO, iDRAC, BMC, NAS, VMware, Veeam, HyperV, SQL); an empty Address matches every
+    # device of that type, a given Address one device (or a server given by hand). Kept in memory only.
+    [Parameter(DontShow)]
+    [object[]]$DeviceLogin = @()
 )
 
 # IT audit of a client, from nothing: run on a computer plugged into the client's network, it reads
@@ -67,6 +73,7 @@ $ErrorActionPreference = 'Stop'
 # audit expects $null for it. Off for the audit and its parts only.
 Set-StrictMode -Off
 . (Join-Path $PSScriptRoot 'AuditCommon.ps1')
+. (Join-Path $PSScriptRoot 'AuditDevices.ps1')
 # Windows PowerShell leaves $PSScriptRoot empty in a parameter's default when run with -File.
 if (-not $OutputPath) {
     $OutputPath = $PSScriptRoot
@@ -381,7 +388,61 @@ else {
     }
 }
 
-# 4. Microsoft 365: someone signs in with an administrator account of the client.
+# 4. Device details: the devices the scan found that a MOSE report module can read deeper (iLO, iDRAC,
+#    NAS, ESXi, Veeam...), plus any given by hand in the window. Each needs a login, kept in memory only.
+if ($Skip -contains 'Devices') {
+    Skip-AuditPart 'Device details' 'skipped with -Skip.'
+}
+else {
+    $networkDevices = if ($script:Data['Network']) { @($script:Data['Network'].Devices) } else { @() }
+    $deviceTargets = @(Get-AuditDeviceTargets -Devices $networkDevices -DeviceLogin $DeviceLogin)
+    if ($deviceTargets.Count -eq 0) {
+        Skip-AuditPart 'Device details' 'no device the audit can read in depth was found or given.'
+    }
+    else {
+        Write-Host "`n== Device details" -ForegroundColor Cyan
+        $deviceSections = New-Object System.Collections.Generic.List[string]
+        foreach ($target in $deviceTargets) {
+            Write-Progress -Id 45 -Activity 'Device details' -Status "$($target.Label) at $($target.Address)"
+            # A login given in the window (for this address, else this module type), else asked here.
+            $credential = Get-AuditDeviceLogin -Target $target -DeviceLogin $DeviceLogin
+            if (-not $credential -and -not $NonInteractive) {
+                $answer = Read-Answer "Read the $($target.Label) at $($target.Address)$(if ($target.Name) { " ($($target.Name))" }) in depth? Login (DOMAIN\user or user), Enter to skip"
+                if ($answer) {
+                    $credential = Get-Credential -UserName $answer -Message "$($target.Label) at $($target.Address)"
+                }
+            }
+            $heading = "#### $($target.Label) - $($target.Address)$(if ($target.Name) { " ($($target.Name))" })"
+            if (-not $credential) {
+                $script:Log.Add("Device details: $($target.Address) ($($target.Label)) skipped, no login.")
+                continue
+            }
+            $deviceStarted = Get-Date
+            $result = Invoke-AuditDeviceModule -Key $target.Key -Server $target.Address -Credential $credential -Client $Client
+            if ($result.Error) {
+                $deviceSections.Add("$heading`n:warning: Not read: $($result.Error)")
+                $script:Log.Add("Device details: $($target.Address) ($($target.Label)) not read: $($result.Error)")
+            }
+            elseif (@($result.Markdown).Count -gt 0) {
+                $deviceSections.Add("$heading`n$($result.Markdown -join "`n")")
+                $script:Log.Add("Device details: $($target.Address) ($($target.Label)) read in $([math]::Round(((Get-Date) - $deviceStarted).TotalSeconds)) s.")
+            }
+            else {
+                $deviceSections.Add("$heading`n:warning: Not read: the module returned nothing.")
+                $script:Log.Add("Device details: $($target.Address) ($($target.Label)) returned nothing.")
+            }
+        }
+        Write-Progress -Id 45 -Activity 'Device details' -Completed
+        if ($deviceSections.Count -gt 0) {
+            $script:Sections.Add([pscustomobject]@{ Title = 'Device details'; Text = ($deviceSections -join "`n`n") })
+        }
+        else {
+            Skip-AuditPart 'Device details' 'none was read (no login given).'
+        }
+    }
+}
+
+# 5. Microsoft 365: someone signs in with an administrator account of the client.
 if ($Skip -contains 'Microsoft365') {
     Skip-AuditPart 'Microsoft 365' 'skipped with -Skip.'
 }
@@ -421,7 +482,7 @@ else {
     }
 }
 
-# 5. The public domains: given, and those of Active Directory and Microsoft 365.
+# 6. The public domains: given, and those of Active Directory and Microsoft 365.
 if ($Skip -contains 'Domains') {
     Skip-AuditPart 'Domains and e-mail' 'skipped with -Skip.'
 }

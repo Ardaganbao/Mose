@@ -32,6 +32,7 @@
     "Audit": [
         "Audit.ps1",
         "AuditCommon.ps1",
+        "AuditDevices.ps1",
         "AuditNetwork.ps1",
         "AuditAD.ps1",
         "AuditInventory.ps1",
