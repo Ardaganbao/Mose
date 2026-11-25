@@ -82,7 +82,11 @@ param(
     [string]$OutputFolder = "$HOME\Documents\MetallicReports",
 
     # Renew the stored Cloud token and exit without building a report.
-    [switch]$RenewTokenOnly
+    [switch]$RenewTokenOnly,
+
+    # Discover the Commvault SLA report/dataset IDs (reusing the login) and exit, writing the findings
+    # to <OutputFolder>\sla-discovery.json. Used once to wire Commvault's own SLA into the report.
+    [switch]$DiscoverSla
 )
 #--------------------------------------------------------
 # Helper: Convert SecureString to plaintext
@@ -923,6 +927,73 @@ if ($RenewTokenOnly) {
     Update-MetallicAccessToken
     Complete-CommvaultReportProgress
     Write-Host 'Token renewed.' -ForegroundColor Green
+    return
+}
+
+# Discover the Commvault SLA report and its dataset GUID (so the report can read Commvault's own SLA,
+# matching Command Center), then exit. Dumps the raw reports-engine responses to a file to read back.
+if ($DiscoverSla) {
+    Write-Host "`n=== SLA dataset discovery ===" -ForegroundColor Cyan
+    $discovery = [ordered]@{ generated = (Get-Date).ToString('o'); baseUri = $script:BaseUri; attempts = @() }
+    function Invoke-SlaDiscovery {
+        param([string]$Path)
+        $entry = [ordered]@{ path = $Path; ok = $false; error = $null; response = $null }
+        try {
+            Write-Host "GET $Path" -ForegroundColor DarkGray
+            $entry.response = Invoke-MetallicApi -Method GET -Path $Path
+            $entry.ok = $true
+        }
+        catch { $entry.error = $_.Exception.Message; Write-Host "  failed: $($entry.error)" -ForegroundColor Yellow }
+        $discovery.attempts += $entry
+        return $entry
+    }
+
+    # The reports-engine list of installed reports. A couple of spellings are tried in case the path differs.
+    $listEntry = $null
+    foreach ($listPath in @('/cr/reportsplusengine/reports', '/cr/reportsplusengine/reports/')) {
+        $listEntry = Invoke-SlaDiscovery -Path $listPath
+        if ($listEntry.ok -and $listEntry.response) { break }
+    }
+
+    # Pull report name/guid pairs out of the response whatever its exact shape, and keep the SLA ones.
+    $slaReports = @()
+    if ($listEntry -and $listEntry.ok -and $listEntry.response) {
+        $listJson = $listEntry.response | ConvertTo-Json -Depth 30 -Compress
+        $guidPattern = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+        $patterns = @(
+            ('"name"\s*:\s*"([^"]*[Ss][Ll][Aa][^"]*)"[^{}]*?"guid"\s*:\s*"(' + $guidPattern + ')"'),
+            ('"guid"\s*:\s*"(' + $guidPattern + ')"[^{}]*?"name"\s*:\s*"([^"]*[Ss][Ll][Aa][^"]*)"')
+        )
+        $nameFirst = $true
+        foreach ($pat in $patterns) {
+            foreach ($match in [regex]::Matches($listJson, $pat)) {
+                if ($nameFirst) { $reportName = $match.Groups[1].Value; $reportGuid = $match.Groups[2].Value }
+                else { $reportGuid = $match.Groups[1].Value; $reportName = $match.Groups[2].Value }
+                $slaReports += [pscustomobject]@{ Name = $reportName; Guid = $reportGuid }
+            }
+            $nameFirst = $false
+        }
+        $slaReports = @($slaReports | Sort-Object Guid -Unique)
+    }
+
+    # For each SLA report, fetch its definition (which lists the dataset GUIDs the report draws from).
+    foreach ($slaReport in $slaReports) {
+        Write-Host "SLA report: $($slaReport.Name)  [$($slaReport.Guid)]" -ForegroundColor Green
+        Invoke-SlaDiscovery -Path "/cr/reportsplusengine/reports/$($slaReport.Guid)" | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $OutputFolder)) {
+        New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
+    }
+    $discoveryFile = Join-Path $OutputFolder 'sla-discovery.json'
+    $discovery | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $discoveryFile -Encoding UTF8
+    Write-Host "`nSaved discovery to: $discoveryFile" -ForegroundColor Cyan
+    if ($slaReports.Count -gt 0) {
+        Write-Host "Found $($slaReports.Count) SLA report(s) - the file has their definitions and dataset IDs." -ForegroundColor Green
+    }
+    else {
+        Write-Host "No report name matched 'SLA' in the list - the file still has the full reports list to work from." -ForegroundColor Yellow
+    }
     return
 }
 
