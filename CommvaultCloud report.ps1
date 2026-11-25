@@ -185,14 +185,15 @@ function ConvertFrom-CommvaultDataset {
     $columns = @($Response.columns)
     foreach ($record in @($Response.records)) {
         if ($record -isnot [array]) {
-            $record | Select-Object -Property * -ExcludeProperty 'sys_rowid', '$row_number$'
+            $record | Select-Object -Property * -ExcludeProperty 'sys_rowid', '$row_number$', 'LicUsageType'
             continue
         }
         $row = [ordered]@{}
         for ($index = 0; $index -lt $columns.Count; $index++) {
             $name = Get-FirstObjectValue -InputObject $columns[$index] -Names @('displayName', 'name', 'dataField')
-            # Skip Commvault's internal row id and report template placeholders like $row_number$.
-            if (-not $name -or $name -eq 'sys_rowid' -or $name -match '^\$.*\$$') { continue }
+            # Skip Commvault's internal row id, report template placeholders like $row_number$, and the
+            # numeric LicUsageType code (its readable name is already shown in the Dial column).
+            if (-not $name -or $name -eq 'sys_rowid' -or $name -eq 'LicUsageType' -or $name -match '^\$.*\$$') { continue }
             $row[[string]$name] = $record[$index]
         }
         [PSCustomObject]$row
