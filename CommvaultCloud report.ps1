@@ -67,6 +67,12 @@ param(
     [ValidateRange(0, 62)]
     [int]$JobDailyDays = 16,
 
+    # The backup trend/daily charts show data-protection backups only. Restores are always left out, and
+    # a job whose Application or protected item matches this regex (the daily CommServe DR / system
+    # backups) is left out too, so the charts are not padded with one system job per day. Set to '' to
+    # keep every backup. If a system job still shows, set this to match its Application value.
+    [string]$BackupChartExcludePattern = 'DR\s*Backup|Disaster Recovery|CommServ',
+
     # SLA period used when Commvault does not return one from its SLA configuration.
     [ValidateRange(1, 365)]
     [int]$DefaultSlaDays = 1,
@@ -1594,13 +1600,39 @@ if ($attentionLines.Count -eq 0) {
     $attentionLines = @('| All jobs in this period completed successfully. | | | | | | | |')
 }
 
+# The trend and daily charts show data-protection backups only: restores are not backups, and the daily
+# CommServe DR / system backups are excluded ($BackupChartExcludePattern) so a month is not padded with
+# one system job per day. Every other section still uses the full job set ($allJobRows).
+$backupChartJobs = @($allJobRows | Where-Object {
+    $_.Operation -notmatch 'Restore' -and
+    (-not $BackupChartExcludePattern -or
+        -not ("$($_.Application)" -match $BackupChartExcludePattern -or "$($_.Item)" -match $BackupChartExcludePattern))
+})
+
+# Trim leading months with no real backup so the chart covers only the period that actually has data,
+# instead of a full year padded with system jobs.
+if ($trendMonths.Count -gt 0 -and $backupChartJobs.Count -gt 0) {
+    $invariantMonth = [cultureinfo]::InvariantCulture
+    $monthsWithBackups = @{}
+    foreach ($chartJob in $backupChartJobs) {
+        if ($chartJob.StartTime) { $monthsWithBackups[$chartJob.StartTime.ToString('yyyy-MM', $invariantMonth)] = $true }
+    }
+    $firstMonth = -1
+    for ($monthIndex = 0; $monthIndex -lt $trendMonths.Count; $monthIndex++) {
+        if ($monthsWithBackups.ContainsKey($trendMonths[$monthIndex].ToString('yyyy-MM', $invariantMonth))) { $firstMonth = $monthIndex; break }
+    }
+    if ($firstMonth -gt 0) {
+        $trendMonths = @($trendMonths[$firstMonth..($trendMonths.Count - 1)])
+    }
+}
+
 $jobDailySection = if ($dailyDays.Count -gt 0) {
     @"
 ### Last $JobDailyDays Days Summary
 
-Jobs are counted on the day they started; today is partial.
+Jobs are counted on the day they started; today is partial. Backups only (restores and system/DR backups excluded).
 
-$(New-JobStatusTable -Jobs $allJobRows -Periods $dailyDays -PeriodKeyFormat 'yyyy-MM-dd' -HeaderFormat 'ddd MMM d')
+$(New-JobStatusTable -Jobs $backupChartJobs -Periods $dailyDays -PeriodKeyFormat 'yyyy-MM-dd' -HeaderFormat 'ddd MMM d')
 "@
 }
 else {
@@ -1608,13 +1640,13 @@ else {
 }
 
 $jobTrendSection = if ($trendMonths.Count -gt 0) {
-    $monthFormat = if ($JobTrendMonths -gt 12) { 'MMM yy' } else { 'MMM' }
+    $monthFormat = if ($trendMonths.Count -gt 12) { 'MMM yy' } else { 'MMM' }
     @"
-### Last $JobTrendMonths Months Backup Statistics
+### Last $($trendMonths.Count) Months Backup Statistics
 
-Jobs are counted in the month they started; the current month is partial. Success rate counts completed jobs, including those with errors or warnings. A month with no jobs shows '-', which can also mean the API keeps less job history than the period shown.
+Jobs are counted in the month they started; the current month is partial. Backups only (restores and system/DR backups excluded). Success rate counts completed jobs, including those with errors or warnings. Leading months with no backup are not shown.
 
-$(New-JobStatusTable -Jobs $allJobRows -Periods $trendMonths -PeriodKeyFormat 'yyyy-MM' -HeaderFormat $monthFormat)
+$(New-JobStatusTable -Jobs $backupChartJobs -Periods $trendMonths -PeriodKeyFormat 'yyyy-MM' -HeaderFormat $monthFormat)
 "@
 }
 else {
