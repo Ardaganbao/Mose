@@ -168,6 +168,13 @@ function ConvertTo-MarkdownTable {
             if ($columns -notcontains $name) { $columns += $name }
         }
     }
+    # Drop columns the API did not fill in: empty in every row (e.g. dates Commvault left at the epoch,
+    # now blanked). A column kept when at least one row has a value.
+    $columns = @($columns | Where-Object {
+            $col = $_
+            @($Rows | Where-Object { (ConvertTo-MarkdownCell -Value $_.$col) -ne '' }).Count -gt 0
+        })
+    if ($columns.Count -eq 0) { return '' }
     $lines = @(
         '| ' + (($columns | ForEach-Object { ConvertTo-MarkdownCell -Value $_ }) -join ' | ') + ' |'
         '|' + (($columns | ForEach-Object { '---' }) -join '|') + '|'
