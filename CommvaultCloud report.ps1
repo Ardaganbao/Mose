@@ -1644,7 +1644,7 @@ $jobTrendSection = if ($trendMonths.Count -gt 0) {
     @"
 ### Last $($trendMonths.Count) Months Backup Statistics
 
-Jobs are counted in the month they started; the current month is partial. Backups only (restores and system/DR backups excluded). Success rate counts completed jobs, including those with errors or warnings. Leading months with no backup are not shown.
+Jobs are counted in the month they started; the current month is partial. Backups only (restores and system/DR backups excluded). Success rate counts completed jobs, including those with errors or warnings. The chart reaches back only as far as Commvault still keeps backup job history: older months whose job records have aged out are not shown (DR backups are retained longer, so they are excluded to avoid showing a misleading one-per-day count for those months).
 
 $(New-JobStatusTable -Jobs $backupChartJobs -Periods $trendMonths -PeriodKeyFormat 'yyyy-MM' -HeaderFormat $monthFormat)
 "@
