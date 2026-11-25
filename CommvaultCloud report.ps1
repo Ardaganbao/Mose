@@ -862,7 +862,30 @@ else {
     $script:SkipCertCheck = $true
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
     if ($PSVersionTable.PSEdition -ne 'Core') {
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [System.Net.Security.RemoteCertificateValidationCallback] { $true }
+        # A scriptblock callback runs on a .NET worker thread that has no PowerShell runspace and throws
+        # ("There is no Runspace available"); a compiled delegate works there, as the Veeam collector does.
+        if (-not ('CommvaultApiCertificateValidation' -as [type])) {
+            Add-Type -TypeDefinition @"
+                using System;
+                using System.Net;
+                using System.Net.Security;
+                using System.Security.Cryptography.X509Certificates;
+                public static class CommvaultApiCertificateValidation {
+                    public static string ExpectedHost { get; set; }
+                    public static bool Validate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
+                        if (errors == SslPolicyErrors.None) { return true; }
+                        var request = sender as HttpWebRequest;
+                        return request != null && String.Equals(request.RequestUri.Host, ExpectedHost, StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+"@ -ErrorAction Stop
+        }
+        [CommvaultApiCertificateValidation]::ExpectedHost = ([uri]$script:BaseUri).Host
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [Delegate]::CreateDelegate(
+            [System.Net.Security.RemoteCertificateValidationCallback],
+            [CommvaultApiCertificateValidation],
+            'Validate'
+        )
     }
 }
 $script:GlobalHeaders.Authorization = "Bearer $($secretObj.AccessToken)"
