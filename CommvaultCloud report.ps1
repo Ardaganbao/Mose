@@ -152,7 +152,11 @@ function ConvertTo-MarkdownCell {
     param($Value)
 
     if ($null -eq $Value) { return '' }
-    return ([string]$Value -replace '\|', '\|' -replace '[\r\n]+', ' ').Trim()
+    $text = ([string]$Value -replace '\|', '\|' -replace '[\r\n]+', ' ').Trim()
+    # Commvault renders an unset date as the Unix epoch (Jan 1 1970, or Dec 31 1969 in some zones);
+    # show nothing rather than a meaningless 1970 date.
+    if ($text -match '^(Jan 0?1,? 1970|0?1 Jan 1970|1970-01-01|Dec 31,? 1969|31 Dec 1969|1969-12-31)') { return '' }
+    return $text
 }
 
 function ConvertTo-MarkdownTable {
@@ -181,13 +185,14 @@ function ConvertFrom-CommvaultDataset {
     $columns = @($Response.columns)
     foreach ($record in @($Response.records)) {
         if ($record -isnot [array]) {
-            $record | Select-Object -Property * -ExcludeProperty 'sys_rowid'
+            $record | Select-Object -Property * -ExcludeProperty 'sys_rowid', '$row_number$'
             continue
         }
         $row = [ordered]@{}
         for ($index = 0; $index -lt $columns.Count; $index++) {
             $name = Get-FirstObjectValue -InputObject $columns[$index] -Names @('displayName', 'name', 'dataField')
-            if (-not $name -or $name -eq 'sys_rowid') { continue }
+            # Skip Commvault's internal row id and report template placeholders like $row_number$.
+            if (-not $name -or $name -eq 'sys_rowid' -or $name -match '^\$.*\$$') { continue }
             $row[[string]$name] = $record[$index]
         }
         [PSCustomObject]$row
@@ -1399,9 +1404,11 @@ foreach ($itemKey in @($protectedItemsByKey.Keys)) {
     $lastBackup = $lastBackupByKey[$itemKey]
     $protectedItem.LastSuccessfulRun = $lastBackup
     $protectedItem.SlaTarget = if ($slaDays -eq 1) { '1 day' } else { "$slaDays days" }
-    $protectedItem.SlaStatus = if (($slaSetting -and $slaSetting.Excluded) -or (-not $slaSetting -and $commcellSla -and $commcellSla.Excluded)) {
-        $excludedReason = if ($slaSetting -and $slaSetting.Reason) { $slaSetting.Reason } elseif ($commcellSla) { $commcellSla.Reason } else { '' }
-        if ($excludedReason) { "Excluded ($excludedReason)" } else { 'Excluded' }
+    # Exclude an item only when its own client's SLA setting says so. The CommCell-level excludeFromSLA
+    # flag is not a per-item exclusion: using it as a fallback excluded every item (0 met) whenever the
+    # per-client SLA lookup came back empty, which is wrong when backups are completing.
+    $protectedItem.SlaStatus = if ($slaSetting -and $slaSetting.Excluded) {
+        if ($slaSetting.Reason) { "Excluded ($($slaSetting.Reason))" } else { 'Excluded' }
     }
     elseif (-not $lastBackup) {
         "Missed (no completed backup in the last $fetchedDays days)"
