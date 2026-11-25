@@ -1419,7 +1419,10 @@ foreach ($itemKey in @($protectedItemsByKey.Keys)) {
         if ($slaSetting.Reason) { "Excluded ($($slaSetting.Reason))" } else { 'Excluded' }
     }
     elseif (-not $lastBackup) {
-        "Missed (no completed backup in the last $fetchedDays days)"
+        # No backup at all in the whole lookback: likely a default/system subclient that is not actually
+        # protected (no plan, never run). Shown as its own category, not counted as a missed SLA, so one
+        # real figure is not drowned out by placeholders -- but still listed, to verify.
+        "No backup in the last $fetchedDays days"
     }
     elseif (($now - $lastBackup).TotalDays -le $slaDays) {
         'Met'
@@ -1433,6 +1436,8 @@ $protectedItems = @($protectedItemsByKey.Values | Sort-Object -Property Client, 
 $slaMet = @($protectedItems | Where-Object { $_.SlaStatus -eq 'Met' }).Count
 $slaMissed = @($protectedItems | Where-Object { $_.SlaStatus -like 'Missed*' }).Count
 $slaExcluded = @($protectedItems | Where-Object { $_.SlaStatus -like 'Excluded*' }).Count
+$slaNoHistory = @($protectedItems | Where-Object { $_.SlaStatus -like 'No backup*' }).Count
+$slaWithHistory = $slaMet + $slaMissed
 $slaPeriods = @($protectedItems.SlaTarget | Sort-Object -Unique)
 $slaSource = if ($slaDefaultUsed) {
     "the Commvault SLA configuration was not available for every item, so $DefaultSlaDays day(s) is used where it was missing"
@@ -1440,9 +1445,10 @@ $slaSource = if ($slaDefaultUsed) {
 else {
     'from the Commvault SLA configuration'
 }
-$slaSummary = "SLA period: $($slaPeriods -join ', ') ($slaSource). $slaMet of $($protectedItems.Count) protected items met the SLA"
+$slaSummary = "SLA period: $($slaPeriods -join ', ') ($slaSource). $slaMet of $slaWithHistory protected items with backup history met the SLA"
 if ($slaMissed -gt 0) { $slaSummary += ", $slaMissed missed" }
 if ($slaExcluded -gt 0) { $slaSummary += ", $slaExcluded excluded" }
+if ($slaNoHistory -gt 0) { $slaSummary += ". $slaNoHistory item(s) have no backup in the last $fetchedDays days (often default/system subclients) - verify whether they are meant to be protected" }
 $slaSummary += '.'
 if ($slaNote) { $slaSummary += " $slaNote" }
 
@@ -1662,7 +1668,7 @@ $jobTrendSection
 - $BackupHealthLabel
 - $BackupHealthStatus
 - Data protected: $totalDataProtected
-- SLA: $slaMet of $($protectedItems.Count) protected items met the SLA
+- SLA: $slaMet of $slaWithHistory protected items with backup history met the SLA$(if ($slaNoHistory -gt 0) { " ($slaNoHistory with no backup in the lookback - verify)" })
 
 #### Summary per Protected Item
 
