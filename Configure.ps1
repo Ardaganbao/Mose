@@ -792,11 +792,10 @@ function Edit-SavedSecret {
 
     $value = $null
     if ($Secret.Type -eq 'Hashtable') {
-        $value = @{}
-        $stored = Get-Secret -Vault $MoseVaultName -Name $Secret.Name
-        foreach ($key in @($stored.Keys)) {
-            $value[$key] = $stored[$key]
-        }
+        # -AsPlainText so Type/Server/Ring come back as plain strings. Without it, SecretManagement
+        # returns every string value inside the hashtable as a SecureString, so $value['Type'] never
+        # equals 'Cloud'/'OnPrem' and editing a Commvault token was wrongly refused.
+        $value = Get-Secret -Vault $MoseVaultName -Name $Secret.Name -AsPlainText
     }
     if (-not $value -or $value['Type'] -notin 'Cloud', 'OnPrem') {
         Write-Host "Only logins and Commvault tokens can be edited here; $($Secret.Name) can be removed." -ForegroundColor Yellow
@@ -808,11 +807,18 @@ function Edit-SavedSecret {
     if ($accessToken.Length -gt 0) {
         $value['AccessToken'] = $accessToken
     }
+    else {
+        # Keep the current token, stored back as a SecureString like the add flow saves it.
+        $value['AccessToken'] = ConvertTo-SecureString ([string]$value['AccessToken']) -AsPlainText -Force
+    }
     if ($value['Type'] -eq 'Cloud') {
         # A new pair of tokens starts a new chain; the old refresh token stops working.
         $refreshToken = Read-Host -Prompt 'Commvault Cloud REFRESH token (Enter keeps the current one)' -AsSecureString
         if ($refreshToken.Length -gt 0) {
             $value['RefreshToken'] = $refreshToken
+        }
+        else {
+            $value['RefreshToken'] = ConvertTo-SecureString ([string]$value['RefreshToken']) -AsPlainText -Force
         }
         $value['Ring'] = Read-Answer 'Commvault Cloud ring ID (e.g. m108)' "$($value['Ring'])"
     }
