@@ -1032,6 +1032,72 @@ function Format-Repositories {
     return $text
 }
 
+# The backup sessions of the last 31 days as a CommVaultJob chart (one column per day) and a per-job
+# Success / Warning / Failure summary, to match the Commvault report and the monthly service report.
+function Format-VeeamSessionHistory {
+    $sessions = @(Get-RecentSessions | Where-Object {
+            $t = "$(Get-VeeamValue $_ 'sessionType')"
+            $t -match '(?i)backup' -and $t -notmatch '(?i)copy|config|sure'
+        })
+    $heading = "`n### Backup sessions (last 31 days)`n"
+    if ($sessions.Count -eq 0) { return $heading + "No backup sessions in the last 31 days.`n" }
+
+    $invariant = [cultureinfo]::InvariantCulture
+    $english = [cultureinfo]::GetCultureInfo('en-US')
+    $statusRows = @('Completed', 'Completed with Errors or Warnings', 'Failed')
+    $records = @(foreach ($s in $sessions) {
+            $when = ConvertTo-LocalTime (Get-VeeamValue $s 'creationTime', 'endTime')
+            if (-not $when) { continue }
+            $r = "$(Get-VeeamResult $s)"
+            $outcome = if ($r -match '(?i)^succe') { 'Completed' }
+            elseif ($r -match '(?i)warning') { 'Completed with Errors or Warnings' }
+            elseif ($r -match '(?i)fail|error') { 'Failed' }
+            else { $null }
+            if (-not $outcome) { continue }
+            [pscustomobject]@{ Day = $when.Date; Job = ("$($s.name)" -replace '\\.*$', '').Trim(); Outcome = $outcome }
+        })
+    if ($records.Count -eq 0) { return $heading + "No completed or failed backup sessions in the last 31 days.`n" }
+
+    $minDay = ($records | Measure-Object -Property Day -Minimum).Minimum
+    $maxDay = ($records | Measure-Object -Property Day -Maximum).Maximum
+    $days = @()
+    for ($d = $minDay; $d -le $maxDay; $d = $d.AddDays(1)) { $days += $d }
+    if ($days.Count -gt 31) { $days = $days[($days.Count - 31)..($days.Count - 1)] }
+
+    $counts = @{}
+    foreach ($rec in $records) { $k = '{0}|{1}' -f $rec.Day.ToString('yyyy-MM-dd'), $rec.Outcome; $counts[$k] = 1 + [int]$counts[$k] }
+    $dayKeys = @($days | ForEach-Object { $_.ToString('yyyy-MM-dd') })
+    $statusTable = @(
+        '| Job Status | ' + (($days | ForEach-Object { $_.ToString('ddd MMM d', $english) }) -join ' | ') + ' |'
+        '|---|' + (($days | ForEach-Object { '---:' }) -join '|') + '|'
+    )
+    foreach ($status in $statusRows) {
+        $cells = foreach ($dk in $dayKeys) { [int]$counts["$dk|$status"] }
+        $statusTable += "| $status | $($cells -join ' | ') |"
+    }
+    $totalCells = @(); $rateCells = @()
+    foreach ($dk in $dayKeys) {
+        $tot = 0; foreach ($status in $statusRows) { $tot += [int]$counts["$dk|$status"] }
+        $ok = [int]$counts["$dk|Completed"] + [int]$counts["$dk|Completed with Errors or Warnings"]
+        $totalCells += $tot
+        $rateCells += if ($tot -gt 0) { [math]::Round(100 * $ok / $tot, 1).ToString($invariant) } else { '-' }
+    }
+
+    $text = $heading + "Sessions are counted on the day they started.`n`n"
+    $text += (@('```CommVaultJob') + $statusTable + @('```', '') + $statusTable + @(
+            "| Total | $($totalCells -join ' | ') |"
+            "| Success Rate (%) | $($rateCells -join ' | ') |"
+        )) -join "`n"
+    $text += "`n`n#### Sessions per job`n| Job | Success | Warning | Failure |`n|---|---:|---:|---:|`n"
+    foreach ($group in ($records | Group-Object -Property Job | Sort-Object -Property Name)) {
+        $s = @($group.Group | Where-Object { $_.Outcome -eq 'Completed' }).Count
+        $w = @($group.Group | Where-Object { $_.Outcome -eq 'Completed with Errors or Warnings' }).Count
+        $f = @($group.Group | Where-Object { $_.Outcome -eq 'Failed' }).Count
+        $text += "| $($group.Name) | $s | $w | $f |`n"
+    }
+    return $text + "`n"
+}
+
 $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [Delegate]::CreateDelegate(
     [System.Net.Security.RemoteCertificateValidationCallback],
@@ -1068,6 +1134,9 @@ try {
     catch {
         $Body += "- :warning: UNKNOWN: Cannot get Veeam License information ($($_.Exception.Message))`n"
     }
+
+    Write-VeeamReportProgress -Status 'Collecting session history' -PercentComplete 4
+    try { $Body += Format-VeeamSessionHistory } catch { $Body += "`n### Backup sessions (last 31 days)`nCollection failed: $($_.Exception.Message)`n" }
 
     Write-VeeamReportProgress -Status 'Collecting jobs' -PercentComplete 5
     $jobs = @(Get-VeeamApiItems -Path '/api/v1/jobs/states')

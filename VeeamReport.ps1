@@ -493,6 +493,77 @@ if ($null -ne $veeamLicInfo -and [datetime]::TryParse([string]$veeamLicInfo.Expi
 else {
     $Body += "- :warning: UNKNOWN: Cannot get Veeam License information`n"
 }
+# The backup sessions of the last 31 days as a CommVaultJob chart (one column per day) and a per-job
+# Success / Warning / Failure summary, to match the Commvault report and the monthly service report.
+function Get-VeeamSessionHistoryBody {
+    $heading = "`n### Backup sessions (last 31 days)`n"
+    $since = (Get-Date).AddDays(-31)
+    try { $sessions = @(Get-VBRBackupSession -ErrorAction Stop | Where-Object { $_.Info.CreationTime -ge $since }) }
+    catch { return $heading + "Collection failed: $($_.Exception.Message)`n" }
+    if ($sessions.Count -eq 0) { return $heading + "No backup sessions in the last 31 days.`n" }
+
+    $invariant = [cultureinfo]::InvariantCulture
+    $english = [cultureinfo]::GetCultureInfo('en-US')
+    $statusRows = @('Completed', 'Completed with Errors or Warnings', 'Failed')
+    $records = @(foreach ($s in $sessions) {
+            $when = $s.Info.CreationTime
+            if (-not $when -or $when -eq [datetime]::MinValue) { continue }
+            $r = "$($s.Info.Result)"
+            $outcome = if ($r -match '(?i)^succe') { 'Completed' }
+            elseif ($r -match '(?i)warning') { 'Completed with Errors or Warnings' }
+            elseif ($r -match '(?i)fail|error') { 'Failed' }
+            else { $null }
+            if (-not $outcome) { continue }
+            $jobName = if ($s.JobName) { "$($s.JobName)" } else { "$($s.Name)" }
+            [pscustomobject]@{ Day = $when.Date; Job = $jobName.Trim(); Outcome = $outcome }
+        })
+    if ($records.Count -eq 0) { return $heading + "No completed or failed backup sessions in the last 31 days.`n" }
+
+    $minDay = ($records | Measure-Object -Property Day -Minimum).Minimum
+    $maxDay = ($records | Measure-Object -Property Day -Maximum).Maximum
+    $days = @()
+    for ($d = $minDay; $d -le $maxDay; $d = $d.AddDays(1)) { $days += $d }
+    if ($days.Count -gt 31) { $days = $days[($days.Count - 31)..($days.Count - 1)] }
+
+    $counts = @{}
+    foreach ($rec in $records) { $k = '{0}|{1}' -f $rec.Day.ToString('yyyy-MM-dd'), $rec.Outcome; $counts[$k] = 1 + [int]$counts[$k] }
+    $dayKeys = @($days | ForEach-Object { $_.ToString('yyyy-MM-dd') })
+    $statusTable = @(
+        '| Job Status | ' + (($days | ForEach-Object { $_.ToString('ddd MMM d', $english) }) -join ' | ') + ' |'
+        '|---|' + (($days | ForEach-Object { '---:' }) -join '|') + '|'
+    )
+    foreach ($status in $statusRows) {
+        $cells = foreach ($dk in $dayKeys) { [int]$counts["$dk|$status"] }
+        $statusTable += "| $status | $($cells -join ' | ') |"
+    }
+    $totalCells = @(); $rateCells = @()
+    foreach ($dk in $dayKeys) {
+        $tot = 0; foreach ($status in $statusRows) { $tot += [int]$counts["$dk|$status"] }
+        $ok = [int]$counts["$dk|Completed"] + [int]$counts["$dk|Completed with Errors or Warnings"]
+        $totalCells += $tot
+        $rateCells += if ($tot -gt 0) { [math]::Round(100 * $ok / $tot, 1).ToString($invariant) } else { '-' }
+    }
+
+    $text = $heading + "Sessions are counted on the day they started.`n`n"
+    $text += (@('```CommVaultJob') + $statusTable + @('```', '') + $statusTable + @(
+            "| Total | $($totalCells -join ' | ') |"
+            "| Success Rate (%) | $($rateCells -join ' | ') |"
+        )) -join "`n"
+    $text += "`n`n#### Sessions per job`n| Job | Success | Warning | Failure |`n|---|---:|---:|---:|`n"
+    foreach ($group in ($records | Group-Object -Property Job | Sort-Object -Property Name)) {
+        $sc = @($group.Group | Where-Object { $_.Outcome -eq 'Completed' }).Count
+        $wc = @($group.Group | Where-Object { $_.Outcome -eq 'Completed with Errors or Warnings' }).Count
+        $fc = @($group.Group | Where-Object { $_.Outcome -eq 'Failed' }).Count
+        $text += "| $($group.Name) | $sc | $wc | $fc |`n"
+    }
+    return $text + "`n"
+}
+
+if (-not $SureBackupOnly) {
+    Write-VeeamReportProgress -Status 'Collecting session history' -PercentComplete 0
+    $Body += Get-VeeamSessionHistoryBody
+}
+
 Write-VeeamReportProgress -Status 'Collecting backup jobs' -PercentComplete 0
 $VbrJobs = if ($SureBackupOnly) { @() } else { Get-VBRJob }
 $backupJobCount = @($VbrJobs).Count
