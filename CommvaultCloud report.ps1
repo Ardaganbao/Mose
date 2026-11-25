@@ -934,16 +934,32 @@ if ($RenewTokenOnly) {
 # matching Command Center), then exit. Dumps the raw reports-engine responses to a file to read back.
 if ($DiscoverSla) {
     Write-Host "`n=== SLA dataset discovery ===" -ForegroundColor Cyan
+
+    # Run standalone, this session's TLS/cert state is not the fresh one the report normally runs in
+    # (a background job), so the on-prem TLS handshake can fail ("Could not create SSL/TLS secure
+    # channel"). Force TLS 1.2 cleanly and re-assert the compiled certificate callback before calling.
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    if ($Mode -eq 'OnPrem' -and $PSVersionTable.PSEdition -ne 'Core' -and ('CommvaultApiCertificateValidation' -as [type])) {
+        [CommvaultApiCertificateValidation]::ExpectedHost = ([uri]$script:BaseUri).Host
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [Delegate]::CreateDelegate(
+            [System.Net.Security.RemoteCertificateValidationCallback], [CommvaultApiCertificateValidation], 'Validate')
+    }
+
     $discovery = [ordered]@{ generated = (Get-Date).ToString('o'); baseUri = $script:BaseUri; attempts = @() }
     function Invoke-SlaDiscovery {
         param([string]$Path)
-        $entry = [ordered]@{ path = $Path; ok = $false; error = $null; response = $null }
+        $entry = [ordered]@{ path = $Path; ok = $false; error = $null; errorType = $null; innerError = $null; response = $null }
         try {
             Write-Host "GET $Path" -ForegroundColor DarkGray
             $entry.response = Invoke-MetallicApi -Method GET -Path $Path
             $entry.ok = $true
         }
-        catch { $entry.error = $_.Exception.Message; Write-Host "  failed: $($entry.error)" -ForegroundColor Yellow }
+        catch {
+            $entry.error = $_.Exception.Message
+            $entry.errorType = $_.Exception.GetType().FullName
+            if ($_.Exception.InnerException) { $entry.innerError = $_.Exception.InnerException.Message }
+            Write-Host "  failed: $($entry.error)" -ForegroundColor Yellow
+        }
         $discovery.attempts += $entry
         return $entry
     }
