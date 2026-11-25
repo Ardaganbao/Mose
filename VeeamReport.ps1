@@ -544,7 +544,13 @@ function Get-VeeamSessionHistoryBody {
         $rateCells += if ($tot -gt 0) { [math]::Round(100 * $ok / $tot, 1).ToString($invariant) } else { '-' }
     }
 
-    $text = $heading + "Sessions are counted on the day they started.`n`n"
+    $sOk = @($records | Where-Object { $_.Outcome -eq 'Completed' }).Count
+    $sWarn = @($records | Where-Object { $_.Outcome -eq 'Completed with Errors or Warnings' }).Count
+    $sFail = @($records | Where-Object { $_.Outcome -eq 'Failed' }).Count
+    $sRate = if ($records.Count) { [math]::Round(100 * ($sOk + $sWarn) / $records.Count, 1) } else { 0 }
+    $text = $heading
+    $text += "- Sessions (last 31 days): $($records.Count), Successful: $sOk, Errors/warnings: $sWarn, Failed: $sFail (success rate $sRate%)`n`n"
+    $text += "Sessions are counted on the day they started.`n`n"
     $text += (@('```CommVaultJob') + $statusTable + @('```', '') + $statusTable + @(
             "| Total | $($totalCells -join ' | ') |"
             "| Success Rate (%) | $($rateCells -join ' | ') |"
