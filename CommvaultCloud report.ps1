@@ -1510,22 +1510,21 @@ $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 $fileClientName = $ClientName -replace '[\\/:*?"<>|]', '_'
 $mdPath = Join-Path $OutputFolder "CommvaultReport_${fileClientName}_$ts.md"
 
-$protectedItemLines = @($protectedItems | ForEach-Object {
-        $latestRun = if ($_.LatestRun) { $_.LatestRun.ToString('yyyy-MM-dd HH:mm:ss') } else { 'Unavailable' }
+# Only items with backup history: the never-run default/system subclients (counted separately as "no
+# backup in the lookback", which is why the Command Center SLA count is lower) are left out so the
+# table reflects what is actually protected. Columns trimmed to the useful ones.
+$protectedItemLines = @($protectedItems | Where-Object { $_.SlaStatus -notlike 'No backup*' } | ForEach-Object {
         $lastSuccess = if ($_.LastSuccessfulRun) { $_.LastSuccessfulRun.ToString('yyyy-MM-dd HH:mm:ss') } else { "None in the last $fetchedDays days" }
-        '| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} |' -f `
+        '| {0} | {1} | {2} | {3} | {4} | {5} |' -f `
         (ConvertTo-MarkdownCell $_.Client),
         (ConvertTo-MarkdownCell $_.Application),
         (ConvertTo-MarkdownCell $_.Item),
         (ConvertTo-MarkdownCell $_.Plan),
-        (ConvertTo-MarkdownCell $_.SlaTarget),
         (ConvertTo-MarkdownCell $_.SlaStatus),
-        (ConvertTo-MarkdownCell $latestRun),
-        (ConvertTo-MarkdownCell $_.LatestStatus),
         (ConvertTo-MarkdownCell $lastSuccess)
     })
 if ($protectedItemLines.Count -eq 0) {
-    $protectedItemLines = @('| No protected items were returned by the inventory and job APIs. | | | | | | | | |')
+    $protectedItemLines = @('| All protected items with backup history met the SLA. | | | | | |')
 }
 
 # SLA graph (drawn by the WordPress plugin): items that met and missed the SLA, in total and, with
@@ -1649,10 +1648,10 @@ $slaSummary
 
 $slaGraph
 
-An item meets the SLA when its last completed backup (with or without errors) is within the SLA period. The protected items combine the configured subclients from the Client/Subclient APIs with the items that ran jobs.
+An item meets the SLA when its last completed backup (with or without errors) is within the SLA period. Items with no backup job at all in the lookback (the never-run default or system subclients that Commvault does not count in its own SLA either) are reported in the summary above and not listed here.
 
-| Client | Workload | Protected item | Plan | SLA period | SLA status | Latest run | Latest status | Last completed backup |
-|---|---|---|---|---|---|---|---|---|
+| Client | Workload | Protected item | Plan | SLA status | Last completed backup |
+|---|---|---|---|---|---|
 $($protectedItemLines -join "`r`n")
 
 Inventory status: $inventoryNotesText
