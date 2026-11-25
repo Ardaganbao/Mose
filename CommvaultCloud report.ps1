@@ -1545,6 +1545,51 @@ if ($slaNoHistory -gt 0) { $slaSummary += ". $slaNoHistory item(s) have no backu
 $slaSummary += '.'
 if ($slaNote) { $slaSummary += " $slaNote" }
 
+# Commvault's OWN SLA figure, from the same dataset the Command Center SLA tile uses (getslacounts).
+# This is the authoritative Met/Missed count the dashboard shows; the per-item analysis above is MOSE's
+# own and can differ (Commvault's SLA engine has its own exclusions and strike logic). Best effort: on
+# any failure the report still has the analysis above.
+$commvaultSlaBlock = ''
+try {
+    Write-CommvaultReportProgress -Status "Reading Commvault's own SLA (Command Center)" -PercentComplete 87
+    $slaCountsResponse = Invoke-MetallicApi -Method GET -Path '/cr/reportsplusengine/datasets/getslacounts/data' -Query @{
+        cache                       = 'true'
+        'parameter.i_dashboardtype' = 'commcell'
+        datasource                  = '2'
+    }
+    $slaCountRows = @(ConvertFrom-CommvaultDataset -Response $slaCountsResponse)
+    $cvStatusCount = [ordered]@{}
+    $cvMissedClients = @()
+    foreach ($slaRow in $slaCountRows) {
+        $cvStatus = [string](Get-FirstObjectValue -InputObject $slaRow -Names @('SLAStatus', 'SLA Status', 'Status'))
+        if (-not $cvStatus) { continue }
+        $cvCount = 0
+        [void][int]::TryParse([string](Get-FirstObjectValue -InputObject $slaRow -Names @('CurrentCount', 'Current Count', 'Count')), [ref]$cvCount)
+        $cvStatusCount[$cvStatus] = $cvCount + [int]$cvStatusCount[$cvStatus]
+        if ($cvStatus -eq 'Missed SLA' -and $cvCount -gt 0) {
+            $cvClient = [string](Get-FirstObjectValue -InputObject $slaRow -Names @('Data Source', 'DataSource', 'clientName', 'Client'))
+            if ($cvClient) { $cvMissedClients += "$cvClient ($cvCount)" }
+        }
+    }
+    $cvMet = [int]$cvStatusCount['Met SLA']
+    $cvMissed = [int]$cvStatusCount['Missed SLA']
+    $cvTotal = $cvMet + $cvMissed
+    if ($slaCountRows.Count -gt 0 -and ($cvStatusCount.Keys.Count -gt 0)) {
+        $cvPct = if ($cvTotal -gt 0) { [math]::Round(100 * $cvMet / $cvTotal, 1) } else { 0 }
+        $cvPending = @($cvStatusCount.Keys | Where-Object { $_ -notin @('Met SLA', 'Missed SLA') -and [int]$cvStatusCount[$_] -gt 0 } |
+            ForEach-Object { "$($_): $([int]$cvStatusCount[$_])" })
+        $commvaultSlaBlock = "**Commvault SLA (Command Center): $cvMet of $cvTotal met ($cvPct%), $cvMissed missed.**"
+        if ($cvPending.Count -gt 0) { $commvaultSlaBlock += ' ' + ($cvPending -join '; ') + '.' }
+        if ($cvMissedClients.Count -gt 0) { $commvaultSlaBlock += " Missed: $($cvMissedClients -join ', ')." }
+        # Mark the per-item analysis below as MOSE's own so the two figures are not confused.
+        $slaSummary = "MOSE per-item analysis (can differ from the Command Center figure above): $slaSummary"
+    }
+    $apiTimes['sla-counts'] = $apiTimer.Elapsed.ToString('m\:ss')
+}
+catch {
+    Write-Warning "Could not read Commvault's own SLA (getslacounts): $($_.Exception.Message)"
+}
+
 #--------------------------------------------------------
 # Reasons for jobs that did not complete successfully: the job events when the job has no reason text
 #--------------------------------------------------------
@@ -1763,6 +1808,7 @@ $licenseText
 
 ## Protected Item Health and SLA
 
+$(if ($commvaultSlaBlock) { "$commvaultSlaBlock`r`n" })
 $slaSummary
 
 $slaGraph
