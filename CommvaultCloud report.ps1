@@ -654,6 +654,10 @@ function New-MetallicApiRequest {
         Headers     = $headers
         ErrorAction = 'Stop'
     }
+    # PowerShell 7 ignores the ServicePointManager callback; it needs -SkipCertificateCheck instead.
+    if ($script:SkipCertCheck -and (Get-Command Invoke-RestMethod).Parameters.ContainsKey('SkipCertificateCheck')) {
+        $requestParameters['SkipCertificateCheck'] = $true
+    }
     if ($Body) {
         $requestParameters.Body = $Body | ConvertTo-Json -Depth 12
     }
@@ -821,6 +825,7 @@ $GlobalHeaders = @{}
 $script:SecretObject = $secretObj
 $script:GlobalHeaders = $GlobalHeaders
 $script:CommvaultMode = $Mode
+$script:SkipCertCheck = $false
 $script:GlobalHeaders = New-CommvaultHeaders -SecretObject $secretObj -Mode $Mode
 
 if ($Mode -eq 'Cloud') {
@@ -849,6 +854,16 @@ else {
         }
     }
     $script:BaseUri = $serverBuilder.Uri.AbsoluteUri.TrimEnd('/')
+
+    # The CommServe often presents a self-signed or internal-CA certificate that Windows does not
+    # trust, which fails the TLS handshake ("Could not establish trust relationship for the SSL/TLS
+    # secure channel"). Accept the certificate for this on-premises connection, the way the Veeam
+    # REST collector does; Cloud (api.metallic.io) keeps normal certificate validation.
+    $script:SkipCertCheck = $true
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [System.Net.Security.RemoteCertificateValidationCallback] { $true }
+    }
 }
 $script:GlobalHeaders.Authorization = "Bearer $($secretObj.AccessToken)"
 
