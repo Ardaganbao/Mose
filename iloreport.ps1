@@ -383,8 +383,13 @@ function New-HpSessionV2 {
 function Get-RedfishData {
     [CmdletBinding(DefaultParameterSetName = 'ServerEndpoint')]
     param(
-        # First Parameter Set: Single endpoint 
+        # First Parameter Set: Single endpoint
+        # Empty/null is allowed on purpose: old iLO firmware does not expose every Redfish resource this
+        # report reads, so some @odata.id links come back empty - those are skipped in the body rather
+        # than failing parameter binding and aborting the whole collection.
         [Parameter(Mandatory, ParameterSetName = 'ServerEndpoint', Position = 0)]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string]$endpoint,
 
         # Second Parameter Set: Endpoint with server
@@ -393,7 +398,11 @@ function Get-RedfishData {
         [string]$server,
 
         # Third Parameter Set: Multiple endpoints with server
+        # Null/empty allowed for the same reason as $endpoint: a missing collection link on old firmware
+        # yields no endpoints, which must skip rather than fail binding.
         [Parameter(Mandatory = $true, ParameterSetName = 'MultipleEndpoints')]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [string[]]$endpoints,
 
         [Parameter(Mandatory, ParameterSetName = 'ServerEndpoint')]
@@ -422,6 +431,13 @@ function Get-RedfishData {
 
 
             'ServerEndpoint' {
+
+                # A resource this old iLO does not expose comes through as an empty @odata.id: skip it and
+                # return nothing, so the rest of the collection carries on (a modern iLO never gets here).
+                if ([string]::IsNullOrWhiteSpace($endpoint)) {
+                    Write-Verbose "Get-RedfishData: skipping an empty endpoint on $server."
+                    return $null
+                }
 
                 try {
                     $URI = "https://$($server)$($endpoint)"
@@ -460,8 +476,9 @@ function Get-RedfishData {
                 Write-Progress -Activity "Get-RedfishData MultipleEndpoints : " -Id 2
                 $index = 0
                 foreach ($endpoint in $endpoints) {
-                    Write-Progress -Activity "Endpoints : $($endpoint)" -Id 3 -PercentComplete (($index / $endpoints.Count) * 100)
                     $index = $index + 1
+                    if ([string]::IsNullOrWhiteSpace($endpoint)) { continue }
+                    Write-Progress -Activity "Endpoints : $($endpoint)" -Id 3 -PercentComplete (($index / [math]::Max(1, $endpoints.Count)) * 100)
                     $response = Get-RedfishData $endpoint -server $server -session $session -retrynum $retrynum
                     $responses += $response
                 }
