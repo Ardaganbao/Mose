@@ -181,8 +181,9 @@ $LogoPixels = @(
     '.......TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT.......'
 )
 
-# Brand colours as "R;G;B" for 24-bit console colour codes.
-$LogoColors = @{ T = "108;192;194"; W = "255;255;255"; N = "26;43;73" }
+# Brand colours as "R;G;B" for 24-bit console colour codes. T is the On IT brand cyan #00BEBE,
+# the same teal as the report headers.
+$LogoColors = @{ T = "0;190;190"; W = "255;255;255"; N = "26;43;73" }
 
 # The nearest of the 16 console colours, for consoles without 24-bit colour (e.g. PowerShell ISE).
 $LogoConsoleColors = @{ T = "DarkCyan"; W = "White"; N = "DarkBlue" }
