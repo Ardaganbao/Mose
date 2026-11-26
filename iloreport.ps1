@@ -260,21 +260,33 @@ function New-HpSession {
                 throw "Failed to create session: Status Code $($SessionJson.StatusCode)"
             }
 
-            $sessionId = ($SessionJson.Content | ConvertFrom-Json).Id
-            if ([string]::IsNullOrWhiteSpace([string]$sessionId)) {
-                throw 'The iLO session response did not contain a session ID.'
-            }
+            # The X-Auth-Token header is what authenticates every later request, so that is the only hard
+            # requirement. Older iLO firmware answers 201 with the token and a Location header but an empty
+            # or minimal body (no Id field), so the session id is derived from Location rather than required
+            # in the body - it is only used to build the delete URI and to track the session for sign-out.
             $sessionToken = $SessionJson.Headers['X-Auth-Token']
             if ([string]::IsNullOrWhiteSpace([string]$sessionToken)) {
-                throw 'The iLO session response did not contain an authentication token.'
+                throw 'The iLO session response did not contain an authentication token (the X-Auth-Token header).'
             }
 
-            $sessionDeleteUri = $SessionJson.Headers['Location']
-            if ([string]::IsNullOrWhiteSpace([string]$sessionDeleteUri)) {
-                $sessionDeleteUri = "$($sessionRequestUri.AbsoluteUri.TrimEnd('/'))/$sessionId"
+            $sessionDeleteUri = [string]$SessionJson.Headers['Location']
+            $sessionId = $null
+            try { $sessionId = ($SessionJson.Content | ConvertFrom-Json).Id } catch { $sessionId = $null }
+            if ([string]::IsNullOrWhiteSpace([string]$sessionId) -and -not [string]::IsNullOrWhiteSpace($sessionDeleteUri)) {
+                $sessionId = $sessionDeleteUri.TrimEnd('/').Split('/')[-1]
+            }
+            if ([string]::IsNullOrWhiteSpace($sessionDeleteUri)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$sessionId)) {
+                    $sessionDeleteUri = "$($sessionRequestUri.AbsoluteUri.TrimEnd('/'))/$sessionId"
+                }
             }
             else {
-                $sessionDeleteUri = ([Uri]::new($sessionRequestUri, [string]$sessionDeleteUri)).AbsoluteUri
+                $sessionDeleteUri = ([Uri]::new($sessionRequestUri, $sessionDeleteUri)).AbsoluteUri
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$sessionId)) {
+                # No id in the body or a Location header: the token still works, so keep going and track the
+                # session by its token (sign-out just cannot delete it by URI on this firmware).
+                $sessionId = $sessionToken
             }
             $session.session = $SessionJson
             $session.version = $sessionVersion
@@ -314,7 +326,11 @@ function Close-HpSession {
         return
     }
 
-    Invoke-WebRequest -Uri $trackedSession.SessionUri -Method Delete -Headers $session.auth -UseBasicParsing -ErrorAction Stop | Out-Null
+    # Some old iLO firmware gives no session URI (no Id in the body and no Location header): the token
+    # works for the report but the session cannot be deleted by URI, so just drop it from tracking.
+    if (-not [string]::IsNullOrWhiteSpace([string]$trackedSession.SessionUri)) {
+        Invoke-WebRequest -Uri $trackedSession.SessionUri -Method Delete -Headers $session.auth -UseBasicParsing -ErrorAction Stop | Out-Null
+    }
     $script:HpSessions.Remove($trackedSession) | Out-Null
 }
 function New-HpSessionV2 {
