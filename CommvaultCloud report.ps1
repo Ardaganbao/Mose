@@ -1741,17 +1741,26 @@ $backupChartJobs = @($allJobRows | Where-Object {
         -not ("$($_.Application)" -match $BackupChartExcludePattern -or "$($_.Item)" -match $BackupChartExcludePattern))
 })
 
-# Trim leading months with no real backup so the chart covers only the period that actually has data,
-# instead of a full year padded with system jobs.
+# Trim leading months so the chart covers only the period that actually has data. After Commvault ages
+# out older job history, a month keeps at most the residual daily system/DR backup (~one job per day),
+# which looks exactly like the number of days in the month. So drop a leading month whose backup count
+# is at or below the number of days in it (<= ~1/day = residual, not real workload), and start the chart
+# at the first month with real activity. If no month exceeds that, leave the table as is (don't blank it).
 if ($trendMonths.Count -gt 0 -and $backupChartJobs.Count -gt 0) {
     $invariantMonth = [cultureinfo]::InvariantCulture
-    $monthsWithBackups = @{}
+    $monthBackupCount = @{}
     foreach ($chartJob in $backupChartJobs) {
-        if ($chartJob.StartTime) { $monthsWithBackups[$chartJob.StartTime.ToString('yyyy-MM', $invariantMonth)] = $true }
+        if ($chartJob.StartTime) {
+            $monthKey = $chartJob.StartTime.ToString('yyyy-MM', $invariantMonth)
+            $monthBackupCount[$monthKey] = 1 + [int]$monthBackupCount[$monthKey]
+        }
     }
     $firstMonth = -1
     for ($monthIndex = 0; $monthIndex -lt $trendMonths.Count; $monthIndex++) {
-        if ($monthsWithBackups.ContainsKey($trendMonths[$monthIndex].ToString('yyyy-MM', $invariantMonth))) { $firstMonth = $monthIndex; break }
+        $trendMonth = $trendMonths[$monthIndex]
+        $monthKey = $trendMonth.ToString('yyyy-MM', $invariantMonth)
+        $daysInMonth = [datetime]::DaysInMonth($trendMonth.Year, $trendMonth.Month)
+        if ([int]$monthBackupCount[$monthKey] -gt $daysInMonth) { $firstMonth = $monthIndex; break }
     }
     if ($firstMonth -gt 0) {
         $trendMonths = @($trendMonths[$firstMonth..($trendMonths.Count - 1)])
@@ -1762,7 +1771,7 @@ $jobDailySection = if ($dailyDays.Count -gt 0) {
     @"
 ### Last $JobDailyDays Days Summary
 
-Jobs are counted on the day they started; today is partial. Backups only (restores and system/DR backups excluded).
+Jobs are counted on the day they started; today is partial. Restores are excluded.
 
 $(New-JobStatusTable -Jobs $backupChartJobs -Periods $dailyDays -PeriodKeyFormat 'yyyy-MM-dd' -HeaderFormat 'ddd MMM d')
 "@
@@ -1776,7 +1785,7 @@ $jobTrendSection = if ($trendMonths.Count -gt 0) {
     @"
 ### Last $($trendMonths.Count) Months Backup Statistics
 
-Jobs are counted in the month they started; the current month is partial. Backups only (restores and system/DR backups excluded). Success rate counts completed jobs, including those with errors or warnings. The chart reaches back only as far as Commvault still keeps backup job history: older months whose job records have aged out are not shown (DR backups are retained longer, so they are excluded to avoid showing a misleading one-per-day count for those months).
+Jobs are counted in the month they started; the current month is partial. Restores are excluded. Success rate counts completed jobs, including those with errors or warnings. The chart reaches back only as far as Commvault still keeps backup job history: after older months age out, only the daily system/DR backup remains (about one job per day), so leading months with at most one backup per day are not shown and the chart starts at the first month with real workload.
 
 $(New-JobStatusTable -Jobs $backupChartJobs -Periods $trendMonths -PeriodKeyFormat 'yyyy-MM' -HeaderFormat $monthFormat)
 "@
