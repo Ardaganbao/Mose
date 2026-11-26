@@ -149,7 +149,45 @@ function New-HpSession {
     )
     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $certificateCallback
         try {
-            $entrypointResponse = Invoke-WebRequest -Uri "https://$ip/redfish/v1" -Method Get -UseBasicParsing -ErrorAction Stop -TimeoutSec 30
+            # Old iLO firmware answers /redfish/v1 with HTTP 308 Moved Permanently (usually to the
+            # trailing-slash form /redfish/v1/). PowerShell 5.1 does not follow 308 on its own, so follow
+            # it here, same HTTPS origin only. Any other failure (incl. 404/405) falls to the outer catch,
+            # which keeps the existing iLO 4 (/rest/v1) fallback.
+            $entrypointUri = [Uri]"https://$ip/redfish/v1"
+            $entrypointRedirects = 0
+            while ($true) {
+                try {
+                    $entrypointResponse = Invoke-WebRequest -Uri $entrypointUri.AbsoluteUri -Method Get -UseBasicParsing -ErrorAction Stop -TimeoutSec 30
+                    break
+                }
+                catch {
+                    $redirectResponse = $_.Exception.Response
+                    $redirectStatus = $null
+                    if ($null -ne $redirectResponse -and $null -ne $redirectResponse.PSObject.Properties['StatusCode']) {
+                        $redirectStatus = [int]$redirectResponse.StatusCode
+                    }
+                    if ($redirectStatus -ne 308) {
+                        throw
+                    }
+                    $location = $null
+                    if ($null -ne $redirectResponse) { $location = [string]$redirectResponse.Headers['Location'] }
+                    if ([string]::IsNullOrWhiteSpace($location)) {
+                        $location = $entrypointUri.AbsolutePath.TrimEnd('/') + '/'
+                    }
+                    $redirectUri = [Uri]::new($entrypointUri, $location)
+                    if ($redirectUri.Scheme -ne 'https' -or
+                        $redirectUri.Host -ne $entrypointUri.Host -or
+                        $redirectUri.Port -ne $entrypointUri.Port) {
+                        throw "The iLO Redfish entry point redirected to a different HTTPS origin: $redirectUri"
+                    }
+                    if ($entrypointRedirects -ge 3) {
+                        throw 'The iLO Redfish entry point exceeded the maximum of three HTTP 308 redirects.'
+                    }
+                    Write-Verbose "Following iLO Redfish entry-point redirect to $redirectUri"
+                    $entrypointUri = $redirectUri
+                    $entrypointRedirects++
+                }
+            }
             $entrypoint = $entrypointResponse.Content | ConvertFrom-Json
             $SessionServiceURI = $entrypoint.SessionService.'@odata.id'
             if ([string]::IsNullOrWhiteSpace([string]$SessionServiceURI)) {

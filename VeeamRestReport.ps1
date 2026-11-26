@@ -1112,7 +1112,37 @@ $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidatio
 )
 try {
     Write-VeeamReportProgress -Status "Signing in to $apiBase" -PercentComplete 0
-    Connect-VeeamApi
+    try {
+        Connect-VeeamApi
+    }
+    catch {
+        # Veeam Community Edition (and some other limited editions) do not license the REST API: the
+        # sign-in answers HTTP 500 "REST API is not available in your product edition." Rather than fail
+        # the whole server, fall back to the Veeam PowerShell module through VeeamReport.ps1 - the same
+        # collector the 'Veeam' module uses, which works on these editions. Any other sign-in failure
+        # (wrong login, no answer, unknown version) is still raised as before.
+        if ($_.Exception.Message -notmatch '(?i)not available in your product edition|REST API is not available') {
+            throw
+        }
+        $consoleReport = Join-Path $PSScriptRoot 'VeeamReport.ps1'
+        if (-not (Test-Path -LiteralPath $consoleReport -PathType Leaf)) {
+            throw (New-VeeamApiException -InnerException $_.Exception -Message "The Veeam REST API is not available in this product edition (e.g. Community Edition), and VeeamReport.ps1 - which reads Veeam through its PowerShell module instead - is missing: run .\Start.ps1 -UpdateOnly.")
+        }
+        $consoleParameters = @{ Server = $Server; NoOpen = $true; OutputPath = '' }
+        if (Test-VeeamConsoleHere) {
+            if ($Credential) { $consoleParameters.Credential = $Credential }
+            $where = 'the Veeam console on this computer'
+        }
+        else {
+            $consoleParameters.RunOnVbrServer = $true
+            if ($Credential) { $consoleParameters.RemotingCredential = $Credential }
+            $where = "PowerShell remoting on the Veeam server $Server"
+        }
+        Write-Warning "Veeam REST API is not available in this product edition; falling back to the Veeam PowerShell module through $where (VeeamReport.ps1)."
+        Write-VeeamReportProgress -Status "Reading Veeam through $where" -PercentComplete 50
+        & $consoleReport @consoleParameters
+        return
+    }
 
     $serverInfo = Invoke-VeeamApi -Path '/api/v1/serverInfo'
     $version = Get-VeeamValue $serverInfo 'buildVersion', 'version'
