@@ -166,6 +166,13 @@ function ConvertTo-MarkdownCell {
     # Commvault renders an unset date as the Unix epoch (Jan 1 1970, or Dec 31 1969 in some zones);
     # show nothing rather than a meaningless 1970 date.
     if ($text -match '^(Jan 0?1,? 1970|0?1 Jan 1970|1970-01-01|Dec 31,? 1969|31 Dec 1969|1969-12-31)') { return '' }
+    # Round long decimals (e.g. license usage 0.55875587463378 -> 0.56); leave integers and ids alone.
+    if ($text -match '^-?\d+\.\d{3,}$') {
+        $decimal = 0.0
+        if ([double]::TryParse($text, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$decimal)) {
+            $text = ('{0:0.##}' -f $decimal)
+        }
+    }
     return $text
 }
 
@@ -179,10 +186,14 @@ function ConvertTo-MarkdownTable {
         }
     }
     # Drop columns the API did not fill in: empty in every row (e.g. dates Commvault left at the epoch,
-    # now blanked). A column kept when at least one row has a value.
+    # now blanked), or zero in every row (an unused licence type like Eval or CommvaultCompleteSnap).
+    # A column is kept when at least one row has a non-empty, non-zero value.
     $columns = @($columns | Where-Object {
             $col = $_
-            @($Rows | Where-Object { (ConvertTo-MarkdownCell -Value $_.$col) -ne '' }).Count -gt 0
+            @($Rows | Where-Object {
+                    $cell = ConvertTo-MarkdownCell -Value $_.$col
+                    $cell -ne '' -and $cell -notmatch '^0+(\.0+)?$'
+                }).Count -gt 0
         })
     if ($columns.Count -eq 0) { return '' }
     $lines = @(
@@ -202,7 +213,7 @@ function ConvertFrom-CommvaultDataset {
     $columns = @($Response.columns)
     foreach ($record in @($Response.records)) {
         if ($record -isnot [array]) {
-            $record | Select-Object -Property * -ExcludeProperty 'sys_rowid', '$row_number$', 'LicUsageType'
+            $record | Select-Object -Property * -ExcludeProperty 'sys_rowid', '$row_number$', 'LicUsageType', 'InputMsg'
             continue
         }
         $row = [ordered]@{}
@@ -210,7 +221,7 @@ function ConvertFrom-CommvaultDataset {
             $name = Get-FirstObjectValue -InputObject $columns[$index] -Names @('displayName', 'name', 'dataField')
             # Skip Commvault's internal row id, report template placeholders like $row_number$, and the
             # numeric LicUsageType code (its readable name is already shown in the Dial column).
-            if (-not $name -or $name -eq 'sys_rowid' -or $name -eq 'LicUsageType' -or $name -match '^\$.*\$$') { continue }
+            if (-not $name -or $name -eq 'sys_rowid' -or $name -eq 'LicUsageType' -or $name -eq 'InputMsg' -or $name -match '^\$.*\$$') { continue }
             $row[[string]$name] = $record[$index]
         }
         [PSCustomObject]$row
@@ -1250,7 +1261,7 @@ $allJobRows = @(foreach ($record in $allJobRecords) {
     if (-not $application) { $application = 'Unknown' }
     $planName = if ($plan) { Get-FirstObjectValue -InputObject $plan -Names @('planName', 'name') } else { $null }
     if (-not $planName) { $planName = Get-FirstObjectValue -InputObject $summary -Names @('planName', 'slaName') }
-    if (-not $planName) { $planName = 'Not returned by API' }
+    if (-not $planName) { $planName = '' }
 
     $startValue = Get-FirstObjectValue -InputObject $summary -Names @('jobStartTime', 'startTime', 'lastUpdateTime')
     $startTime = ConvertFrom-CommvaultTimestamp -Value $startValue
@@ -1417,7 +1428,7 @@ try {
                         Client            = [string]$inventoryClient
                         Application       = [string]$application
                         Item              = [string]$protectedName
-                        Plan              = if ($inventoryPlan) { [string]$inventoryPlan } else { 'Not returned by API' }
+                        Plan              = if ($inventoryPlan) { [string]$inventoryPlan } else { '' }
                         LatestStatus      = 'No job in lookback'
                         LatestRun         = $null
                         LastSuccessfulRun = $null
@@ -1425,7 +1436,7 @@ try {
                         SlaStatus         = $null
                     }
                 }
-                elseif ($inventoryPlan -and $protectedItemsByKey[$itemKey].Plan -eq 'Not returned by API') {
+                elseif ($inventoryPlan -and -not $protectedItemsByKey[$itemKey].Plan) {
                     $protectedItemsByKey[$itemKey].Plan = [string]$inventoryPlan
                 }
             }
@@ -1581,8 +1592,16 @@ try {
         $commvaultSlaBlock = "**Commvault SLA (Command Center): $cvMet of $cvTotal met ($cvPct%), $cvMissed missed.**"
         if ($cvPending.Count -gt 0) { $commvaultSlaBlock += ' ' + ($cvPending -join '; ') + '.' }
         if ($cvMissedClients.Count -gt 0) { $commvaultSlaBlock += " Missed: $($cvMissedClients -join ', ')." }
-        # Mark the per-item analysis below as MOSE's own so the two figures are not confused.
-        $slaSummary = "MOSE per-item analysis (can differ from the Command Center figure above): $slaSummary"
+        # Command Center is authoritative above, so drop MOSE's own met/missed count (it reads as a
+        # competing figure). Keep only the context the dashboard tile does not give: the SLA period and
+        # any items with no backup at all, which are worth verifying.
+        $moseContext = "SLA period: $($slaPeriods -join ', ') ($slaSource)."
+        $moseExtras = @()
+        if ($slaExcluded -gt 0) { $moseExtras += "$slaExcluded excluded from SLA" }
+        if ($slaNoHistory -gt 0) { $moseExtras += "$slaNoHistory with no backup in the last $fetchedDays days (often default/system subclients) - verify whether they are meant to be protected" }
+        $slaSummary = "MOSE per-item view (context only; the Command Center figure above is authoritative) - $moseContext"
+        if ($moseExtras.Count -gt 0) { $slaSummary += ' ' + ($moseExtras -join '; ') + '.' }
+        if ($slaNote) { $slaSummary += " $slaNote" }
     }
     $apiTimes['sla-counts'] = $apiTimer.Elapsed.ToString('m\:ss')
 }
