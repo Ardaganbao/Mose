@@ -1139,13 +1139,20 @@ $licenseDatasets = [ordered]@{
     'Other'                      = 'd7faef75-cf66-40a2-98ce-a2d0cc2a144b:2654b01f-9bb0-481e-b273-4b4fddc585b1'
 }
 $apiTimes['token'] = $apiTimer.Elapsed.ToString('m\:ss')
-Write-CommvaultReportProgress -Status "License usage: asking for $($licenseDatasets.Count) datasets at once" -PercentComplete 5
 
 $licenseSections = @()
 $licenseNotes = @()
 $licenseForbidden = @()
-# Commvault runs each dataset's query when it is asked for, so they are all asked for at once.
-$licenseNames = @($licenseDatasets.Keys)
+$licenseResults = @()
+$licenseNames = @()
+# On Commvault Cloud the License Summary datasets are CommCell-administrator reports: a tenant gets
+# nothing from them (403 / no rows) and the one-at-a-time retry of their connection failures costs
+# many minutes. Cloud licence usage comes from the Subscription Usage by Tenant dataset below instead,
+# so the License Summary fetch runs on-premises only.
+if ($Mode -ne 'Cloud') {
+    Write-CommvaultReportProgress -Status "License usage: asking for $($licenseDatasets.Count) datasets at once" -PercentComplete 5
+    # Commvault runs each dataset's query when it is asked for, so they are all asked for at once.
+    $licenseNames = @($licenseDatasets.Keys)
 $licenseRequests = @(foreach ($licenseName in $licenseNames) {
     @{ Method = 'GET'; Path = "/cr/reportsplusengine/datasets/$($licenseDatasets[$licenseName])/data" }
 })
@@ -1196,6 +1203,7 @@ for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) 
 }
 if ($licenseForbidden.Count -gt 0) {
     $licenseNotes = @("- $($licenseForbidden -join ', '): Commvault refused them to this account (HTTP 403 Forbidden): the License Summary report is for CommCell administrators.") + $licenseNotes
+}
 }
 
 # Subscription Usage by Tenant (Commvault Cloud / Metallic). The License Summary datasets above return
