@@ -333,7 +333,11 @@ function Format-CommvaultSubscriptionUsage {
             $purchasedNumber = 0.0; $usedNumber = 0.0
             $hasPurchased = [double]::TryParse([string]$purchased, $float, $invariant, [ref]$purchasedNumber)
             $hasUsed = [double]::TryParse([string]$used, $float, $invariant, [ref]$usedNumber)
-            $purchasedCell = if ($hasPurchased) { "$($purchasedNumber.ToString('0.######', $invariant)) $unit".Trim() } elseif ($purchased) { "$purchased $unit".Trim() } else { '' }
+            # Commvault gives an unlimited subscription (e.g. Microsoft 365 capacity with no cap) as -1.
+            $purchasedCell = if ($hasPurchased -and $purchasedNumber -lt 0) { 'Unlimited' }
+            elseif ($hasPurchased) { "$($purchasedNumber.ToString('0.######', $invariant)) $unit".Trim() }
+            elseif ($purchased) { "$purchased $unit".Trim() }
+            else { '' }
             $usedCell = if ($hasUsed) { "$($usedNumber.ToString('0.######', $invariant)) $unit".Trim() } elseif ($used) { "$used $unit".Trim() } else { '' }
             $usedPct = if ($hasPurchased -and $hasUsed -and $purchasedNumber -gt 0) { '{0:0} %' -f ($usedNumber / $purchasedNumber * 100) } else { '' }
 
