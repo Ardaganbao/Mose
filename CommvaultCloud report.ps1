@@ -746,7 +746,9 @@ function New-MetallicApiRequest {
         [hashtable]$Query = $null,
         [hashtable]$AdditionalHeaders = $null,
         [object]$Body = $null,
-        [switch]$DisableKeepAlive
+        [switch]$DisableKeepAlive,
+        [int]$TimeoutSec = 0,
+        [switch]$EncodeDatasetColon
     )
 
     $uri = [System.UriBuilder]::new($script:BaseUri)
@@ -788,6 +790,14 @@ function New-MetallicApiRequest {
     # "Could not create SSL/TLS secure channel" when it reuses a connection the Metallic gateway has
     # already closed, so the reports-plus-engine calls use this to avoid stale-connection failures.
     if ($DisableKeepAlive) { $requestParameters['DisableKeepAlive'] = $true }
+    # Cap the wait: a request a firewall silently drops otherwise hangs for the 100 s default.
+    if ($TimeoutSec -gt 0) { $requestParameters['TimeoutSec'] = $TimeoutSec }
+    # Send the report:dataset id's ':' as %3A. Firewalls/IPS often block a ':' in a URL path (NTFS
+    # alternate-data-stream rule), which resets the connection ("Could not create SSL/TLS secure
+    # channel"). Done on the final string because UriBuilder.Path would re-escape the '%'.
+    if ($EncodeDatasetColon) {
+        $requestParameters.Uri = $requestParameters.Uri -replace '(/datasets/[0-9a-fA-F-]{36}):([0-9a-fA-F-]{36})', '$1%3A$2'
+    }
     return $requestParameters
 }
 
@@ -799,10 +809,14 @@ function Invoke-MetallicApi {
         [hashtable]$Query = $null,
         [hashtable]$AdditionalHeaders = $null,
         [object]$Body = $null,
-        [switch]$DisableKeepAlive
+        [switch]$DisableKeepAlive,
+        [int]$TimeoutSec = 0,
+        [switch]$EncodeDatasetColon
     )
 
-    $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body -DisableKeepAlive:$DisableKeepAlive
+    # Connection options, passed again whenever the request is rebuilt after a token renewal.
+    $connectionOptions = @{ DisableKeepAlive = $DisableKeepAlive; TimeoutSec = $TimeoutSec; EncodeDatasetColon = $EncodeDatasetColon }
+    $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body @connectionOptions
     Write-Progress -Activity "Invoke-MetallicApi $Method : $($requestParameters.Uri)" -Id 2
     # Windows PowerShell 5.1 slows large downloads by drawing its own download progress bar;
     # hiding it for this function only keeps the report progress bars visible.
@@ -817,7 +831,7 @@ function Invoke-MetallicApi {
         if ($statusCode -eq 401 -and $script:CommvaultMode -eq 'OnPrem') {
             if ($script:SecretObject.Username -and $script:SecretObject.Password) {
                 Connect-CommvaultOnPrem
-                $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body -DisableKeepAlive:$DisableKeepAlive
+                $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body @connectionOptions
                 return Invoke-RestMethod @requestParameters
             }
             throw "Commvault refused the access token in secret '$($script:SecretObject.Name)' (401 Unauthorized) at $($requestParameters.Uri). If it expired or was revoked, run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again - it now stores a username and password and logs in for a fresh token each run."
@@ -827,7 +841,7 @@ function Invoke-MetallicApi {
         }
 
         Update-MetallicAccessToken
-        $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body -DisableKeepAlive:$DisableKeepAlive
+        $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body @connectionOptions
         return Invoke-RestMethod @requestParameters
     }
 }
@@ -1224,49 +1238,67 @@ if ($Mode -eq 'Cloud') {
         # sys_rowid is kept because some datasets require it; every field is aliased so the parsed
         # column names are deterministic (ConvertFrom-CommvaultDataset drops sys_rowid itself).
         $subFields = '[sys_rowid],[baseOfferingDisplayName] AS [Offering],[subscriptionType] AS [Subscription],[unitOfMeasure] AS [Unit],[quantity] AS [Entitled],[peakUsage] AS [PeakUsage],[peakUsagePct] AS [PeakPct],[isActive] AS [Active],[startDate] AS [StartDate],[endDate] AS [EndDate]'
-        # Retry on a connection-level failure only (no HTTP status): .NET 4.x reuses a pooled connection
-        # the gateway has closed and throws "Could not create SSL/TLS secure channel". DisableKeepAlive
-        # forces a fresh connection; a real HTTP answer (200/400/401/403) is handled, never retried.
+        # From some networks the call is reset before Commvault answers ("Could not create SSL/TLS secure
+        # channel") while every other api.metallic.io call works: a firewall/IPS between this machine and
+        # Commvault Cloud blocks the ':' in the report:dataset path and/or the bracketed fields query
+        # (looks like SQL). So up to three shapes are tried - each on a fresh connection, capped at 25 s
+        # so a dropped request cannot hang the report - and the first one Commvault actually answers wins:
+        #   1. as Command Center sends it   2. ':' sent as %3A   3. %3A and no fields query (default columns)
+        # A real HTTP answer (200/401/403...) is final and handled below; only a connection failure moves on.
+        $subPath = '/cr/reportsplusengine/datasets/e2a304c9-fc1c-4ced-a5eb-d393e500fbca:bcdb3658-e0a4-46cb-8d22-d8a732f9289c/data'
+        $subFullQuery = @{ fields = $subFields; orderby = '[baseOfferingDisplayName] Asc'; timeZoneOffset = '-60' }
+        $subShapes = @(
+            @{ EncodeDatasetColon = $false; Query = $subFullQuery }
+            @{ EncodeDatasetColon = $true;  Query = $subFullQuery }
+            @{ EncodeDatasetColon = $true;  Query = @{ timeZoneOffset = '-60' } }
+        )
         $subResponse = $null
-        for ($subAttempt = 1; $subAttempt -le 4; $subAttempt++) {
+        for ($subIndex = 0; $subIndex -lt $subShapes.Count; $subIndex++) {
+            $shape = $subShapes[$subIndex]
             try {
-                $subResponse = Invoke-MetallicApi -Method GET -Path '/cr/reportsplusengine/datasets/e2a304c9-fc1c-4ced-a5eb-d393e500fbca:bcdb3658-e0a4-46cb-8d22-d8a732f9289c/data' -DisableKeepAlive -Query @{
-                    fields         = $subFields
-                    orderby        = '[baseOfferingDisplayName] Asc'
-                    timeZoneOffset = '-60'
-                }
+                $subResponse = Invoke-MetallicApi -Method GET -Path $subPath -Query $shape.Query -DisableKeepAlive -TimeoutSec 25 -EncodeDatasetColon:$shape.EncodeDatasetColon
                 break
             }
             catch {
-                if ((Get-HttpStatusCode -Exception $_.Exception) -or $subAttempt -ge 4) { throw }
-                Start-Sleep -Seconds 2
+                if ((Get-HttpStatusCode -Exception $_.Exception) -or $subIndex -ge $subShapes.Count - 1) { throw }
             }
         }
         $subRowsRaw = @(ConvertFrom-CommvaultDataset -Response $subResponse)
         if ($subRowsRaw.Count -gt 0) {
+            # Our aliases (Offering, Entitled...) come back with the fields query; without it (shape 3) the
+            # dataset's own column names do - so each value is read from a list of candidate names.
+            $pick = {
+                param($Row, [string[]]$Names)
+                Get-FirstObjectValue -InputObject $Row -Names $Names
+            }
             $subRows = @(foreach ($r in $subRowsRaw) {
-                    $active = switch -Regex ("$($r.Active)") {
+                    $activeRaw = & $pick $r @('Active', 'isActive', 'Is Active', 'Status')
+                    $active = switch -Regex ("$activeRaw") {
                         '^(1|true|yes)$' { 'Yes'; break }
                         '^(0|false|no)$' { 'No'; break }
-                        default { "$($r.Active)" }
+                        default { "$activeRaw" }
                     }
-                    $pct = "$($r.PeakPct)"
+                    $pct = "$(& $pick $r @('PeakPct', 'peakUsagePct', 'Peak Usage Pct', 'Peak Usage %', 'Peak Usage (%)', 'Peak %'))"
                     if ($pct -match '^-?\d+(\.\d+)?$') { $pct = '{0:0.#} %' -f [double]$pct }
                     [PSCustomObject][ordered]@{
-                        'Offering'     = $r.Offering
-                        'Subscription' = $r.Subscription
-                        'Unit'         = $r.Unit
-                        'Entitled'     = $r.Entitled
-                        'Peak usage'   = $r.PeakUsage
+                        'Offering'     = & $pick $r @('Offering', 'baseOfferingDisplayName', 'Base Offering', 'Base Offering Display Name', 'Offering Name')
+                        'Subscription' = & $pick $r @('Subscription', 'subscriptionType', 'Subscription Type')
+                        'Unit'         = & $pick $r @('Unit', 'unitOfMeasure', 'Unit Of Measure', 'Unit of Measure')
+                        'Entitled'     = & $pick $r @('Entitled', 'quantity', 'Quantity')
+                        'Peak usage'   = & $pick $r @('PeakUsage', 'peakUsage', 'Peak Usage')
                         'Peak %'       = $pct
                         'Active'       = $active
-                        'Start'        = Format-CommvaultSubscriptionDate $r.StartDate
-                        'End'          = Format-CommvaultSubscriptionDate $r.EndDate
+                        'Start'        = Format-CommvaultSubscriptionDate (& $pick $r @('StartDate', 'startDate', 'Start Date'))
+                        'End'          = Format-CommvaultSubscriptionDate (& $pick $r @('EndDate', 'endDate', 'End Date'))
                     }
                 })
+            # If none of the candidate names matched (unexpected column names), show the dataset as it
+            # came back rather than an empty table.
+            $mapped = @($subRows | Where-Object { $_.Offering }).Count -gt 0
+            $subTable = if ($mapped) { ConvertTo-MarkdownTable -Rows $subRows } else { ConvertTo-MarkdownTable -Rows $subRowsRaw }
             # Real subscription usage goes at the top of the licence section; a non-empty licenseSections
             # also skips the manual-export placeholder below.
-            $licenseSections = @("### Subscription usage by tenant`r`n`r`n$(ConvertTo-MarkdownTable -Rows $subRows)") + $licenseSections
+            $licenseSections = @("### Subscription usage by tenant`r`n`r`n$subTable") + $licenseSections
         }
         else {
             $licenseNotes += '- Subscription Usage by Tenant: the dataset returned no rows.'
@@ -1277,8 +1309,11 @@ if ($Mode -eq 'Cloud') {
         if ($subCode -eq 403) {
             $licenseNotes += '- Subscription Usage by Tenant: Commvault refused it to this account (HTTP 403 Forbidden).'
         }
+        elseif (-not $subCode) {
+            $licenseNotes += "- Subscription Usage by Tenant: the connection was reset before Commvault answered ($($_.Exception.Message)). Other Commvault Cloud calls work, so a firewall/proxy on this network is likely blocking Commvault's reports API path."
+        }
         else {
-            $licenseNotes += "- Subscription Usage by Tenant: $(if ($subCode) { "HTTP $subCode - " })$($_.Exception.Message)"
+            $licenseNotes += "- Subscription Usage by Tenant: HTTP $subCode - $($_.Exception.Message)"
         }
     }
 }
