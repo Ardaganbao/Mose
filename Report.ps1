@@ -187,7 +187,8 @@ function Start-TargetRun {
             # Kept by Open-MoseVault.
             $vaultPassword = Get-Variable -Name MoseVaultPassword -ValueOnly -ErrorAction SilentlyContinue
         }
-        elseif ($target.Module -notin 'Veeam', 'HyperV', 'SqlMaint' -or (Get-MoseProperty $target 'Secret')) {
+        elseif ($target.Module -notin 'Veeam', 'HyperV', 'SqlMaint', 'Windows' -or (Get-MoseProperty $target 'Secret')) {
+            # Windows (like Veeam/Hyper-V) runs as the current Windows account when no login was saved.
             $credential = Get-TargetCredential $target
         }
         # With -DebugLog, what the server answered goes next to the debug log, for the modules that can write it.
