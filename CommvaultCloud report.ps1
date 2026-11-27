@@ -1919,19 +1919,46 @@ if ($Mode -eq 'OnPrem') {
     try {
         Write-CommvaultReportProgress -Status 'Storage: reading media agents' -PercentComplete 86
         $maResponse = Invoke-MetallicApi -Method GET -Path '/MediaAgent'
-        $mediaAgents = @(Get-CommvaultApiEntities -Response $maResponse -CollectionNames @('mediaAgentList', 'mediaAgents', 'response') -WrapperNames @('mediaAgent', 'mediaAgentInfo', 'entityInfo'))
+        # The /MediaAgent list carries only name + id (in entityInfo); status/version need the per-agent
+        # detail call /MediaAgent/{id}. Keep the item whole (no unwrap) so we can read its id.
+        $mediaAgents = @()
+        foreach ($cn in @('mediaAgentList', 'mediaAgents', 'response')) {
+            $prop = $maResponse.PSObject.Properties[$cn]
+            if ($null -ne $prop -and $null -ne $prop.Value) { $mediaAgents = @($prop.Value); break }
+        }
         if ($mediaAgents.Count -gt 0) {
             $maLines = foreach ($ma in $mediaAgents) {
-                $name = Get-FirstObjectValue -InputObject $ma -Names @('mediaAgentName', 'name', 'displayName', 'clientName')
-                $statusRaw = Get-FirstObjectValue -InputObject $ma -Names @('status', 'isOnline', 'onlineStatus', 'health')
+                $entity = if ($ma.PSObject.Properties['entityInfo']) { $ma.entityInfo } else { $ma }
+                $name = Get-FirstObjectValue -InputObject $entity -Names @('name', 'mediaAgentName', 'displayName', 'clientName')
+                $maId = Get-FirstObjectValue -InputObject $entity -Names @('id', 'mediaAgentId', 'clientId')
+                $statusRaw = $null; $version = $null
+                if ($maId) {
+                    try {
+                        $maDetail = Invoke-MetallicApi -Method GET -Path "/MediaAgent/$maId"
+                        $src = $maDetail
+                        foreach ($cn in @('mediaAgentList', 'mediaAgents', 'response')) {
+                            $p = $maDetail.PSObject.Properties[$cn]
+                            if ($null -ne $p -and $null -ne $p.Value) {
+                                $first = @($p.Value)[0]
+                                if ($null -ne $first) { $src = $first }
+                                break
+                            }
+                        }
+                        foreach ($w in @('mediaAgent', 'mediaAgentInfo', 'mediaAgentProperties')) {
+                            if ($src.PSObject.Properties[$w] -and $null -ne $src.$w) { $src = $src.$w }
+                        }
+                        $statusRaw = Get-FirstObjectValue -InputObject $src -Names @('status', 'isOnline', 'onlineStatus', 'health', 'mediaAgentStatus')
+                        $version = Get-FirstObjectValue -InputObject $src -Names @('version', 'mediaAgentVersion', 'csVersion')
+                        $offline = Get-FirstObjectValue -InputObject $src -Names @('offlineReason')
+                        if ($null -ne $offline -and "$offline" -ne '0') { $statusRaw = 'Offline' }
+                    }
+                    catch { }
+                }
                 $status = switch -Regex ("$statusRaw") {
                     '^(1|true|online|ready|up)$' { 'Online'; break }
                     '^(0|false|offline|down)$' { 'Offline'; break }
-                    default { if ("$statusRaw") { "$statusRaw" } else { 'Unknown' } }
+                    default { if ("$statusRaw") { "$statusRaw" } else { '-' } }
                 }
-                $offline = Get-FirstObjectValue -InputObject $ma -Names @('offlineReason')
-                if ($null -ne $offline -and "$offline" -ne '0') { $status = 'Offline' }
-                $version = Get-FirstObjectValue -InputObject $ma -Names @('version', 'mediaAgentVersion', 'osName')
                 "| $(ConvertTo-MarkdownCell $name) | $status | $(ConvertTo-MarkdownCell $version) |"
             }
             $storageBlocks += "### Media agents`r`n`r`n| Media agent | Status | Version |`r`n|---|---|---|`r`n$($maLines -join "`r`n")"
@@ -1945,25 +1972,42 @@ if ($Mode -eq 'OnPrem') {
         $storageNotes += "- /MediaAgent: $(if ($maCode) { "HTTP $maCode - " })$($_.Exception.Message)"
     }
 
-    # Storage pools: capacity, free space, used %.
+    # Storage pools: capacity, free space, used %. The /StoragePool items carry capacity/free/status at
+    # the TOP level and the pool name only in a nested storagePoolEntity, so do NOT unwrap the item
+    # (unwrapping to the entity drops every size, which is what showed "Unavailable"). Sizes are in MB.
     try {
         Write-CommvaultReportProgress -Status 'Storage: reading storage pools' -PercentComplete 88
         $spResponse = Invoke-MetallicApi -Method GET -Path '/StoragePool'
-        $pools = @(Get-CommvaultApiEntities -Response $spResponse -CollectionNames @('storagePoolList', 'storagePools', 'response') -WrapperNames @('storagePoolEntity', 'storagePool', 'entityInfo'))
+        $pools = @()
+        foreach ($cn in @('storagePoolList', 'storagePools', 'response')) {
+            $prop = $spResponse.PSObject.Properties[$cn]
+            if ($null -ne $prop -and $null -ne $prop.Value) { $pools = @($prop.Value); break }
+        }
         if ($pools.Count -gt 0) {
             $poolLines = foreach ($pool in $pools) {
                 $name = Get-FirstObjectValue -InputObject $pool -Names @('storagePoolName', 'name', 'displayName')
-                $type = Get-FirstObjectValue -InputObject $pool -Names @('storagePoolType', 'type', 'deviceType')
-                $totalRaw = Get-FirstObjectValue -InputObject $pool -Names @('totalCapacityBytes', 'totalCapacity', 'capacityBytes', 'totalSizeBytes', 'sizeOnDisk')
-                $freeRaw = Get-FirstObjectValue -InputObject $pool -Names @('totalFreeSpaceBytes', 'totalFreeSpace', 'freeSpaceBytes', 'remainingCapacityBytes', 'freeSpace')
-                $used = ''
-                $totalNum = 0.0; $freeNum = 0.0
-                if ([double]::TryParse("$totalRaw", [ref]$totalNum) -and $totalNum -gt 0 -and [double]::TryParse("$freeRaw", [ref]$freeNum)) {
-                    $used = '{0:N0} %' -f ((($totalNum - $freeNum) / $totalNum) * 100)
+                if (-not $name -and $pool.PSObject.Properties['storagePoolEntity']) {
+                    $name = Get-FirstObjectValue -InputObject $pool.storagePoolEntity -Names @('storagePoolName', 'name')
                 }
-                "| $(ConvertTo-MarkdownCell $name) | $(ConvertTo-MarkdownCell $type) | $(ConvertTo-ReadableBytes $totalRaw) | $(ConvertTo-ReadableBytes $freeRaw) | $used |"
+                if (-not $name -and $pool.PSObject.Properties['storagePool']) {
+                    $name = Get-FirstObjectValue -InputObject $pool.storagePool -Names @('clientGroupName', 'name')
+                }
+                $status = Get-FirstObjectValue -InputObject $pool -Names @('status', 'statusString')
+                # Sizes are returned in MB - convert to bytes for ConvertTo-ReadableBytes.
+                $totalMb = Get-FirstObjectValue -InputObject $pool -Names @('totalCapacity', 'totalCapacityMB', 'capacityMB')
+                $freeMb = Get-FirstObjectValue -InputObject $pool -Names @('totalFreeSpace', 'totalUsableFreeSpace', 'freeSpace')
+                $totalBytes = $null; $freeBytes = $null; $tmp = 0.0
+                if ([double]::TryParse("$totalMb", [ref]$tmp) -and $tmp -gt 0) { $totalBytes = $tmp * 1MB }
+                if ([double]::TryParse("$freeMb", [ref]$tmp)) { $freeBytes = $tmp * 1MB }
+                $used = ''
+                if ($null -ne $totalBytes -and $totalBytes -gt 0 -and $null -ne $freeBytes) {
+                    $used = '{0:N0} %' -f ((($totalBytes - $freeBytes) / $totalBytes) * 100)
+                }
+                $capCell = if ($null -ne $totalBytes) { ConvertTo-ReadableBytes $totalBytes } else { 'Unavailable' }
+                $freeCell = if ($null -ne $freeBytes) { ConvertTo-ReadableBytes $freeBytes } else { 'Unavailable' }
+                "| $(ConvertTo-MarkdownCell $name) | $(ConvertTo-MarkdownCell $status) | $capCell | $freeCell | $used |"
             }
-            $storageBlocks += "### Storage pools`r`n`r`n| Storage pool | Type | Capacity | Free | Used |`r`n|---|---|---:|---:|---:|`r`n$($poolLines -join "`r`n")"
+            $storageBlocks += "### Storage pools`r`n`r`n| Storage pool | Status | Capacity | Free | Used |`r`n|---|---|---:|---:|---:|`r`n$($poolLines -join "`r`n")"
         }
         else {
             $storageNotes += "- /StoragePool: no storage pool was returned (or the field names differ on this CommServe)."
@@ -1978,13 +2022,40 @@ if ($Mode -eq 'OnPrem') {
     # detail level; when it does not, a note says so rather than inventing a number.
     try {
         Write-CommvaultReportProgress -Status 'Storage: reading tape libraries' -PercentComplete 90
-        $libResponse = Invoke-MetallicApi -Method GET -Path '/Library' -Query @{ libraryType = '2' }
-        $libraries = @(Get-CommvaultApiEntities -Response $libResponse -CollectionNames @('response', 'libraryList', 'libraries') -WrapperNames @('library', 'entityInfo', 'libraryInfo'))
+        # The plain /Library list returns name + id only (the libraryType=2 filter returns HTTP 500 on this
+        # CommServe), so list all libraries and get spare-media counts from the per-library detail call.
+        $libResponse = Invoke-MetallicApi -Method GET -Path '/Library'
+        $libraries = @()
+        foreach ($cn in @('response', 'libraryList', 'libraries')) {
+            $prop = $libResponse.PSObject.Properties[$cn]
+            if ($null -ne $prop -and $null -ne $prop.Value) { $libraries = @($prop.Value); break }
+        }
         $tapeLines = foreach ($lib in $libraries) {
-            $name = Get-FirstObjectValue -InputObject $lib -Names @('libraryName', 'name', 'displayName', 'alias')
-            $spare = Get-FirstObjectValue -InputObject $lib -Names @('spareMediaCount', 'scratchMediaCount', 'numberOfSpareMedia', 'spareMedia', 'freeMedia')
-            $total = Get-FirstObjectValue -InputObject $lib -Names @('totalMediaCount', 'numberOfMedia', 'mediaCount')
+            $entity = if ($lib.PSObject.Properties['entityInfo']) { $lib.entityInfo } else { $lib }
+            $name = Get-FirstObjectValue -InputObject $entity -Names @('name', 'libraryName', 'displayName', 'alias')
+            $libId = Get-FirstObjectValue -InputObject $entity -Names @('id', 'libraryId')
             if (-not $name) { continue }
+            $spare = $null; $total = $null; $isTape = ($name -match '(?i)tape|_TL\d|VTL')
+            if ($libId) {
+                try {
+                    $libDetail = Invoke-MetallicApi -Method GET -Path "/Library/$libId" -Query @{ propertyLevel = '30' }
+                    $src = $libDetail
+                    foreach ($cn in @('libraryList', 'libraries', 'response')) {
+                        $p = $libDetail.PSObject.Properties[$cn]
+                        if ($null -ne $p -and $null -ne $p.Value) { $first = @($p.Value)[0]; if ($null -ne $first) { $src = $first }; break }
+                    }
+                    foreach ($w in @('library', 'libraryInfo', 'magLibSummary', 'detectedMedia')) {
+                        if ($src.PSObject.Properties[$w] -and $null -ne $src.$w) { $src = $src.$w }
+                    }
+                    $libType = Get-FirstObjectValue -InputObject $src -Names @('libraryType', 'model', 'mediaAgentType')
+                    if ("$libType" -match '(?i)tape' -or "$libType" -eq '2') { $isTape = $true }
+                    $spare = Get-FirstObjectValue -InputObject $src -Names @('spareMediaCount', 'scratchMediaCount', 'numberOfSpareMedia', 'spareMedia', 'freeMedia', 'availableMedia')
+                    $total = Get-FirstObjectValue -InputObject $src -Names @('totalMediaCount', 'numberOfMedia', 'mediaCount', 'totalMedia')
+                    if ($null -ne $spare -or $null -ne $total) { $isTape = $true }
+                }
+                catch { }
+            }
+            if (-not $isTape) { continue }
             "| $(ConvertTo-MarkdownCell $name) | $(if ($null -ne $spare) { ConvertTo-MarkdownCell $spare } else { 'n/a' }) | $(if ($null -ne $total) { ConvertTo-MarkdownCell $total } else { 'n/a' }) |"
         }
         $tapeLines = @($tapeLines | Where-Object { $_ })
