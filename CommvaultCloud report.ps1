@@ -2196,6 +2196,101 @@ if ($Mode -eq 'OnPrem') {
         $storageNotes += "- /StoragePool: $(if ($spCode) { "HTTP $spCode - " })$($_.Exception.Message)"
     }
 
+    # Disk libraries, as Command Center's Storage tile shows them: the dataset and parameters the page
+    # sends (captured from Command Center). Capacity / free / used in MB, free %, predicted "date to be
+    # full", health, and data written vs application size in GB (deduplication savings). Free space
+    # under 10 % is marked :no_entry:, under 20 % :warning:.
+    try {
+        Write-CommvaultReportProgress -Status 'Storage: reading disk libraries' -PercentComplete 89
+        $diskLibraryResponse = Invoke-MetallicApi -Method GET -Path '/cr/reportsplusengine/datasets/2b366703-52e1-4775-8047-1f4cfa13d2db/data' -Query @{
+            'parameter.i_DashboardType' = 'commcell'
+            'parameter.storageType'     = '0'
+        } -DisableKeepAlive -TimeoutSec 60
+        $diskLibraries = @(ConvertFrom-CommvaultDataset -Response $diskLibraryResponse)
+        if ($diskLibraries.Count -gt 0) {
+            $invariant = [cultureinfo]::InvariantCulture
+            $toNumber = {
+                param($Value)
+                $n = 0.0
+                if ([double]::TryParse([string]$Value, [System.Globalization.NumberStyles]::Float, $invariant, [ref]$n)) { return $n }
+                return $null
+            }
+            $diskLines = foreach ($library in $diskLibraries) {
+                $name = Get-FirstObjectValue -InputObject $library -Names @('LibraryName', 'Library Name', 'Library')
+                $health = Get-FirstObjectValue -InputObject $library -Names @('HealthStatus', 'Health Status', 'Health')
+                $totalMb = & $toNumber (Get-FirstObjectValue -InputObject $library -Names @('TotalSpaceMB', 'Total Space (MB)'))
+                $freeMb = & $toNumber (Get-FirstObjectValue -InputObject $library -Names @('TotalFreeSpaceMB', 'Total Free Space (MB)'))
+                $freePct = & $toNumber (Get-FirstObjectValue -InputObject $library -Names @('FreeSpacePercentage', 'Free Space Percentage'))
+                if ($null -eq $freePct -and $totalMb -gt 0 -and $null -ne $freeMb) { $freePct = $freeMb / $totalMb * 100 }
+                $freePctCell = ''
+                if ($null -ne $freePct) {
+                    $freePctCell = $freePct.ToString('0.##', $invariant) + ' %'
+                    if ($freePct -lt 10) { $freePctCell += ' :no_entry:' } elseif ($freePct -lt 20) { $freePctCell += ' :warning:' }
+                }
+                # "Date to be full": an epoch; Commvault puts a far-future sentinel (549755813886) when it
+                # cannot predict one - shown as nothing.
+                $fullBy = ''
+                $fullRaw = Get-FirstObjectValue -InputObject $library -Names @('Date to be Full', 'DateToBeFull')
+                $fullNumber = & $toNumber $fullRaw
+                if ($null -ne $fullNumber -and $fullNumber -gt 0 -and $fullNumber -lt 4102444800) {
+                    $fullDate = [DateTimeOffset]::FromUnixTimeSeconds([long]$fullNumber).LocalDateTime
+                    $fullBy = $fullDate.ToString('MMM d, yyyy', [cultureinfo]::GetCultureInfo('en-US'))
+                    if (($fullDate.Date - (Get-Date).Date).Days -le 90) { $fullBy += ' :warning:' }
+                }
+                elseif ($null -eq $fullNumber -and $fullRaw) {
+                    $fullBy = [string]$fullRaw
+                }
+                [PSCustomObject]@{
+                    Cells     = @(
+                        (ConvertTo-MarkdownCell $name)
+                        (ConvertTo-MarkdownCell $health)
+                        $(if ($null -ne $totalMb) { ConvertTo-ReadableBytes ($totalMb * 1MB) } else { '' })
+                        $(if ($null -ne $freeMb) { ConvertTo-ReadableBytes ($freeMb * 1MB) } else { '' })
+                        $freePctCell
+                        $fullBy
+                    )
+                    # CC* = CommCell totals (data written, application size, deduplication savings).
+                    WrittenGb = & $toNumber (Get-FirstObjectValue -InputObject $library -Names @('CCTotalDataWrittenGB', 'Data Written (GB)'))
+                    AppGb     = & $toNumber (Get-FirstObjectValue -InputObject $library -Names @('CCTotalAppSizeGB', 'Application Size (GB)'))
+                    Savings   = & $toNumber (Get-FirstObjectValue -InputObject $library -Names @('CCTotalSavingsPercentage', 'Savings Percentage'))
+                }
+            }
+            $diskLines = @($diskLines)
+            $formatTotals = {
+                param($Row)
+                @(
+                    $(if ($null -ne $Row.WrittenGb) { ConvertTo-ReadableBytes ($Row.WrittenGb * 1GB) } else { '' })
+                    $(if ($null -ne $Row.AppGb) { ConvertTo-ReadableBytes ($Row.AppGb * 1GB) } else { '' })
+                    $(if ($null -ne $Row.Savings) { $Row.Savings.ToString('0.#', $invariant) + ' %' } else { '' })
+                )
+            }
+            # The CC* figures are CommCell-wide: when every library carries the same ones they are shown
+            # once under the table; only if they differ per library do they get columns.
+            $distinctTotals = @($diskLines | ForEach-Object { "$($_.WrittenGb)|$($_.AppGb)|$($_.Savings)" } | Select-Object -Unique)
+            $hasTotals = @($diskLines | Where-Object { $null -ne $_.WrittenGb -or $null -ne $_.AppGb -or $null -ne $_.Savings }).Count -gt 0
+            if ($hasTotals -and $distinctTotals.Count -gt 1) {
+                $diskRows = $diskLines | ForEach-Object { "| $(@($_.Cells + (& $formatTotals $_)) -join ' | ') |" }
+                $storageBlocks += "### Disk libraries`r`n`r`n| Disk library | Health | Capacity | Free | Free % | Full by | Data written | Application size | Savings |`r`n|---|---|---:|---:|---:|---|---:|---:|---:|`r`n$($diskRows -join "`r`n")"
+            }
+            else {
+                $diskRows = $diskLines | ForEach-Object { "| $($_.Cells -join ' | ') |" }
+                $diskBlock = "### Disk libraries`r`n`r`n| Disk library | Health | Capacity | Free | Free % | Full by |`r`n|---|---|---:|---:|---:|---|`r`n$($diskRows -join "`r`n")"
+                if ($hasTotals) {
+                    $diskTotals = & $formatTotals $diskLines[0]
+                    $diskBlock += "`r`n`r`nCommCell totals: data written $($diskTotals[0]), application size $($diskTotals[1]), deduplication savings $($diskTotals[2])."
+                }
+                $storageBlocks += $diskBlock
+            }
+        }
+        else {
+            $storageNotes += '- Disk libraries (Command Center Storage dataset): no library returned.'
+        }
+    }
+    catch {
+        $dlCode = Get-HttpStatusCode -Exception $_.Exception
+        $storageNotes += "- Disk libraries (Command Center Storage dataset): $(if ($dlCode) { "HTTP $dlCode - " })$($_.Exception.Message)"
+    }
+
     # Tape libraries: free (spare / scratch) media. Not every CommServe returns spare counts at this
     # detail level; when it does not, a note says so rather than inventing a number.
     try {
