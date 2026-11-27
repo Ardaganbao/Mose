@@ -24,7 +24,9 @@
         "VeeamReport.ps1",
         "VeeamRestReport.ps1",
         "sqlmaintenance.ps1",
-        "CommvaultCloud report.ps1"
+        "CommvaultCloud report.ps1",
+        "windowsreport.ps1",
+        "linuxreport.ps1"
     ],
     "Keeper": [
         "Keeper.ps1"
