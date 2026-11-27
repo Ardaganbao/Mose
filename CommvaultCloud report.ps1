@@ -2291,6 +2291,61 @@ if ($Mode -eq 'OnPrem') {
         $storageNotes += "- Disk libraries (Command Center Storage dataset): $(if ($dlCode) { "HTTP $dlCode - " })$($_.Exception.Message)"
     }
 
+    # Deduplication databases, from Commvault's "Deduplication DB Performance and Status" report
+    # (86fef207-...): its DDBDetails dataset with the parameters the report page sends (CSUID = the
+    # CommServe's unique id, read from the report's Commcells dataset; companyId -1 = all). Asked with
+    # format=object so every value comes with its column name (by position the row did not line up
+    # with the column list), and only the fields shown.
+    try {
+        Write-CommvaultReportProgress -Status 'Storage: reading deduplication databases' -PercentComplete 90
+        $ddbReport = '86fef207-4d7d-423f-fb27-ee1d4cbf9282'
+        $ddbQuery = @{ 'parameter.companyId' = '-1'; format = 'object' }
+        try {
+            $commcells = @(ConvertFrom-CommvaultDataset -Response (Invoke-MetallicApi -Method GET -Path "/cr/reportsplusengine/datasets/$($ddbReport):197d3dee-ae88-457b-85cc-733bb63f3ed0/data" -Query @{ format = 'object' } -DisableKeepAlive -TimeoutSec 30))
+            $csuid = @($commcells | ForEach-Object { Get-FirstObjectValue -InputObject $_ -Names @('CommservUniqueId', 'CommServUniqueId') } | Where-Object { $_ }) | Select-Object -First 1
+            if ($csuid) { $ddbQuery['parameter.CSUID'] = [string]$csuid }
+        }
+        catch { }
+        $ddbQuery['fields'] = '[SidbStoreName],[StoragePool],[Status],[sealedStatus],[HealthStatus],[AvgQITime],[DedupeSavings],[PruningStatus],[NumberOfPrunableRecords],[LastBackupTimeToDisplay]'
+        $ddbResponse = Invoke-MetallicApi -Method GET -Path "/cr/reportsplusengine/datasets/$($ddbReport):9bab6a93-3a4c-4544-acac-978312ab2db8/data" -Query $ddbQuery -DisableKeepAlive -TimeoutSec 60
+        $ddbs = @(ConvertFrom-CommvaultDataset -Response $ddbResponse)
+        if ($ddbs.Count -gt 0) {
+            $ddbLines = foreach ($ddb in $ddbs) {
+                # SIDB_<pool>_<copy>(<creation date>) -> without the SIDB_ prefix and the date.
+                $ddbName = [string](Get-FirstObjectValue -InputObject $ddb -Names @('SidbStoreName'))
+                $ddbName = ($ddbName -replace '^SIDB_', '' -replace '\s*\([^)]*\)\s*$', '').Trim()
+                $health = [string](Get-FirstObjectValue -InputObject $ddb -Names @('HealthStatus'))
+                $healthCell = if ($health -and $health -notmatch '^(?i)good$') { "$health :warning:" } else { $health }
+                $status = [string](Get-FirstObjectValue -InputObject $ddb -Names @('Status'))
+                $sealed = [string](Get-FirstObjectValue -InputObject $ddb -Names @('sealedStatus'))
+                $statusCell = if ($sealed -and $sealed -notmatch '^(?i)active$') { "$status ($sealed)" } else { $status }
+                $savings = Get-FirstObjectValue -InputObject $ddb -Names @('DedupeSavings')
+                $savingsNumber = 0.0
+                $savingsCell = if ([double]::TryParse([string]$savings, [System.Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$savingsNumber)) { $savingsNumber.ToString('0.#', [cultureinfo]::InvariantCulture) + ' %' } else { [string]$savings }
+                $cells = @(
+                    (ConvertTo-MarkdownCell $ddbName)
+                    (ConvertTo-MarkdownCell (Get-FirstObjectValue -InputObject $ddb -Names @('StoragePool')))
+                    (ConvertTo-MarkdownCell $statusCell)
+                    (ConvertTo-MarkdownCell $healthCell)
+                    (ConvertTo-MarkdownCell (Get-FirstObjectValue -InputObject $ddb -Names @('AvgQITime')))
+                    $savingsCell
+                    (ConvertTo-MarkdownCell (Get-FirstObjectValue -InputObject $ddb -Names @('PruningStatus')))
+                    (ConvertTo-MarkdownCell (Get-FirstObjectValue -InputObject $ddb -Names @('NumberOfPrunableRecords')))
+                    (ConvertTo-MarkdownCell (Get-FirstObjectValue -InputObject $ddb -Names @('LastBackupTimeToDisplay')))
+                )
+                "| $($cells -join ' | ') |"
+            }
+            $storageBlocks += "### Deduplication databases`r`n`r`n| DDB | Storage pool | Status | Health | Avg Q&I time (us) | Savings | Pruning | Prunable records | Last DDB backup |`r`n|---|---|---|---|---:|---:|---|---:|---|`r`n$($ddbLines -join "`r`n")"
+        }
+        else {
+            $storageNotes += '- Deduplication databases (DDB report): no DDB returned.'
+        }
+    }
+    catch {
+        $ddbCode = Get-HttpStatusCode -Exception $_.Exception
+        $storageNotes += "- Deduplication databases (DDB report): $(if ($ddbCode) { "HTTP $ddbCode - " })$($_.Exception.Message)"
+    }
+
     # Tape libraries: free (spare / scratch) media. Not every CommServe returns spare counts at this
     # detail level; when it does not, a note says so rather than inventing a number.
     try {
