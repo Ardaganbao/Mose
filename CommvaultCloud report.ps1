@@ -479,11 +479,22 @@ function Get-CommvaultSecret {
     $clientId = ConvertFrom-SecureStringToPlainText (& $getSecretValue 'ClientId')
     $clientSecret = ConvertFrom-SecureStringToPlainText (& $getSecretValue 'ClientSecret')
     $server = ConvertFrom-SecureStringToPlainText (& $getSecretValue 'Server')
+    # On-premises can log in with a username and password each run (a fresh token, so nothing to
+    # renew), instead of a static access token that Commvault expires.
+    $username = ConvertFrom-SecureStringToPlainText (& $getSecretValue 'Username')
+    $password = ConvertFrom-SecureStringToPlainText (& $getSecretValue 'Password')
 
-    if (-not $accessToken) { throw "Secret '$name' is missing 'AccessToken'." }
-    if ($Mode -eq 'Cloud' -and -not $ring) { throw "Cloud secret '$name' is missing 'Ring'." }
-    if ($Mode -eq 'OnPrem' -and -not ($server -or $ServerOverride)) {
-        throw "On-prem secret '$name' is missing 'Server'. Store the Command Center URL in the secret or supply -CommvaultServer."
+    if ($Mode -eq 'Cloud') {
+        if (-not $accessToken) { throw "Secret '$name' is missing 'AccessToken'." }
+        if (-not $ring) { throw "Cloud secret '$name' is missing 'Ring'." }
+    }
+    else {
+        if (-not ($server -or $ServerOverride)) {
+            throw "On-prem secret '$name' is missing 'Server'. Store the Command Center URL in the secret or supply -CommvaultServer."
+        }
+        if (-not $accessToken -and -not ($username -and $password)) {
+            throw "On-prem secret '$name' has neither a username/password nor an access token. Run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again."
+        }
     }
 
     return [PSCustomObject]@{
@@ -494,6 +505,8 @@ function Get-CommvaultSecret {
         ClientId      = $clientId
         ClientSecret  = $clientSecret
         Server        = $server
+        Username      = $username
+        Password      = $password
         VaultName     = $VaultName
         Name          = $name
         Mode          = $Mode
@@ -646,6 +659,58 @@ function New-CommvaultHeaders {
         "Content-Type" = "application/json"
     }
 }
+
+# On-premises: log in with the stored username and password (POST /Login) to get a fresh Authtoken,
+# so there is no static token to expire. Sets the token on the secret object and rebuilds the headers.
+function Connect-CommvaultOnPrem {
+    $loginUri = "$($script:BaseUri.TrimEnd('/'))/Login"
+    # Commvault expects the password base64-encoded; a domain account is given as domain\user.
+    $passwordB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$script:SecretObject.Password))
+    $loginBody = @{ username = [string]$script:SecretObject.Username; password = $passwordB64 } | ConvertTo-Json
+
+    $loginParameters = @{
+        Method      = 'POST'
+        Uri         = $loginUri
+        Headers     = @{ Accept = 'application/json' }
+        ContentType = 'application/json'
+        Body        = $loginBody
+        ErrorAction = 'Stop'
+    }
+    if ($script:SkipCertCheck -and (Get-Command Invoke-RestMethod).Parameters.ContainsKey('SkipCertificateCheck')) {
+        $loginParameters['SkipCertificateCheck'] = $true
+    }
+
+    Write-Progress -Activity "Commvault login : $loginUri" -Id 2
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        $loginResponse = Invoke-RestMethod @loginParameters
+    }
+    catch {
+        $reason = ''
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $answer = [string]$_.ErrorDetails.Message
+            try {
+                $message = Get-FirstObjectValue -InputObject ($answer | ConvertFrom-Json) -Names @('errorMessage', 'errMessage', 'message', 'error_description', 'error')
+                if ($message) { $answer = [string]$message }
+            }
+            catch { }
+            $answer = ($answer -replace '\s+', ' ').Trim()
+            if ($answer) { $reason = " Commvault says: $answer." }
+        }
+        throw "Could not log in to Commvault at $loginUri as '$($script:SecretObject.Username)': $($_.Exception.Message)$reason Check the username, password and that the account may sign in to the Command Center."
+    }
+
+    # A failed login can come back as HTTP 200 with an error code and no token.
+    $token = Get-FirstObjectValue -InputObject $loginResponse -Names @('token')
+    if ([string]::IsNullOrWhiteSpace([string]$token)) {
+        $errMessage = Get-FirstObjectValue -InputObject $loginResponse -Names @('errorMessage', 'errMessage', 'error')
+        throw "Commvault login at $loginUri returned no token$(if ($errMessage) { ": $errMessage" } else { ' (check the username and password)' })."
+    }
+
+    $script:SecretObject.AccessToken = [string]$token
+    $script:GlobalHeaders = New-CommvaultHeaders -SecretObject $script:SecretObject -Mode 'OnPrem'
+}
+
 # Builds the Invoke-RestMethod parameters for a Commvault API call; also used for the parallel job pages.
 function New-MetallicApiRequest {
     [CmdletBinding()]
@@ -715,9 +780,15 @@ function Invoke-MetallicApi {
     }
     catch {
         $statusCode = Get-HttpStatusCode -Exception $_.Exception
-        # An on-premises token can't be renewed here: it has to be replaced.
+        # On-premises: with a stored username/password, log in again for a fresh token and retry;
+        # otherwise the static token has to be replaced by hand.
         if ($statusCode -eq 401 -and $script:CommvaultMode -eq 'OnPrem') {
-            throw "Commvault refused the access token in secret '$($script:SecretObject.Name)' (401 Unauthorized) at $($requestParameters.Uri). If it expired or was revoked, create a new access token in Command Center, then run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again with the new token."
+            if ($script:SecretObject.Username -and $script:SecretObject.Password) {
+                Connect-CommvaultOnPrem
+                $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body
+                return Invoke-RestMethod @requestParameters
+            }
+            throw "Commvault refused the access token in secret '$($script:SecretObject.Name)' (401 Unauthorized) at $($requestParameters.Uri). If it expired or was revoked, run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again - it now stores a username and password and logs in for a fresh token each run."
         }
         if ($statusCode -ne 401 -or $script:CommvaultMode -ne 'Cloud') {
             throw
@@ -922,6 +993,13 @@ else {
 $script:GlobalHeaders.Authorization = "Bearer $($secretObj.AccessToken)"
 
 $script:GlobalHeaders = New-CommvaultHeaders -SecretObject $secretObj -Mode $Mode
+
+# On-premises with a stored username/password logs in now for a fresh token, so there is no static
+# token to expire between runs (Cloud keeps its access/refresh token chain instead).
+if ($Mode -eq 'OnPrem' -and $secretObj.Username -and $secretObj.Password) {
+    Connect-CommvaultOnPrem
+}
+
 $connectionLabel = if ($Mode -eq 'Cloud') { "ring-id '$($secretObj.Ring)'" } else { "server '$script:BaseUri'" }
 Write-Host "Using Commvault $Mode secret '$($secretObj.Name)' with $connectionLabel" -ForegroundColor Cyan
 

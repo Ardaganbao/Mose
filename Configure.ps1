@@ -103,12 +103,15 @@ function Read-CommvaultSecret {
         $secret = @{ Type = 'Cloud'; AccessToken = $accessToken; RefreshToken = $refreshToken; Ring = $ring }
     }
     else {
-        $accessToken = Read-Host -Prompt 'Commvault on-premises ACCESS token' -AsSecureString
+        # On-premises logs in with a username and password each run (a fresh token, nothing to expire),
+        # instead of a static access token that the CommServe lets expire - often daily.
+        $username = Read-Answer 'Commvault Command Center username (e.g. admin, or domain\user)'
+        $password = Read-Host -Prompt 'Commvault Command Center password' -AsSecureString
         $server = Read-Answer 'Commvault Command Center URL (e.g. https://commvault.example.com)'
-        if ($accessToken.Length -eq 0 -or -not $server) {
+        if (-not $username -or $password.Length -eq 0 -or -not $server) {
             return $null
         }
-        $secret = @{ Type = 'OnPrem'; AccessToken = $accessToken; Server = $server }
+        $secret = @{ Type = 'OnPrem'; Username = $username; Password = $password; Server = $server }
     }
 
     Set-Secret -Vault $MoseVaultName -Name $secretName -Secret $secret
