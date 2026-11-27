@@ -232,9 +232,9 @@ function Read-Target {
 
     $target = [pscustomobject]@{ Module = $Module; Server = $server; Secret = '' }
 
-    # Veeam and Hyper-V run as the current Windows user unless another account is given for PowerShell remoting,
-    # which an IP address needs, as well as being in TrustedHosts.
-    $remotingByIP = $Module -in 'Veeam', 'HyperV' -and (Test-MoseIPAddress $server)
+    # Veeam, Hyper-V and the Windows system module run as the current Windows user unless another
+    # account is given for PowerShell remoting, which an IP address needs, as well as being in TrustedHosts.
+    $remotingByIP = $Module -in 'Veeam', 'HyperV', 'Windows' -and (Test-MoseIPAddress $server)
     if ($remotingByIP) {
         Write-Host "$server is an IP address: PowerShell remoting needs a login for it, and the address in this computer's TrustedHosts. With the server's name instead, it needs neither." -ForegroundColor Yellow
     }
@@ -245,7 +245,8 @@ function Read-Target {
     else {
         "Use another Windows account for PowerShell remoting to ${server}?"
     }
-    if ($Module -notin 'Veeam', 'HyperV', 'SqlMaint' -or $remotingByIP -or
+    # Linux always needs an SSH login (user name and password, or a key file); the others only when asked.
+    if ($Module -notin 'Veeam', 'HyperV', 'SqlMaint', 'Windows' -or $remotingByIP -or
         ($server -notin @('localhost', '.') -and (Read-YesNo $loginQuestion $false))) {
         $target.Secret = Read-TargetCredential -Module $Module -Server $server
         if (-not $target.Secret) {
@@ -262,7 +263,20 @@ function Read-Target {
         $target | Add-Member -NotePropertyName CertificateThumbprint -NotePropertyValue (Read-Answer 'Trusted certificate SHA-1 thumbprint (Enter for the normal certificate check)')
         $target | Add-Member -NotePropertyName AcceptAnyCertificate -NotePropertyValue (Read-YesNo 'Accept any certificate? Insecure, only on a trusted network' $false)
     }
-    elseif ($Module -in 'VMware', 'HyperV') {
+    elseif ($Module -in 'VMware', 'HyperV', 'Windows') {
+        $target | Add-Member -NotePropertyName Site -NotePropertyValue (Read-Answer 'Site name shown in the report' 'main')
+    }
+    elseif ($Module -eq 'Linux') {
+        # SSH over port 22 by default; an optional private key file for key authentication.
+        $keyFile = Read-Answer 'SSH private key file for key authentication (Enter to use the password)'
+        if ($keyFile) {
+            $target | Add-Member -NotePropertyName KeyFile -NotePropertyValue $keyFile
+        }
+        $port = 22
+        [void][int]::TryParse((Read-Answer 'SSH port' '22'), [ref]$port)
+        if ($port -ne 22) {
+            $target | Add-Member -NotePropertyName Port -NotePropertyValue $port
+        }
         $target | Add-Member -NotePropertyName Site -NotePropertyValue (Read-Answer 'Site name shown in the report' 'main')
     }
     elseif ($Module -eq 'SqlMaint') {
@@ -709,7 +723,7 @@ function Edit-ReportLayout {
             continue
         }
         elseif ($choice -match '^[Dd]$') {
-            if (Read-YesNo "Go back to the default layout: $MoseInventoryTitle, Hardware, Virtualization and storage, Backup, Databases?" $false) {
+            if (Read-YesNo "Go back to the default layout: $MoseInventoryTitle, Hardware, Operating systems, Virtualization and storage, Backup, Databases?" $false) {
                 $script:layout = $null
                 $sections = Get-MoseReportSections -Layout $null -Targets $targets.ToArray()
                 $title = ''

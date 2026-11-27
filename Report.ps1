@@ -868,6 +868,108 @@ $sampleJobTable
 | $yesterday | error :x: | Daily maintenance (sample) - Reorganize Index 4hr |
 "@
         }
+        'Windows' {
+            $installed = (Get-Date).AddDays(-6).ToString('yyyy-MM-dd')
+            @"
+## System
+
+| Field | Value |
+|---|---|
+| Host name | SAMPLE-SRV-01 |
+| Domain / workgroup | sample.local |
+| Operating system | Microsoft Windows Server 2022 Standard (21H2) |
+| Build | 20348.2849 |
+| Installed on | 2024-03-18 |
+| Uptime | 12 day(s), since 2026-01-01 08:30 |
+| Machine | HPE ProLiant DL380 Gen10 |
+| Memory | 64 GB |
+
+## Updates
+
+- **Last update installed:** KB5034770 ($installed)
+- **Installed in the last 30 days:** 3
+- **Reboot pending:** :green_circle: no
+- **Pending updates:** :yellow_circle: 1
+
+| Update | KB | Severity |
+|---|---|---|
+| 2026-01 Cumulative Update for Windows Server 2022 | KB5034771 | Important |
+
+## Disks
+
+| Drive | Label | Size (GB) | Free (GB) | Used % |  |
+|---|---|---:|---:|---:|---|
+| C: | System | 120 | 48 | 60 | :green_circle: |
+| D: | Data | 500 | 70 | 86 | :yellow_circle: |
+
+## Security
+
+- **Antivirus (Microsoft Defender):** :green_circle: real-time on, signatures 1 day(s) old (updated $installed), last quick scan $installed
+- **Firewall:** :green_circle: Domain on, Private on, Public on
+
+## Access
+
+- **Local administrators:** SAMPLE\Administrator, SAMPLE\itadmin
+
+| Account | Last logon |
+|---|---|
+| SAMPLE\itadmin | 2026-01-12 09:14 |
+
+## Installed software
+
+Installed programs (most recent 2 of 142):
+
+| Name | Version | Publisher |
+|---|---|---|
+| Veeam Backup & Replication Console | 12.3.0.310 | Veeam Software |
+| Google Chrome | 131.0.6778.86 | Google LLC |
+"@
+        }
+        'Linux' {
+            @"
+## System
+
+| Field | Value |
+|---|---|
+| Host name | sample-lnx-01 |
+| Distribution | Ubuntu 22.04.4 LTS |
+| Kernel | 5.15.0-91-generic |
+| Uptime | 34 day(s) |
+
+## Updates
+
+- **Package manager:** APT (Debian/Ubuntu)
+- **Pending updates:** :yellow_circle: 7 update(s) available
+- **Last update:** 2026-01-05 03:12
+- **Reboot required:** :green_circle: no
+
+## Disks
+
+| Mount | Type | Size (GB) | Free (GB) | Used % |  |
+|---|---|---:|---:|---:|---|
+| / | ext4 | 50 | 18 | 62 | :green_circle: |
+| /var | ext4 | 100 | 12 | 88 | :yellow_circle: |
+
+## Security
+
+- **Firewall:** :green_circle: ufw active
+- **fail2ban:** active
+- **SELinux:** n/a
+
+## Access
+
+- **Sudo / wheel members:** itadmin, ansible
+
+## Installed packages
+
+Installed packages (first 2 of 1843):
+
+| Package | Version |
+|---|---|
+| openssh-server | 1:8.9p1-3ubuntu0.10 |
+| nginx | 1.18.0-6ubuntu14.4 |
+"@
+        }
         default {
             "_No sample data for module '$($Target.Module)'._"
         }

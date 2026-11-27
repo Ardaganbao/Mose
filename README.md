@@ -194,6 +194,7 @@ The report title is `#`. By default the report has these `##` sections, each wit
 |---|---|
 | Infrastructure detail | The [inventory tables](#inventory-tables): Physical System, Virtual System, Software |
 | Hardware | iLO, iDRAC, BMC |
+| Operating systems | Windows system, Linux system |
 | Virtualization and storage | VMware vCenter, Hyper-V, StorMagic |
 | Backup | Synology NAS, Veeam, Commvault |
 | Databases | SQL Server maintenance plans |

@@ -120,6 +120,8 @@ $MoseModules = [ordered]@{
     CommvaultCloud  = @{ Label = 'Commvault Cloud'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     CommvaultOnPrem = @{ Label = 'Commvault on-premises'; Script = 'CommvaultCloud report.ps1'; DropTitle = $true }
     SqlMaint        = @{ Label = 'SQL Server maintenance plans'; Script = 'sqlmaintenance.ps1' }
+    Windows         = @{ Label = 'Windows system'; Script = 'windowsreport.ps1' }
+    Linux           = @{ Label = 'Linux system'; Script = 'linuxreport.ps1' }
 }
 
 function Open-MoseVault {
@@ -337,6 +339,7 @@ $MoseDefaultLayout = [pscustomobject]@{
     Sections = @(
         [pscustomobject]@{ Title = $MoseInventoryTitle; Sections = @($MoseInventoryTables.Keys | ForEach-Object { [pscustomobject]@{ Table = $_ } }) }
         [pscustomobject]@{ Title = 'Hardware'; Sections = @([pscustomobject]@{ Module = @('iLO', 'iDRAC', 'BMC') }) }
+        [pscustomobject]@{ Title = 'Operating systems'; Sections = @([pscustomobject]@{ Module = @('Windows', 'Linux') }) }
         [pscustomobject]@{ Title = 'Virtualization and storage'; Sections = @([pscustomobject]@{ Module = @('VMware', 'HyperV', 'StorMagic') }) }
         [pscustomobject]@{ Title = 'Backup'; Sections = @([pscustomobject]@{ Module = @('NAS', 'Veeam', 'VeeamApi', 'CommvaultCloud', 'CommvaultOnPrem') }) }
         [pscustomobject]@{ Title = 'Databases'; Sections = @([pscustomobject]@{ Module = @('SqlMaint') }) }
@@ -655,6 +658,23 @@ function Invoke-MoseModule {
             finally {
                 Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
             }
+        }
+        'Windows' {
+            $winParameters = @{ Server = $Target.Server }
+            if ($Credential) { $winParameters.Credential = $Credential }
+            $winSite = Get-MoseProperty $Target 'Site'
+            if ($winSite) { $winParameters.Site = $winSite }
+            & $scriptPath @winParameters
+        }
+        'Linux' {
+            $linuxParameters = @{ Server = $Target.Server; Credential = $Credential }
+            $linuxKey = Get-MoseProperty $Target 'KeyFile'
+            if ($linuxKey) { $linuxParameters.KeyFile = $linuxKey }
+            $linuxPort = Get-MoseProperty $Target 'Port'
+            if ($linuxPort) { $linuxParameters.Port = [int]$linuxPort }
+            $linuxSite = Get-MoseProperty $Target 'Site'
+            if ($linuxSite) { $linuxParameters.Site = $linuxSite }
+            & $scriptPath @linuxParameters
         }
         default {
             throw "Unknown module '$($Target.Module)'."
