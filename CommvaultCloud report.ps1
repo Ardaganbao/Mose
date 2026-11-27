@@ -326,6 +326,8 @@ function Format-CommvaultSubscriptionUsage {
             $purchased = Get-CommvaultSubscriptionValue $subscription @('quantity', 'purchasedQuantity', 'entitledQuantity', 'purchased')
             $used = Get-CommvaultSubscriptionValue $subscription @('usage', 'currentUsage', 'consumedQuantity', 'used', 'peakUsage')
             $type = [string](Get-CommvaultSubscriptionValue $subscription @('subscriptionType', 'type', 'licenseType'))
+            # The API says "paid" / "trial"; the Subscriptions page shows "Paid" / "Trial".
+            if ($type) { $type = $type.Substring(0, 1).ToUpper() + $type.Substring(1) }
             if ("$(Get-CommvaultSubscriptionValue $subscription @('isActive', 'active'))" -match '^(0|false)$') { $type = "$type (inactive)".Trim() }
 
             $purchasedNumber = 0.0; $usedNumber = 0.0
