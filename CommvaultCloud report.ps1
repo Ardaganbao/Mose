@@ -268,6 +268,32 @@ function ConvertFrom-CommvaultTimestamp {
     return $null
 }
 
+function Format-CommvaultSubscriptionDate {
+    param($Value)
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return '' }
+    $num = 0L
+    if ([long]::TryParse([string]$Value, [ref]$num)) {
+        if ($num -le 0) { return '' }
+        try {
+            # Reports-plus-engine returns dates as an epoch; large values are milliseconds, else seconds.
+            $dt = if ($num -gt 100000000000) {
+                [DateTimeOffset]::FromUnixTimeMilliseconds($num).LocalDateTime
+            }
+            else {
+                [DateTimeOffset]::FromUnixTimeSeconds($num).LocalDateTime
+            }
+            return $dt.ToString('dd MMM yyyy', [cultureinfo]::GetCultureInfo('en-US'))
+        }
+        catch { return '' }
+    }
+    $date = [datetime]::MinValue
+    if ([datetime]::TryParse([string]$Value, [ref]$date)) {
+        return $date.ToString('dd MMM yyyy', [cultureinfo]::GetCultureInfo('en-US'))
+    }
+    return [string]$Value
+}
+
 function ConvertTo-ReadableBytes {
     param($Bytes)
 
@@ -1171,6 +1197,65 @@ for ($licenseIndex = 0; $licenseIndex -lt $licenseNames.Count; $licenseIndex++) 
 if ($licenseForbidden.Count -gt 0) {
     $licenseNotes = @("- $($licenseForbidden -join ', '): Commvault refused them to this account (HTTP 403 Forbidden): the License Summary report is for CommCell administrators.") + $licenseNotes
 }
+
+# Subscription Usage by Tenant (Commvault Cloud / Metallic). The License Summary datasets above return
+# no rows on Cloud (the tenant does not own the CommCell), but "Subscription Usage by Tenant" IS a
+# tenant report, so the tenant token reads its dataset directly - this is the licence consumption
+# (entitled quantity, peak usage, peak %) the manual Subscriptions export used to carry. Best-effort:
+# if it returns rows they replace the manual-export placeholder; if it is refused/empty it falls back
+# to that placeholder. Dataset id (report:dataset) is Commvault's shipped Subscription Usage report.
+if ($Mode -eq 'Cloud') {
+    try {
+        Write-CommvaultReportProgress -Status 'License usage: reading Subscription Usage by Tenant' -PercentComplete 16
+        # sys_rowid is kept because some datasets require it; every field is aliased so the parsed
+        # column names are deterministic (ConvertFrom-CommvaultDataset drops sys_rowid itself).
+        $subFields = '[sys_rowid],[baseOfferingDisplayName] AS [Offering],[subscriptionType] AS [Subscription],[unitOfMeasure] AS [Unit],[quantity] AS [Entitled],[peakUsage] AS [PeakUsage],[peakUsagePct] AS [PeakPct],[isActive] AS [Active],[startDate] AS [StartDate],[endDate] AS [EndDate]'
+        $subResponse = Invoke-MetallicApi -Method GET -Path '/cr/reportsplusengine/datasets/e2a304c9-fc1c-4ced-a5eb-d393e500fbca:bcdb3658-e0a4-46cb-8d22-d8a732f9289c/data' -Query @{
+            fields         = $subFields
+            orderby        = '[baseOfferingDisplayName] Asc'
+            timeZoneOffset = '-60'
+        }
+        $subRowsRaw = @(ConvertFrom-CommvaultDataset -Response $subResponse)
+        if ($subRowsRaw.Count -gt 0) {
+            $subRows = @(foreach ($r in $subRowsRaw) {
+                    $active = switch -Regex ("$($r.Active)") {
+                        '^(1|true|yes)$' { 'Yes'; break }
+                        '^(0|false|no)$' { 'No'; break }
+                        default { "$($r.Active)" }
+                    }
+                    $pct = "$($r.PeakPct)"
+                    if ($pct -match '^-?\d+(\.\d+)?$') { $pct = '{0:0.#} %' -f [double]$pct }
+                    [PSCustomObject][ordered]@{
+                        'Offering'     = $r.Offering
+                        'Subscription' = $r.Subscription
+                        'Unit'         = $r.Unit
+                        'Entitled'     = $r.Entitled
+                        'Peak usage'   = $r.PeakUsage
+                        'Peak %'       = $pct
+                        'Active'       = $active
+                        'Start'        = Format-CommvaultSubscriptionDate $r.StartDate
+                        'End'          = Format-CommvaultSubscriptionDate $r.EndDate
+                    }
+                })
+            # Real subscription usage goes at the top of the licence section; a non-empty licenseSections
+            # also skips the manual-export placeholder below.
+            $licenseSections = @("### Subscription usage by tenant`r`n`r`n$(ConvertTo-MarkdownTable -Rows $subRows)") + $licenseSections
+        }
+        else {
+            $licenseNotes += '- Subscription Usage by Tenant: the dataset returned no rows.'
+        }
+    }
+    catch {
+        $subCode = Get-HttpStatusCode -Exception $_.Exception
+        if ($subCode -eq 403) {
+            $licenseNotes += '- Subscription Usage by Tenant: Commvault refused it to this account (HTTP 403 Forbidden).'
+        }
+        else {
+            $licenseNotes += "- Subscription Usage by Tenant: $(if ($subCode) { "HTTP $subCode - " })$($_.Exception.Message)"
+        }
+    }
+}
+
 $licenseText = if ($licenseSections.Count -gt 0) {
     $licenseSections -join "`r`n`r`n"
 }
