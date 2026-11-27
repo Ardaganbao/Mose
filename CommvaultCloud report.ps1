@@ -745,7 +745,8 @@ function New-MetallicApiRequest {
         [Parameter(Mandatory = $true)][string]$Path,
         [hashtable]$Query = $null,
         [hashtable]$AdditionalHeaders = $null,
-        [object]$Body = $null
+        [object]$Body = $null,
+        [switch]$DisableKeepAlive
     )
 
     $uri = [System.UriBuilder]::new($script:BaseUri)
@@ -783,6 +784,10 @@ function New-MetallicApiRequest {
     if ($Body) {
         $requestParameters.Body = $Body | ConvertTo-Json -Depth 12
     }
+    # Force a brand-new connection instead of a pooled one. .NET 4.x (Windows PowerShell 5.1) throws
+    # "Could not create SSL/TLS secure channel" when it reuses a connection the Metallic gateway has
+    # already closed, so the reports-plus-engine calls use this to avoid stale-connection failures.
+    if ($DisableKeepAlive) { $requestParameters['DisableKeepAlive'] = $true }
     return $requestParameters
 }
 
@@ -793,10 +798,11 @@ function Invoke-MetallicApi {
         [Parameter(Mandatory = $true)][string]$Path,
         [hashtable]$Query = $null,
         [hashtable]$AdditionalHeaders = $null,
-        [object]$Body = $null
+        [object]$Body = $null,
+        [switch]$DisableKeepAlive
     )
 
-    $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body
+    $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body -DisableKeepAlive:$DisableKeepAlive
     Write-Progress -Activity "Invoke-MetallicApi $Method : $($requestParameters.Uri)" -Id 2
     # Windows PowerShell 5.1 slows large downloads by drawing its own download progress bar;
     # hiding it for this function only keeps the report progress bars visible.
@@ -811,7 +817,7 @@ function Invoke-MetallicApi {
         if ($statusCode -eq 401 -and $script:CommvaultMode -eq 'OnPrem') {
             if ($script:SecretObject.Username -and $script:SecretObject.Password) {
                 Connect-CommvaultOnPrem
-                $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body
+                $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body -DisableKeepAlive:$DisableKeepAlive
                 return Invoke-RestMethod @requestParameters
             }
             throw "Commvault refused the access token in secret '$($script:SecretObject.Name)' (401 Unauthorized) at $($requestParameters.Uri). If it expired or was revoked, run .\Start.ps1 -Configure, remove this Commvault on-premises (R) and add it again - it now stores a username and password and logs in for a fresh token each run."
@@ -821,7 +827,7 @@ function Invoke-MetallicApi {
         }
 
         Update-MetallicAccessToken
-        $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body
+        $requestParameters = New-MetallicApiRequest -Method $Method -Path $Path -Query $Query -AdditionalHeaders $AdditionalHeaders -Body $Body -DisableKeepAlive:$DisableKeepAlive
         return Invoke-RestMethod @requestParameters
     }
 }
@@ -1218,10 +1224,23 @@ if ($Mode -eq 'Cloud') {
         # sys_rowid is kept because some datasets require it; every field is aliased so the parsed
         # column names are deterministic (ConvertFrom-CommvaultDataset drops sys_rowid itself).
         $subFields = '[sys_rowid],[baseOfferingDisplayName] AS [Offering],[subscriptionType] AS [Subscription],[unitOfMeasure] AS [Unit],[quantity] AS [Entitled],[peakUsage] AS [PeakUsage],[peakUsagePct] AS [PeakPct],[isActive] AS [Active],[startDate] AS [StartDate],[endDate] AS [EndDate]'
-        $subResponse = Invoke-MetallicApi -Method GET -Path '/cr/reportsplusengine/datasets/e2a304c9-fc1c-4ced-a5eb-d393e500fbca:bcdb3658-e0a4-46cb-8d22-d8a732f9289c/data' -Query @{
-            fields         = $subFields
-            orderby        = '[baseOfferingDisplayName] Asc'
-            timeZoneOffset = '-60'
+        # Retry on a connection-level failure only (no HTTP status): .NET 4.x reuses a pooled connection
+        # the gateway has closed and throws "Could not create SSL/TLS secure channel". DisableKeepAlive
+        # forces a fresh connection; a real HTTP answer (200/400/401/403) is handled, never retried.
+        $subResponse = $null
+        for ($subAttempt = 1; $subAttempt -le 4; $subAttempt++) {
+            try {
+                $subResponse = Invoke-MetallicApi -Method GET -Path '/cr/reportsplusengine/datasets/e2a304c9-fc1c-4ced-a5eb-d393e500fbca:bcdb3658-e0a4-46cb-8d22-d8a732f9289c/data' -DisableKeepAlive -Query @{
+                    fields         = $subFields
+                    orderby        = '[baseOfferingDisplayName] Asc'
+                    timeZoneOffset = '-60'
+                }
+                break
+            }
+            catch {
+                if ((Get-HttpStatusCode -Exception $_.Exception) -or $subAttempt -ge 4) { throw }
+                Start-Sleep -Seconds 2
+            }
         }
         $subRowsRaw = @(ConvertFrom-CommvaultDataset -Response $subResponse)
         if ($subRowsRaw.Count -gt 0) {
