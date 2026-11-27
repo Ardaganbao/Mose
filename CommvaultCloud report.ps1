@@ -185,15 +185,12 @@ function ConvertTo-MarkdownTable {
             if ($columns -notcontains $name) { $columns += $name }
         }
     }
-    # Drop columns the API did not fill in: empty in every row (e.g. dates Commvault left at the epoch,
-    # now blanked), or zero in every row (an unused licence type like Eval or CommvaultCompleteSnap).
-    # A column is kept when at least one row has a non-empty, non-zero value.
+    # Drop only columns the API did not fill in at all: empty in every row (e.g. dates Commvault left
+    # at the epoch, now blanked). A column is kept when at least one row has a value - including a zero,
+    # because a usage/capacity figure of 0 is real data (do NOT drop zero columns, which hid the usage).
     $columns = @($columns | Where-Object {
             $col = $_
-            @($Rows | Where-Object {
-                    $cell = ConvertTo-MarkdownCell -Value $_.$col
-                    $cell -ne '' -and $cell -notmatch '^0+(\.0+)?$'
-                }).Count -gt 0
+            @($Rows | Where-Object { (ConvertTo-MarkdownCell -Value $_.$col) -ne '' }).Count -gt 0
         })
     if ($columns.Count -eq 0) { return '' }
     $lines = @(
@@ -1827,13 +1824,121 @@ else {
     'Protected-item inventory collection completed.'
 }
 
+#--------------------------------------------------------
+# STORAGE AND MEDIA AGENTS (on-premises only)
+#--------------------------------------------------------
+# Media agent health, storage pool capacity and free space, and free (spare) tape media. On-premises
+# only - Commvault Cloud runs the storage itself. Best-effort: every call is guarded, so anything
+# that cannot be read becomes a note instead of stopping the report. Field names and units differ
+# between CommServe versions, so each value is read from a list of candidate names; if a column
+# comes back blank or a size looks off, the raw endpoint output tells which name/unit to use.
+$storageSection = ''
+if ($Mode -eq 'OnPrem') {
+    $storageBlocks = @()
+    $storageNotes = @()
+
+    # Media agents: name, online/offline, version.
+    try {
+        Write-CommvaultReportProgress -Status 'Storage: reading media agents' -PercentComplete 86
+        $maResponse = Invoke-MetallicApi -Method GET -Path '/MediaAgent'
+        $mediaAgents = @(Get-CommvaultApiEntities -Response $maResponse -CollectionNames @('mediaAgentList', 'mediaAgents', 'response') -WrapperNames @('mediaAgent', 'mediaAgentInfo', 'entityInfo'))
+        if ($mediaAgents.Count -gt 0) {
+            $maLines = foreach ($ma in $mediaAgents) {
+                $name = Get-FirstObjectValue -InputObject $ma -Names @('mediaAgentName', 'name', 'displayName', 'clientName')
+                $statusRaw = Get-FirstObjectValue -InputObject $ma -Names @('status', 'isOnline', 'onlineStatus', 'health')
+                $status = switch -Regex ("$statusRaw") {
+                    '^(1|true|online|ready|up)$' { 'Online'; break }
+                    '^(0|false|offline|down)$' { 'Offline'; break }
+                    default { if ("$statusRaw") { "$statusRaw" } else { 'Unknown' } }
+                }
+                $offline = Get-FirstObjectValue -InputObject $ma -Names @('offlineReason')
+                if ($null -ne $offline -and "$offline" -ne '0') { $status = 'Offline' }
+                $version = Get-FirstObjectValue -InputObject $ma -Names @('version', 'mediaAgentVersion', 'osName')
+                "| $(ConvertTo-MarkdownCell $name) | $status | $(ConvertTo-MarkdownCell $version) |"
+            }
+            $storageBlocks += "### Media agents`r`n`r`n| Media agent | Status | Version |`r`n|---|---|---|`r`n$($maLines -join "`r`n")"
+        }
+        else {
+            $storageNotes += "- /MediaAgent: no media agent was returned (or the field names differ on this CommServe)."
+        }
+    }
+    catch {
+        $maCode = Get-HttpStatusCode -Exception $_.Exception
+        $storageNotes += "- /MediaAgent: $(if ($maCode) { "HTTP $maCode - " })$($_.Exception.Message)"
+    }
+
+    # Storage pools: capacity, free space, used %.
+    try {
+        Write-CommvaultReportProgress -Status 'Storage: reading storage pools' -PercentComplete 88
+        $spResponse = Invoke-MetallicApi -Method GET -Path '/StoragePool'
+        $pools = @(Get-CommvaultApiEntities -Response $spResponse -CollectionNames @('storagePoolList', 'storagePools', 'response') -WrapperNames @('storagePoolEntity', 'storagePool', 'entityInfo'))
+        if ($pools.Count -gt 0) {
+            $poolLines = foreach ($pool in $pools) {
+                $name = Get-FirstObjectValue -InputObject $pool -Names @('storagePoolName', 'name', 'displayName')
+                $type = Get-FirstObjectValue -InputObject $pool -Names @('storagePoolType', 'type', 'deviceType')
+                $totalRaw = Get-FirstObjectValue -InputObject $pool -Names @('totalCapacityBytes', 'totalCapacity', 'capacityBytes', 'totalSizeBytes', 'sizeOnDisk')
+                $freeRaw = Get-FirstObjectValue -InputObject $pool -Names @('totalFreeSpaceBytes', 'totalFreeSpace', 'freeSpaceBytes', 'remainingCapacityBytes', 'freeSpace')
+                $used = ''
+                $totalNum = 0.0; $freeNum = 0.0
+                if ([double]::TryParse("$totalRaw", [ref]$totalNum) -and $totalNum -gt 0 -and [double]::TryParse("$freeRaw", [ref]$freeNum)) {
+                    $used = '{0:N0} %' -f ((($totalNum - $freeNum) / $totalNum) * 100)
+                }
+                "| $(ConvertTo-MarkdownCell $name) | $(ConvertTo-MarkdownCell $type) | $(ConvertTo-ReadableBytes $totalRaw) | $(ConvertTo-ReadableBytes $freeRaw) | $used |"
+            }
+            $storageBlocks += "### Storage pools`r`n`r`n| Storage pool | Type | Capacity | Free | Used |`r`n|---|---|---:|---:|---:|`r`n$($poolLines -join "`r`n")"
+        }
+        else {
+            $storageNotes += "- /StoragePool: no storage pool was returned (or the field names differ on this CommServe)."
+        }
+    }
+    catch {
+        $spCode = Get-HttpStatusCode -Exception $_.Exception
+        $storageNotes += "- /StoragePool: $(if ($spCode) { "HTTP $spCode - " })$($_.Exception.Message)"
+    }
+
+    # Tape libraries: free (spare / scratch) media. Not every CommServe returns spare counts at this
+    # detail level; when it does not, a note says so rather than inventing a number.
+    try {
+        Write-CommvaultReportProgress -Status 'Storage: reading tape libraries' -PercentComplete 90
+        $libResponse = Invoke-MetallicApi -Method GET -Path '/Library' -Query @{ libraryType = '2' }
+        $libraries = @(Get-CommvaultApiEntities -Response $libResponse -CollectionNames @('response', 'libraryList', 'libraries') -WrapperNames @('library', 'entityInfo', 'libraryInfo'))
+        $tapeLines = foreach ($lib in $libraries) {
+            $name = Get-FirstObjectValue -InputObject $lib -Names @('libraryName', 'name', 'displayName', 'alias')
+            $spare = Get-FirstObjectValue -InputObject $lib -Names @('spareMediaCount', 'scratchMediaCount', 'numberOfSpareMedia', 'spareMedia', 'freeMedia')
+            $total = Get-FirstObjectValue -InputObject $lib -Names @('totalMediaCount', 'numberOfMedia', 'mediaCount')
+            if (-not $name) { continue }
+            "| $(ConvertTo-MarkdownCell $name) | $(if ($null -ne $spare) { ConvertTo-MarkdownCell $spare } else { 'n/a' }) | $(if ($null -ne $total) { ConvertTo-MarkdownCell $total } else { 'n/a' }) |"
+        }
+        $tapeLines = @($tapeLines | Where-Object { $_ })
+        if ($tapeLines.Count -gt 0) {
+            $storageBlocks += "### Tape libraries`r`n`r`n| Tape library | Free (spare) media | Total media |`r`n|---|---:|---:|`r`n$($tapeLines -join "`r`n")"
+        }
+        else {
+            $storageNotes += "- /Library: no tape library with a spare-media count was returned (there may be no tape library, or the spare count needs the tape-specific endpoint on this CommServe version)."
+        }
+    }
+    catch {
+        $libCode = Get-HttpStatusCode -Exception $_.Exception
+        $storageNotes += "- /Library: $(if ($libCode) { "HTTP $libCode - " })$($_.Exception.Message)"
+    }
+
+    if ($storageBlocks.Count -gt 0 -or $storageNotes.Count -gt 0) {
+        $storageBody = if ($storageBlocks.Count -gt 0) { $storageBlocks -join "`r`n`r`n" } else { 'No storage or media agent data could be read.' }
+        if ($storageNotes.Count -gt 0) {
+            $storageBody += "`r`n`r`nStorage data that could not be read (tell me the raw endpoint output and I will adjust the field names/units):`r`n`r`n" + ($storageNotes -join "`r`n")
+        }
+        $storageSection = "`r`n## Storage and media agents`r`n`r`n$storageBody`r`n"
+    }
+    $apiTimes['storage'] = $apiTimer.Elapsed.ToString('m\:ss')
+}
+
 $md = @"
 # Commvault $Mode Health Report - $ClientName - $((Get-Date).ToString('dd MMM yyyy', [cultureinfo]::GetCultureInfo('en-US')))
 
 ## License and Subscription Usage
 
 $licenseText
-
+$storageSection
 ## Protected Item Health and SLA
 
 $(if ($commvaultSlaBlock) { "$commvaultSlaBlock`r`n" })
