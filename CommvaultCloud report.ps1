@@ -268,30 +268,104 @@ function ConvertFrom-CommvaultTimestamp {
     return $null
 }
 
-function Format-CommvaultSubscriptionDate {
+# A subscription date as a [datetime], or $null: an epoch (large values are milliseconds, else seconds)
+# or a date text (ISO or en-US).
+function ConvertTo-CommvaultSubscriptionDateTime {
     param($Value)
 
-    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return '' }
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
     $num = 0L
     if ([long]::TryParse([string]$Value, [ref]$num)) {
-        if ($num -le 0) { return '' }
+        if ($num -le 0) { return $null }
         try {
-            # Reports-plus-engine returns dates as an epoch; large values are milliseconds, else seconds.
-            $dt = if ($num -gt 100000000000) {
-                [DateTimeOffset]::FromUnixTimeMilliseconds($num).LocalDateTime
-            }
-            else {
-                [DateTimeOffset]::FromUnixTimeSeconds($num).LocalDateTime
-            }
-            return $dt.ToString('dd MMM yyyy', [cultureinfo]::GetCultureInfo('en-US'))
+            if ($num -gt 100000000000) { return [DateTimeOffset]::FromUnixTimeMilliseconds($num).LocalDateTime }
+            return [DateTimeOffset]::FromUnixTimeSeconds($num).LocalDateTime
         }
-        catch { return '' }
+        catch { return $null }
     }
     $date = [datetime]::MinValue
-    if ([datetime]::TryParse([string]$Value, [ref]$date)) {
-        return $date.ToString('dd MMM yyyy', [cultureinfo]::GetCultureInfo('en-US'))
+    foreach ($culture in @([cultureinfo]::InvariantCulture, [cultureinfo]::GetCultureInfo('en-US'))) {
+        if ([datetime]::TryParse([string]$Value, $culture, [System.Globalization.DateTimeStyles]::None, [ref]$date)) { return $date }
     }
-    return [string]$Value
+    return $null
+}
+
+# The first of $Names that has a plain value on $Object; a name may be a dotted path (offering.name).
+function Get-CommvaultSubscriptionValue {
+    param($Object, [string[]]$Names)
+
+    foreach ($name in $Names) {
+        $value = $Object
+        foreach ($part in $name.Split('.')) {
+            if ($null -eq $value) { break }
+            $property = $value.PSObject.Properties[$part]
+            $value = if ($null -ne $property) { $property.Value } else { $null }
+        }
+        if ($null -ne $value -and $value -isnot [System.Management.Automation.PSCustomObject] -and $value -isnot [array] -and
+            -not [string]::IsNullOrWhiteSpace([string]$value)) {
+            return $value
+        }
+    }
+    return $null
+}
+
+# Commvault Cloud subscriptions (GET /V5/Metallic/subscription, rows in data.subscriptions) as the same
+# table the exported Subscriptions page gives (Report.ps1 Format-CommvaultSubscriptions): Service, Type,
+# dates, Purchased, Used, plus Used %; an end date within 45 days is marked, a passed one too. Field
+# names follow Commvault's own report over this API (baseOfferingDisplayName, quantity, peakUsage...),
+# with alternatives; if none is recognised, the subscriptions' own plain fields are shown as returned.
+function Format-CommvaultSubscriptionUsage {
+    param([object[]]$Subscriptions)
+
+    $invariant = [cultureinfo]::InvariantCulture
+    $enUs = [cultureinfo]::GetCultureInfo('en-US')
+    $float = [System.Globalization.NumberStyles]::Float
+    $rows = @(foreach ($subscription in $Subscriptions) {
+            $service = Get-CommvaultSubscriptionValue $subscription @('baseOfferingDisplayName', 'offeringDisplayName', 'displayName', 'serviceName', 'name', 'baseOffering.displayName', 'offering.displayName', 'baseOffering.name')
+            $unit = [string](Get-CommvaultSubscriptionValue $subscription @('unitOfMeasure', 'unitOfMeasureDisplayName', 'unit', 'uom'))
+            $purchased = Get-CommvaultSubscriptionValue $subscription @('quantity', 'purchasedQuantity', 'entitledQuantity', 'purchased')
+            $used = Get-CommvaultSubscriptionValue $subscription @('usage', 'currentUsage', 'consumedQuantity', 'used', 'peakUsage')
+            $type = [string](Get-CommvaultSubscriptionValue $subscription @('subscriptionType', 'type', 'licenseType'))
+            if ("$(Get-CommvaultSubscriptionValue $subscription @('isActive', 'active'))" -match '^(0|false)$') { $type = "$type (inactive)".Trim() }
+
+            $purchasedNumber = 0.0; $usedNumber = 0.0
+            $hasPurchased = [double]::TryParse([string]$purchased, $float, $invariant, [ref]$purchasedNumber)
+            $hasUsed = [double]::TryParse([string]$used, $float, $invariant, [ref]$usedNumber)
+            $purchasedCell = if ($hasPurchased) { "$($purchasedNumber.ToString('0.######', $invariant)) $unit".Trim() } elseif ($purchased) { "$purchased $unit".Trim() } else { '' }
+            $usedCell = if ($hasUsed) { "$($usedNumber.ToString('0.######', $invariant)) $unit".Trim() } elseif ($used) { "$used $unit".Trim() } else { '' }
+            $usedPct = if ($hasPurchased -and $hasUsed -and $purchasedNumber -gt 0) { '{0:0} %' -f ($usedNumber / $purchasedNumber * 100) } else { '' }
+
+            $start = ConvertTo-CommvaultSubscriptionDateTime (Get-CommvaultSubscriptionValue $subscription @('startDate', 'start', 'subscriptionStartDate'))
+            $end = ConvertTo-CommvaultSubscriptionDateTime (Get-CommvaultSubscriptionValue $subscription @('endDate', 'end', 'subscriptionEndDate', 'expiryDate'))
+            $endCell = ''
+            if ($end) {
+                $endCell = $end.ToString('MMM d, yyyy', $enUs)
+                $daysLeft = ($end.Date - (Get-Date).Date).Days
+                if ($daysLeft -lt 0) { $endCell += ' :no_entry:' } elseif ($daysLeft -le 45) { $endCell += ' :warning:' }
+            }
+            [PSCustomObject][ordered]@{
+                'Service'    = $service
+                'Type'       = $type
+                'Start date' = if ($start) { $start.ToString('MMM d, yyyy', $enUs) } else { '' }
+                'End date'   = $endCell
+                'Purchased'  = $purchasedCell
+                'Used'       = $usedCell
+                'Used %'     = $usedPct
+            }
+        })
+    if (@($rows | Where-Object { $_.Service }).Count -eq 0) {
+        $plain = @(foreach ($subscription in $Subscriptions) {
+                $fields = [ordered]@{}
+                foreach ($property in $subscription.PSObject.Properties) {
+                    if ($null -ne $property.Value -and $property.Value -isnot [System.Management.Automation.PSCustomObject] -and $property.Value -isnot [array]) {
+                        $fields[$property.Name] = $property.Value
+                    }
+                }
+                [PSCustomObject]$fields
+            })
+        return "Commvault Cloud subscriptions (their fields were not recognised, so they are shown as returned):`r`n`r`n$(ConvertTo-MarkdownTable -Rows $plain)"
+    }
+    return "Licence usage read from Commvault Cloud's subscriptions on $((Get-Date).ToString('yyyy-MM-dd')).`r`n`r`n$(ConvertTo-MarkdownTable -Rows $rows)"
 }
 
 function ConvertTo-ReadableBytes {
@@ -1226,95 +1300,46 @@ if ($licenseForbidden.Count -gt 0) {
 }
 }
 
-# Subscription Usage by Tenant (Commvault Cloud / Metallic). The License Summary datasets above return
-# no rows on Cloud (the tenant does not own the CommCell), but "Subscription Usage by Tenant" IS a
-# tenant report, so the tenant token reads its dataset directly - this is the licence consumption
-# (entitled quantity, peak usage, peak %) the manual Subscriptions export used to carry. Best-effort:
-# if it returns rows they replace the manual-export placeholder; if it is refused/empty it falls back
-# to that placeholder. Dataset id (report:dataset) is Commvault's shipped Subscription Usage report.
+# Commvault Cloud licence usage. The License Summary datasets give a tenant nothing, but Commvault's own
+# "Subscription Usage by Tenant" report reads the Subscriptions API: its HTTP dataset calls
+# GET /V5/Metallic/subscription (no parameters, rows in data.subscriptions) and a script dataset
+# (SubscriptionsWrapper) reshapes it. Asked from the API, that wrapper answers 200 with no rows and
+# "Bad Request. Please check the parameters.", so the Subscriptions API is read directly. With
+# subscriptions, the table replaces the manual-export placeholder (Report.ps1 then asks for no CSV);
+# without, a note says why and the placeholder / exported Subscriptions page is used as before.
 if ($Mode -eq 'Cloud') {
+    Write-CommvaultReportProgress -Status 'License usage: reading the Commvault Cloud subscriptions' -PercentComplete 16
     try {
-        Write-CommvaultReportProgress -Status 'License usage: reading Subscription Usage by Tenant' -PercentComplete 16
-        # sys_rowid is kept because some datasets require it; every field is aliased so the parsed
-        # column names are deterministic (ConvertFrom-CommvaultDataset drops sys_rowid itself).
-        $subFields = '[sys_rowid],[baseOfferingDisplayName] AS [Offering],[subscriptionType] AS [Subscription],[unitOfMeasure] AS [Unit],[quantity] AS [Entitled],[peakUsage] AS [PeakUsage],[peakUsagePct] AS [PeakPct],[isActive] AS [Active],[startDate] AS [StartDate],[endDate] AS [EndDate]'
-        # From some networks the call is reset before Commvault answers ("Could not create SSL/TLS secure
-        # channel") while every other api.metallic.io call works: a firewall/IPS between this machine and
-        # Commvault Cloud blocks the ':' in the report:dataset path and/or the bracketed fields query
-        # (looks like SQL). So up to three shapes are tried - each on a fresh connection, capped at 25 s
-        # so a dropped request cannot hang the report - and the first one Commvault actually answers wins:
-        #   1. as Command Center sends it   2. ':' sent as %3A   3. %3A and no fields query (default columns)
-        # A real HTTP answer (200/401/403...) is final and handled below; only a connection failure moves on.
-        $subPath = '/cr/reportsplusengine/datasets/e2a304c9-fc1c-4ced-a5eb-d393e500fbca:bcdb3658-e0a4-46cb-8d22-d8a732f9289c/data'
-        $subFullQuery = @{ fields = $subFields; orderby = '[baseOfferingDisplayName] Asc'; timeZoneOffset = '-60' }
-        $subShapes = @(
-            @{ EncodeDatasetColon = $false; Query = $subFullQuery }
-            @{ EncodeDatasetColon = $true;  Query = $subFullQuery }
-            @{ EncodeDatasetColon = $true;  Query = @{ timeZoneOffset = '-60' } }
-        )
-        $subResponse = $null
-        for ($subIndex = 0; $subIndex -lt $subShapes.Count; $subIndex++) {
-            $shape = $subShapes[$subIndex]
+        $subscriptionApi = $null
+        # A fresh connection capped at 25 s; one more try if the connection is reset before an answer.
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
             try {
-                $subResponse = Invoke-MetallicApi -Method GET -Path $subPath -Query $shape.Query -DisableKeepAlive -TimeoutSec 25 -EncodeDatasetColon:$shape.EncodeDatasetColon
+                $subscriptionApi = Invoke-MetallicApi -Method GET -Path '/V5/Metallic/subscription' -DisableKeepAlive -TimeoutSec 25
                 break
             }
             catch {
-                if ((Get-HttpStatusCode -Exception $_.Exception) -or $subIndex -ge $subShapes.Count - 1) { throw }
+                if ((Get-HttpStatusCode -Exception $_.Exception) -or $attempt -ge 2) { throw }
             }
         }
-        $subRowsRaw = @(ConvertFrom-CommvaultDataset -Response $subResponse)
-        if ($subRowsRaw.Count -gt 0) {
-            # Our aliases (Offering, Entitled...) come back with the fields query; without it (shape 3) the
-            # dataset's own column names do - so each value is read from a list of candidate names.
-            $pick = {
-                param($Row, [string[]]$Names)
-                Get-FirstObjectValue -InputObject $Row -Names $Names
-            }
-            $subRows = @(foreach ($r in $subRowsRaw) {
-                    $activeRaw = & $pick $r @('Active', 'isActive', 'Is Active', 'Status')
-                    $active = switch -Regex ("$activeRaw") {
-                        '^(1|true|yes)$' { 'Yes'; break }
-                        '^(0|false|no)$' { 'No'; break }
-                        default { "$activeRaw" }
-                    }
-                    $pct = "$(& $pick $r @('PeakPct', 'peakUsagePct', 'Peak Usage Pct', 'Peak Usage %', 'Peak Usage (%)', 'Peak %'))"
-                    if ($pct -match '^-?\d+(\.\d+)?$') { $pct = '{0:0.#} %' -f [double]$pct }
-                    [PSCustomObject][ordered]@{
-                        'Offering'     = & $pick $r @('Offering', 'baseOfferingDisplayName', 'Base Offering', 'Base Offering Display Name', 'Offering Name')
-                        'Subscription' = & $pick $r @('Subscription', 'subscriptionType', 'Subscription Type')
-                        'Unit'         = & $pick $r @('Unit', 'unitOfMeasure', 'Unit Of Measure', 'Unit of Measure')
-                        'Entitled'     = & $pick $r @('Entitled', 'quantity', 'Quantity')
-                        'Peak usage'   = & $pick $r @('PeakUsage', 'peakUsage', 'Peak Usage')
-                        'Peak %'       = $pct
-                        'Active'       = $active
-                        'Start'        = Format-CommvaultSubscriptionDate (& $pick $r @('StartDate', 'startDate', 'Start Date'))
-                        'End'          = Format-CommvaultSubscriptionDate (& $pick $r @('EndDate', 'endDate', 'End Date'))
-                    }
-                })
-            # If none of the candidate names matched (unexpected column names), show the dataset as it
-            # came back rather than an empty table.
-            $mapped = @($subRows | Where-Object { $_.Offering }).Count -gt 0
-            $subTable = if ($mapped) { ConvertTo-MarkdownTable -Rows $subRows } else { ConvertTo-MarkdownTable -Rows $subRowsRaw }
-            # Real subscription usage goes at the top of the licence section; a non-empty licenseSections
-            # also skips the manual-export placeholder below.
-            $licenseSections = @("### Subscription usage by tenant`r`n`r`n$subTable") + $licenseSections
+        $subscriptions = @()
+        if ($null -ne $subscriptionApi) {
+            if ($null -ne $subscriptionApi.data -and $null -ne $subscriptionApi.data.subscriptions) { $subscriptions = @($subscriptionApi.data.subscriptions) }
+            elseif ($null -ne $subscriptionApi.subscriptions) { $subscriptions = @($subscriptionApi.subscriptions) }
+            elseif ($subscriptionApi -is [array]) { $subscriptions = @($subscriptionApi) }
+        }
+        if ($subscriptions.Count -gt 0) {
+            # Real licence usage goes at the top of the licence section; a non-empty licenseSections also
+            # skips the manual-export placeholder below.
+            $licenseSections = @(Format-CommvaultSubscriptionUsage -Subscriptions $subscriptions) + $licenseSections
         }
         else {
-            $licenseNotes += '- Subscription Usage by Tenant: the dataset returned no rows.'
+            $keys = if ($null -ne $subscriptionApi) { @($subscriptionApi.PSObject.Properties.Name) -join ', ' } else { 'none' }
+            $licenseNotes += "- Commvault Cloud subscriptions (/V5/Metallic/subscription): answered without subscriptions (fields: $keys)."
         }
     }
     catch {
         $subCode = Get-HttpStatusCode -Exception $_.Exception
-        if ($subCode -eq 403) {
-            $licenseNotes += '- Subscription Usage by Tenant: Commvault refused it to this account (HTTP 403 Forbidden).'
-        }
-        elseif (-not $subCode) {
-            $licenseNotes += "- Subscription Usage by Tenant: the connection was reset before Commvault answered ($($_.Exception.Message)). Other Commvault Cloud calls work, so a firewall/proxy on this network is likely blocking Commvault's reports API path."
-        }
-        else {
-            $licenseNotes += "- Subscription Usage by Tenant: HTTP $subCode - $($_.Exception.Message)"
-        }
+        $licenseNotes += "- Commvault Cloud subscriptions (/V5/Metallic/subscription): $(if ($subCode) { "HTTP $subCode - " } else { 'no answer - ' })$($_.Exception.Message)"
     }
 }
 
