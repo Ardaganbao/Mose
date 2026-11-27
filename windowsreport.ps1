@@ -386,4 +386,9 @@ else {
 }
 $lines.Add("")
 
-$lines -join "`n"
+# Emit the real status emoji (🟢🟠🔴) rather than the :green_circle: shortcodes, which this client's
+# WordPress does not render. Built from code points so the source file stays plain ASCII.
+$pillGreen = [char]::ConvertFromUtf32(0x1F7E2)
+$pillYellow = [char]::ConvertFromUtf32(0x1F7E0)
+$pillRed = [char]::ConvertFromUtf32(0x1F534)
+($lines -join "`n") -replace ':green_circle:', $pillGreen -replace ':yellow_circle:', $pillYellow -replace ':red_circle:', $pillRed

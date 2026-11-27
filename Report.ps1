@@ -924,7 +924,7 @@ Installed programs (most recent 2 of 142):
 |---|---|---|
 | Veeam Backup & Replication Console | 12.3.0.310 | Veeam Software |
 | Google Chrome | 131.0.6778.86 | Google LLC |
-"@
+"@ -replace ':green_circle:', ([char]::ConvertFromUtf32(0x1F7E2)) -replace ':yellow_circle:', ([char]::ConvertFromUtf32(0x1F7E0)) -replace ':red_circle:', ([char]::ConvertFromUtf32(0x1F534))
         }
         'Linux' {
             @"
@@ -969,7 +969,7 @@ Installed packages (first 2 of 1843):
 |---|---|
 | openssh-server | 1:8.9p1-3ubuntu0.10 |
 | nginx | 1.18.0-6ubuntu14.4 |
-"@
+"@ -replace ':green_circle:', ([char]::ConvertFromUtf32(0x1F7E2)) -replace ':yellow_circle:', ([char]::ConvertFromUtf32(0x1F7E0)) -replace ':red_circle:', ([char]::ConvertFromUtf32(0x1F534))
         }
         default {
             "_No sample data for module '$($Target.Module)'._"
